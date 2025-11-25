@@ -1,0 +1,13 @@
+alpaca-py
+pandas
+numpy
+scikit-learn
+lightgbm
+ta-lib
+python-dotenv
+schedule
+colorama
+matplotlib
+fastapi
+uvicorn
+websockets

@@ -1,0 +1,9 @@
+{
+  "optimal_threshold": 0.15000000000000002,
+  "holdout_precision": 0.15786462675100935,
+  "holdout_recall": 0.9570904766623725,
+  "signals_per_day": 1334.9965904441515,
+  "imbalance_ratio": 6.053466914549335,
+  "horizon": 30,
+  "symbol": "ETH/USD"
+}

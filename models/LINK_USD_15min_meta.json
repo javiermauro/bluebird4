@@ -1,0 +1,9 @@
+{
+  "optimal_threshold": 0.1,
+  "holdout_precision": 0.1213235294117647,
+  "holdout_recall": 1.0,
+  "signals_per_day": 1440.0,
+  "imbalance_ratio": 7.368812589413448,
+  "horizon": 15,
+  "symbol": "LINK/USD"
+}

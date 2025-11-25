@@ -1,0 +1,9 @@
+{
+  "optimal_threshold": 0.1,
+  "holdout_precision": 0.1738988978811664,
+  "holdout_recall": 1.0,
+  "signals_per_day": 1440.0,
+  "imbalance_ratio": 5.052851629502573,
+  "horizon": 30,
+  "symbol": "SOL/USD"
+}
