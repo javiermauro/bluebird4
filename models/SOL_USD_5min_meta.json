@@ -1,9 +1,13 @@
 {
-  "optimal_threshold": 0.5,
-  "holdout_precision": 0.0,
-  "holdout_recall": 0.0,
-  "signals_per_day": 0.0,
-  "imbalance_ratio": 41.953793496862524,
-  "horizon": 5,
+  "model_type": "3class_classification",
+  "base_timeframe": "5min",
+  "classification_threshold_pct": 0.5,
+  "optimal_up_probability": 0.33,
+  "holdout_accuracy": 0.9345109348714251,
+  "holdout_up_precision": 0.3888888888888889,
+  "holdout_up_recall": 0.02631578947368421,
+  "signals_per_day": 0.6229271809661139,
+  "horizon_minutes": 5,
+  "horizon_bars": 1,
   "symbol": "SOL/USD"
 }

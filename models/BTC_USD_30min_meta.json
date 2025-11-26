@@ -1,9 +1,13 @@
 {
-  "optimal_threshold": 0.5,
-  "holdout_precision": 0.0,
-  "holdout_recall": 0.0,
-  "signals_per_day": 0.0,
-  "imbalance_ratio": 14.272194055075056,
-  "horizon": 30,
+  "model_type": "3class_classification",
+  "base_timeframe": "5min",
+  "classification_threshold_pct": 0.5,
+  "optimal_up_probability": 0.33,
+  "holdout_accuracy": 0.8476693897164824,
+  "holdout_up_precision": 0.32727272727272727,
+  "holdout_up_recall": 0.06293706293706294,
+  "signals_per_day": 3.8058625660740026,
+  "horizon_minutes": 30,
+  "horizon_bars": 6,
   "symbol": "BTC/USD"
 }

@@ -29,6 +29,101 @@ from src.data.mock_loader import MockDataLoader
 from src.strategy.feature_calculator import FeatureCalculator
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+# ============================================
+# DATA PREPROCESSING FUNCTIONS
+# ============================================
+
+def resample_to_5min(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resample 1-minute data to 5-minute bars.
+    This reduces noise and creates cleaner patterns.
+    """
+    df = df.copy()
+
+    # Ensure index is datetime
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if 'timestamp' in df.columns:
+            df = df.set_index('timestamp')
+        else:
+            df.index = pd.to_datetime(df.index)
+
+    # Resample to 5-minute bars
+    df_5min = df.resample('5min').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+
+    return df_5min
+
+
+def add_cross_asset_features(df: pd.DataFrame, btc_df: pd.DataFrame, prefix: str = 'btc') -> pd.DataFrame:
+    """
+    Add BTC cross-asset features to another asset's dataframe.
+    BTC often leads altcoin movements by minutes.
+
+    Features added:
+    - btc_momentum_5: BTC 5-bar momentum
+    - btc_momentum_15: BTC 15-bar momentum
+    - btc_rsi: BTC RSI
+    - btc_volume_ratio: BTC volume vs 20-bar average
+    - btc_return_5: BTC 5-bar return
+    - btc_macd_hist: BTC MACD histogram
+    """
+    import talib
+
+    df = df.copy()
+    btc_df = btc_df.copy()
+
+    # Ensure both have datetime index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    if not isinstance(btc_df.index, pd.DatetimeIndex):
+        btc_df.index = pd.to_datetime(btc_df.index)
+
+    # Calculate BTC features
+    btc_close = btc_df['close'].values
+    btc_volume = btc_df['volume'].values
+
+    # Momentum features
+    btc_df[f'{prefix}_momentum_5'] = btc_df['close'].pct_change(5) * 100
+    btc_df[f'{prefix}_momentum_15'] = btc_df['close'].pct_change(15) * 100
+    btc_df[f'{prefix}_return_5'] = btc_df['close'].pct_change(5) * 100
+
+    # RSI
+    btc_df[f'{prefix}_rsi'] = talib.RSI(btc_close, timeperiod=14)
+
+    # Volume ratio
+    btc_df[f'{prefix}_volume_ratio'] = btc_volume / pd.Series(btc_volume).rolling(20).mean().values
+
+    # MACD histogram
+    macd, macd_signal, macd_hist = talib.MACD(btc_close, fastperiod=12, slowperiod=26, signalperiod=9)
+    btc_df[f'{prefix}_macd_hist'] = macd_hist
+
+    # Trend direction (1 = up, -1 = down, 0 = flat)
+    btc_df[f'{prefix}_trend'] = np.sign(btc_df['close'].pct_change(10))
+
+    # Select only the cross-asset features
+    cross_features = [f'{prefix}_momentum_5', f'{prefix}_momentum_15', f'{prefix}_return_5',
+                      f'{prefix}_rsi', f'{prefix}_volume_ratio', f'{prefix}_macd_hist', f'{prefix}_trend']
+
+    btc_features = btc_df[cross_features]
+
+    # Merge on index (timestamp alignment)
+    df = df.join(btc_features, how='left')
+
+    # Forward fill any missing values (for slight timestamp misalignments)
+    for col in cross_features:
+        if col in df.columns:
+            df[col] = df[col].ffill()
+
+    return df
+
+
 logger = logging.getLogger("TrainingDashboard")
 
 # ============================================
@@ -548,9 +643,32 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
             await log(f"Using mock data: {e}")
             use_real_data = False
 
+        # ===== FETCH BTC DATA FIRST (for cross-asset features) =====
+        from datetime import timedelta
+        end_time = datetime.now()
+        holdout_start = end_time - timedelta(days=holdout_days)
+        train_start = end_time - timedelta(days=days)
+        train_end = holdout_start - timedelta(hours=1)
+
+        btc_train_5min = None
+        btc_holdout_5min = None
+
+        if use_real_data and 'BTC/USD' in symbols:
+            await log("Fetching BTC data for cross-asset features...")
+            try:
+                btc_train_raw = loader.fetch_data(symbol='BTC/USD', start_date=train_start, end_date=train_end)
+                btc_holdout_raw = loader.fetch_data(symbol='BTC/USD', start_date=holdout_start, end_date=end_time)
+
+                # Resample BTC to 5-min for cross-asset features
+                btc_train_5min = resample_to_5min(btc_train_raw)
+                btc_holdout_5min = resample_to_5min(btc_holdout_raw)
+                await log(f"BTC data ready: {len(btc_train_5min)} train, {len(btc_holdout_5min)} holdout 5-min bars")
+            except Exception as e:
+                await log(f"Could not fetch BTC for cross-asset: {e}")
+
         # ===== LOOP THROUGH ALL SYMBOLS =====
         total_symbols = len(symbols)
-        horizons = [5, 15, 30]
+        horizons = [1, 3, 6]  # Now in 5-min bars: 5min, 15min, 30min horizons
 
         for sym_idx, symbol in enumerate(symbols):
             state.current_symbol = symbol
@@ -565,26 +683,30 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
             state.status = "fetching_data"
             base_progress = (sym_idx / total_symbols) * 100
             state.progress = int(base_progress + 2)
-            await log(f"Fetching {train_days} days of TRAINING data for {symbol}...")
-            await log(f"(Holdout: last {holdout_days} days will be fetched separately)")
+            await log(f"Fetching {train_days} days of data for {symbol}...")
+            await log(f"(Will resample to 5-min bars, holdout: last {holdout_days} days)")
             await broadcast_state()
-
-            # Calculate date ranges
-            from datetime import timedelta
-            end_time = datetime.now()
-            holdout_start = end_time - timedelta(days=holdout_days)
-            train_start = end_time - timedelta(days=days)
-            train_end = holdout_start - timedelta(hours=1)  # Small gap to ensure no overlap
 
             try:
                 if use_real_data:
                     # Fetch TRAINING data (excludes holdout period)
-                    df_train = loader.fetch_data(symbol=symbol, start_date=train_start, end_date=train_end)
-                    await log(f"Fetched {len(df_train)} TRAINING bars for {symbol}")
+                    df_train_raw = loader.fetch_data(symbol=symbol, start_date=train_start, end_date=train_end)
+                    await log(f"Fetched {len(df_train_raw)} 1-min TRAINING bars for {symbol}")
 
                     # Fetch HOLDOUT data (SEPARATELY - this is critical!)
-                    df_holdout = loader.fetch_data(symbol=symbol, start_date=holdout_start, end_date=end_time)
-                    await log(f"Fetched {len(df_holdout)} HOLDOUT bars for {symbol}")
+                    df_holdout_raw = loader.fetch_data(symbol=symbol, start_date=holdout_start, end_date=end_time)
+                    await log(f"Fetched {len(df_holdout_raw)} 1-min HOLDOUT bars for {symbol}")
+
+                    # ===== RESAMPLE TO 5-MINUTE BARS =====
+                    df_train = resample_to_5min(df_train_raw)
+                    df_holdout = resample_to_5min(df_holdout_raw)
+                    await log(f"Resampled to 5-min: {len(df_train)} train, {len(df_holdout)} holdout bars")
+
+                    # ===== ADD CROSS-ASSET FEATURES (BTC as leading indicator) =====
+                    if symbol != 'BTC/USD' and btc_train_5min is not None:
+                        df_train = add_cross_asset_features(df_train, btc_train_5min, prefix='btc')
+                        df_holdout = add_cross_asset_features(df_holdout, btc_holdout_5min, prefix='btc')
+                        await log(f"Added BTC cross-asset features for {symbol}")
                 else:
                     # Mock data - simulate separate fetches
                     df_train = MockDataLoader.fetch_data(days=train_days, symbol=symbol)
@@ -606,12 +728,22 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
             # ===== CALCULATE FEATURES INDEPENDENTLY =====
             # CRITICAL: Features calculated ONLY on training data, NOT on full dataset!
             state.status = "calculating_features"
-            await log(f"Calculating features for {symbol} (TRAINING data only)...")
+            await log(f"Calculating features for {symbol} (5-min bars, TRAINING data only)...")
             await broadcast_state()
 
             # Use FeatureCalculator for independent calculation (no data leakage)
             df_train_features = FeatureCalculator.calculate_features(df_train, drop_warmup=True)
+
+            # Get base feature columns and add cross-asset if available
             feature_cols = FeatureCalculator.get_feature_columns()
+            cross_asset_cols = ['btc_momentum_5', 'btc_momentum_15', 'btc_return_5',
+                               'btc_rsi', 'btc_volume_ratio', 'btc_macd_hist', 'btc_trend']
+
+            # Add cross-asset columns if they exist in the data
+            if symbol != 'BTC/USD':
+                for col in cross_asset_cols:
+                    if col in df_train_features.columns and col not in feature_cols:
+                        feature_cols.append(col)
 
             # Check for missing columns
             missing_cols = [c for c in feature_cols if c not in df_train_features.columns]
@@ -636,39 +768,69 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                 await log(f"Calculated features on {len(df_holdout_features)} HOLDOUT samples")
 
             # ===== TRAIN EACH HORIZON FOR THIS SYMBOL =====
+            # horizons = [1, 3, 6] meaning 1, 3, 6 5-minute bars = 5, 15, 30 minutes
             for h_idx, horizon in enumerate(horizons):
-                state.current_horizon = horizon
+                horizon_minutes = horizon * 5  # Convert 5-min bars to minutes
+                state.current_horizon = horizon_minutes  # Display in minutes
                 await log(f"\n{'='*40}")
-                await log(f"Training {horizon}-minute model for {symbol}")
+                await log(f"Training {horizon_minutes}-minute model for {symbol}")
+                await log(f"(Predicting {horizon} 5-min bars ahead)")
                 await log(f"{'='*40}")
 
-                # Create target: SIGNIFICANT MOVE (>0.5% up)
+                # Create target: 3-CLASS CLASSIFICATION
+                # Class 0: Big move DOWN (< -threshold)
+                # Class 1: SIDEWAYS (between -threshold and +threshold)
+                # Class 2: Big move UP (> +threshold)
                 future_close = df_train_features['close'].shift(-horizon)
                 current_close = df_train_features['close']
 
                 # Calculate percentage change
-                pct_change = (future_close - current_close) / current_close
+                pct_change = (future_close - current_close) / current_close * 100  # As percentage
+
+                # Store raw returns for evaluation later
+                pct_change_raw = pct_change.copy()
+
+                # Convert to 3-class labels
+                CLASSIFICATION_THRESHOLD = 0.5  # 0.5% threshold for "big move"
+                def classify_return(ret):
+                    if ret < -CLASSIFICATION_THRESHOLD:
+                        return 0  # DOWN
+                    elif ret > CLASSIFICATION_THRESHOLD:
+                        return 2  # UP
+                    else:
+                        return 1  # SIDEWAYS
+
+                y_class = pct_change.apply(classify_return)
 
                 valid_idx = features.index.intersection(future_close.dropna().index)
                 X = features.loc[valid_idx].iloc[:-horizon]
 
-                # Target: 1 if price moves up > 0.5%, else 0
-                y = (pct_change.loc[valid_idx] > MOVE_THRESHOLD).astype(int).iloc[:-horizon]
+                # Target: 3-class classification (0=DOWN, 1=SIDEWAYS, 2=UP)
+                y = y_class.loc[valid_idx].iloc[:-horizon]
+                y_returns = pct_change_raw.loc[valid_idx].iloc[:-horizon]  # Keep raw returns for analysis
 
                 if len(X) < 100:
-                    await log(f"Not enough samples ({len(X)}) for horizon {horizon}, skipping...")
+                    await log(f"Not enough samples ({len(X)}) for horizon {horizon_minutes}min, skipping...")
                     continue
 
-                # Log target distribution
-                up_pct = y.mean() * 100
+                # Log class distribution
+                class_counts = y.value_counts().sort_index()
+                n_down = class_counts.get(0, 0)
+                n_sideways = class_counts.get(1, 0)
+                n_up = class_counts.get(2, 0)
                 await log(f"Training samples: {len(X)}")
-                await log(f"Target: {up_pct:.1f}% significant up moves (>{MOVE_THRESHOLD*100}%)")
+                await log(f"Target: 3-class over {horizon} 5-min bars ({horizon_minutes} minutes)")
+                await log(f"Class distribution: DOWN={n_down} ({100*n_down/len(y):.1f}%), SIDEWAYS={n_sideways} ({100*n_sideways/len(y):.1f}%), UP={n_up} ({100*n_up/len(y):.1f}%)")
 
-                # Calculate class imbalance ratio for logging
-                pos_count = y.sum()
-                neg_count = len(y) - pos_count
-                imbalance_ratio = neg_count / max(pos_count, 1)
-                await log(f"Class balance: {neg_count}:{pos_count} (neg:pos), ratio={imbalance_ratio:.1f}:1")
+                # Calculate class weights for imbalanced data
+                total = len(y)
+                class_weights = {
+                    0: total / (3 * n_down) if n_down > 0 else 1.0,
+                    1: total / (3 * n_sideways) if n_sideways > 0 else 1.0,
+                    2: total / (3 * n_up) if n_up > 0 else 1.0
+                }
+                await log(f"Class weights: DOWN={class_weights[0]:.2f}, SIDEWAYS={class_weights[1]:.2f}, UP={class_weights[2]:.2f}")
+                imbalance_ratio = max(class_weights.values()) / min(class_weights.values())
 
                 # ===== HYPERPARAMETER TUNING =====
                 if tune:
@@ -680,20 +842,22 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
 
                     best_params = await tune_hyperparameters(X, y, tune_iterations, horizon)
                 else:
-                    # Default LightGBM parameters
+                    # Default LightGBM parameters for MULTICLASS CLASSIFICATION
+                    # 3 classes: DOWN (0), SIDEWAYS (1), UP (2)
                     best_params = {
-                        'max_depth': 5,
+                        'max_depth': 6,
                         'learning_rate': 0.05,
                         'min_child_samples': 20,
                         'bagging_fraction': 0.8,
                         'feature_fraction': 0.8,
                         'num_leaves': 31,
-                        'objective': 'binary',
-                        'metric': 'binary_logloss',
+                        'objective': 'multiclass',  # Multiclass classification
+                        'num_class': 3,  # 3 classes
+                        'metric': 'multi_logloss',  # Multiclass log loss
                         'verbosity': -1,
                         'bagging_freq': 1,
                         'feature_pre_filter': False,
-                        'is_unbalance': True,  # Let LightGBM handle class imbalance
+                        'is_unbalance': True,  # Handle class imbalance automatically
                     }
 
                 # ===== WALK-FORWARD VALIDATION =====
@@ -717,14 +881,14 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                     test_start = test_end - test_size
 
                     # Add warmup buffer between train and test to prevent boundary contamination
-                    train_end = test_start - warmup_buffer
+                    fold_train_end = test_start - warmup_buffer
 
-                    if train_end < test_size * 2:
+                    if fold_train_end < test_size * 2:
                         await log(f"Fold {fold + 1}: Skipping - not enough training data after buffer")
                         continue
 
-                    X_train, X_test = X.iloc[:train_end], X.iloc[test_start:test_end]
-                    y_train, y_test = y.iloc[:train_end], y.iloc[test_start:test_end]
+                    X_train, X_test = X.iloc[:fold_train_end], X.iloc[test_start:test_end]
+                    y_train, y_test = y.iloc[:fold_train_end], y.iloc[test_start:test_end]
 
                     await log(f"Fold {fold + 1}: Train={len(X_train)}, Buffer={warmup_buffer}, Test={len(X_test)}")
 
@@ -747,8 +911,9 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                         ]
                     )
 
-                    # Calculate fold accuracy
-                    y_pred = (model.predict(X_test) > 0.5).astype(int)
+                    # Calculate fold accuracy (multiclass - returns probabilities for 3 classes)
+                    y_pred_proba = model.predict(X_test)  # Shape: (n_samples, 3)
+                    y_pred = np.argmax(y_pred_proba, axis=1)  # Get class with highest probability
                     accuracy = (y_pred == y_test.values).mean()
 
                     fold_metrics.append({
@@ -790,21 +955,24 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                     ]
                 )
 
-                # Calculate final metrics
-                y_pred_proba = final_model.predict(X_test)
-                y_pred = (y_pred_proba > 0.5).astype(int)
+                # Calculate final metrics (multiclass)
+                y_pred_proba = final_model.predict(X_test)  # Shape: (n_samples, 3) for 3 classes
+                y_pred = np.argmax(y_pred_proba, axis=1)  # Get class with highest probability
 
                 accuracy = (y_pred == y_test.values).mean()
 
-                # Confident predictions
-                confident_mask = (y_pred_proba > 0.65) | (y_pred_proba < 0.35)
+                # Confident predictions (when one class has > 50% probability)
+                max_proba = y_pred_proba.max(axis=1)
+                confident_mask = max_proba > 0.5
                 confident_acc = (y_pred[confident_mask] == y_test.values[confident_mask]).mean() if confident_mask.sum() > 0 else 0
 
-                # Buy precision
-                buy_mask = y_pred_proba > 0.65
-                buy_precision = y_test.values[buy_mask].mean() if buy_mask.sum() > 0 else 0
+                # UP class (class 2) precision - this is our "buy signal"
+                up_proba = y_pred_proba[:, 2]  # Probability of UP class
+                buy_mask = y_pred == 2  # Predicted as UP
+                actual_up = y_test.values == 2  # Actually went UP
+                buy_precision = actual_up[buy_mask].mean() if buy_mask.sum() > 0 else 0
 
-                state.metrics[horizon] = {
+                state.metrics[horizon_minutes] = {
                     "accuracy": round(accuracy * 100, 1) if not np.isnan(accuracy) else 0,
                     "confident_accuracy": round(confident_acc * 100, 1) if not np.isnan(confident_acc) else 0,
                     "buy_precision": round(buy_precision * 100, 1) if not np.isnan(buy_precision) else 0,
@@ -815,11 +983,11 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                 # Feature importance (LightGBM returns dict of feature_name: importance)
                 importance = dict(zip(feature_cols, final_model.feature_importance(importance_type='gain')))
                 total = sum(importance.values()) if importance else 1
-                state.feature_importance[horizon] = {k: round(v/total, 3) for k, v in importance.items()}
+                state.feature_importance[horizon_minutes] = {k: round(v/total, 3) for k, v in importance.items()}
 
                 # Save model with symbol name (sanitize symbol for filename)
                 symbol_safe = symbol.replace("/", "_")
-                model_path = f"models/{symbol_safe}_{horizon}min.txt"
+                model_path = f"models/{symbol_safe}_{horizon_minutes}min.txt"
                 os.makedirs(os.path.dirname(model_path), exist_ok=True)
                 final_model.save_model(model_path)
                 await log(f"Saved model: {model_path}")
@@ -827,94 +995,105 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                 # ===== HOLDOUT EVALUATION (TRUE OUT-OF-SAMPLE) =====
                 # This is the REAL test - data the model has NEVER seen!
                 if not df_holdout.empty and len(df_holdout_features) > horizon + 10:
-                    await log(f"\n>>> HOLDOUT EVALUATION for {horizon}-min model <<<")
+                    await log(f"\n>>> HOLDOUT EVALUATION for {horizon_minutes}-min model <<<")
 
                     # Prepare holdout features
                     holdout_feature_cols = [c for c in feature_cols if c in df_holdout_features.columns]
                     X_holdout = df_holdout_features[holdout_feature_cols]
 
-                    # Create holdout target
+                    # Create holdout target (actual % returns and 3-class labels)
                     holdout_future_close = df_holdout_features['close'].shift(-horizon)
                     holdout_current_close = df_holdout_features['close']
-                    holdout_pct_change = (holdout_future_close - holdout_current_close) / holdout_current_close
+                    holdout_pct_change = (holdout_future_close - holdout_current_close) / holdout_current_close * 100
 
                     holdout_valid_idx = X_holdout.index.intersection(holdout_future_close.dropna().index)
                     X_holdout_final = X_holdout.loc[holdout_valid_idx].iloc[:-horizon]
-                    y_holdout = (holdout_pct_change.loc[holdout_valid_idx] > MOVE_THRESHOLD).astype(int).iloc[:-horizon]
+                    y_holdout_returns = holdout_pct_change.loc[holdout_valid_idx].iloc[:-horizon]
+
+                    # Create 3-class labels for holdout
+                    CLASSIFICATION_THRESHOLD = 0.5
+                    y_holdout_class = y_holdout_returns.apply(
+                        lambda x: 0 if x < -CLASSIFICATION_THRESHOLD else (2 if x > CLASSIFICATION_THRESHOLD else 1)
+                    )
 
                     if len(X_holdout_final) > 10:
-                        # Evaluate on holdout
-                        y_holdout_pred_proba = final_model.predict(X_holdout_final)
-                        y_true = y_holdout.values
+                        # Evaluate on holdout - multiclass classification
+                        y_holdout_pred_proba = final_model.predict(X_holdout_final)  # Shape: (n, 3)
+                        y_holdout_pred = np.argmax(y_holdout_pred_proba, axis=1)
+                        y_true = y_holdout_class.values
+                        y_actual_returns = y_holdout_returns.values
 
-                        # Diagnostic: Show prediction distribution
-                        actual_positives = y_true.sum()
-                        max_prob = y_holdout_pred_proba.max()
-                        mean_prob = y_holdout_pred_proba.mean()
-                        std_prob = y_holdout_pred_proba.std()
+                        # Class distribution diagnostics
+                        n_down_true = (y_true == 0).sum()
+                        n_sideways_true = (y_true == 1).sum()
+                        n_up_true = (y_true == 2).sum()
 
-                        await log(f"  Prediction distribution: max={max_prob:.3f}, mean={mean_prob:.3f}, std={std_prob:.3f}")
-                        await log(f"  Actual buys: {actual_positives} ({100*actual_positives/len(y_true):.1f}%)")
+                        n_down_pred = (y_holdout_pred == 0).sum()
+                        n_sideways_pred = (y_holdout_pred == 1).sum()
+                        n_up_pred = (y_holdout_pred == 2).sum()
 
-                        # ===== FIND OPTIMAL THRESHOLD =====
-                        # Test multiple thresholds and find best precision with reasonable signal count
-                        # Start from low threshold since model may output conservative probabilities
-                        thresholds = np.arange(0.1, 0.7, 0.05)
-                        best_threshold = 0.5
+                        await log(f"  Actual classes: DOWN={n_down_true}, SIDEWAYS={n_sideways_true}, UP={n_up_true}")
+                        await log(f"  Predicted classes: DOWN={n_down_pred}, SIDEWAYS={n_sideways_pred}, UP={n_up_pred}")
+
+                        # Overall accuracy
+                        holdout_accuracy = (y_holdout_pred == y_true).mean()
+                        await log(f"  Overall accuracy: {holdout_accuracy:.1%}")
+
+                        # Per-class precision and recall
+                        class_names = ['DOWN', 'SIDEWAYS', 'UP']
+                        for cls in [0, 1, 2]:
+                            pred_as_cls = y_holdout_pred == cls
+                            actual_cls = y_true == cls
+
+                            precision = actual_cls[pred_as_cls].mean() if pred_as_cls.sum() > 0 else 0
+                            recall = pred_as_cls[actual_cls].mean() if actual_cls.sum() > 0 else 0
+
+                            await log(f"  {class_names[cls]}: Precision={precision:.1%}, Recall={recall:.1%}")
+
+                        # ===== UP CLASS ANALYSIS (BUY SIGNALS) =====
+                        # Test different confidence thresholds for UP predictions
+                        up_proba = y_holdout_pred_proba[:, 2]  # Probability of UP class
+                        actual_up = y_true == 2
+
+                        await log(f"  \n  UP class probability thresholds:")
+                        best_threshold = 0.33  # Default (equal probability)
                         best_f1 = 0
-                        threshold_results = []
 
-                        for thresh in thresholds:
-                            preds = (y_holdout_pred_proba > thresh).astype(int)
-                            n_signals = preds.sum()
-
+                        for thresh in [0.33, 0.4, 0.5, 0.6, 0.7, 0.8]:
+                            pred_up = up_proba > thresh
+                            n_signals = pred_up.sum()
                             if n_signals > 0:
-                                precision = y_true[preds == 1].mean() if preds.sum() > 0 else 0
-                                recall = preds[y_true == 1].mean() if y_true.sum() > 0 else 0
-                                # F0.5 score (precision-weighted)
+                                precision = actual_up[pred_up].mean()
+                                recall = pred_up[actual_up].mean() if actual_up.sum() > 0 else 0
                                 f05 = (1.25 * precision * recall) / (0.25 * precision + recall) if (precision + recall) > 0 else 0
-                                threshold_results.append({
-                                    'threshold': thresh,
-                                    'precision': precision,
-                                    'recall': recall,
-                                    'f05': f05,
-                                    'signals': n_signals
-                                })
+                                await log(f"    @{thresh:.0%}: Prec={precision:.1%}, Recall={recall:.1%}, Signals={n_signals}")
                                 if f05 > best_f1:
                                     best_f1 = f05
                                     best_threshold = thresh
 
-                        # Show threshold analysis
-                        await log(f"  Threshold analysis:")
-                        for tr in threshold_results[:5]:  # Show top 5
-                            await log(f"    @{tr['threshold']:.2f}: Prec={tr['precision']*100:.1f}%, Recall={tr['recall']*100:.1f}%, Signals={tr['signals']}")
-
-                        await log(f"  📊 OPTIMAL THRESHOLD: {best_threshold:.2f}")
+                        await log(f"  📊 OPTIMAL UP THRESHOLD: {best_threshold:.0%} probability")
 
                         # Calculate final metrics at optimal threshold
-                        y_holdout_pred = (y_holdout_pred_proba > best_threshold).astype(int)
-                        holdout_accuracy = (y_holdout_pred == y_true).mean()
+                        y_buy_signal = up_proba > best_threshold
+                        n_buy_signals = y_buy_signal.sum()
+                        holdout_buy_precision = actual_up[y_buy_signal].mean() if n_buy_signals > 0 else 0
+                        holdout_recall = y_buy_signal[actual_up].mean() if actual_up.sum() > 0 else 0
 
-                        # Precision/Recall at optimal threshold
-                        n_buy_signals = y_holdout_pred.sum()
-                        holdout_buy_precision = y_true[y_holdout_pred == 1].mean() if n_buy_signals > 0 else 0
-                        holdout_recall = y_holdout_pred[y_true == 1].mean() if y_true.sum() > 0 else 0
-
-                        # Calculate signals per day (assuming ~1440 1-min bars per day)
-                        bars_per_day = 1440
+                        # Calculate signals per day (assuming ~288 5-min bars per day)
+                        bars_per_day = 288  # 5-min bars
                         signals_per_day = (n_buy_signals / len(y_holdout_pred)) * bars_per_day
 
-                        await log(f"  HOLDOUT Results @{best_threshold:.2f}:")
-                        await log(f"    Accuracy: {holdout_accuracy:.1%}")
-                        await log(f"    Buy Precision: {holdout_buy_precision:.1%} ({n_buy_signals} signals)")
-                        await log(f"    Buy Recall: {holdout_recall:.1%}")
+                        await log(f"  HOLDOUT Results @{best_threshold:.0%}:")
+                        await log(f"    3-Class Accuracy: {holdout_accuracy:.1%}")
+                        await log(f"    UP Precision: {holdout_buy_precision:.1%} ({n_buy_signals} signals)")
+                        await log(f"    UP Recall: {holdout_recall:.1%}")
                         await log(f"    Signals/day: ~{signals_per_day:.1f}")
 
                         # Store holdout metrics
                         if symbol not in state.holdout_metrics:
                             state.holdout_metrics[symbol] = {}
 
-                        state.holdout_metrics[symbol][horizon] = {
+                        state.holdout_metrics[symbol][horizon_minutes] = {
                             "accuracy": round(holdout_accuracy * 100, 1) if not np.isnan(holdout_accuracy) else 0,
                             "buy_precision": round(holdout_buy_precision * 100, 1) if not np.isnan(holdout_buy_precision) else 0,
                             "recall": round(holdout_recall * 100, 1) if not np.isnan(holdout_recall) else 0,
@@ -923,16 +1102,20 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                             "total_samples": len(X_holdout_final)
                         }
 
-                        # Save optimal threshold to metadata file
+                        # Save metadata file
                         import json
                         metadata_path = model_path.replace('.txt', '_meta.json')
                         metadata = {
-                            'optimal_threshold': float(best_threshold),
-                            'holdout_precision': float(holdout_buy_precision),
-                            'holdout_recall': float(holdout_recall),
+                            'model_type': '3class_classification',  # DOWN/SIDEWAYS/UP
+                            'base_timeframe': '5min',  # Using 5-minute bars
+                            'classification_threshold_pct': CLASSIFICATION_THRESHOLD,  # For UP/DOWN class definition
+                            'optimal_up_probability': float(best_threshold),  # Buy if UP prob > this
+                            'holdout_accuracy': float(holdout_accuracy),
+                            'holdout_up_precision': float(holdout_buy_precision),
+                            'holdout_up_recall': float(holdout_recall),
                             'signals_per_day': float(signals_per_day),
-                            'imbalance_ratio': float(imbalance_ratio),
-                            'horizon': horizon,
+                            'horizon_minutes': horizon_minutes,
+                            'horizon_bars': horizon,
                             'symbol': symbol
                         }
                         with open(metadata_path, 'w') as f:
@@ -940,7 +1123,7 @@ async def run_training(config: UltraConfig, days: int = 180, tune: bool = True, 
                         await log(f"  Saved metadata: {metadata_path}")
 
                         # Compare to training metrics
-                        train_acc = state.metrics[horizon]['accuracy']
+                        train_acc = state.metrics[horizon_minutes]['accuracy']
                         holdout_acc = round(holdout_accuracy * 100, 1)
                         gap = train_acc - holdout_acc
                         if gap > 10:
@@ -1026,12 +1209,12 @@ async def tune_hyperparameters(X: pd.DataFrame, y: pd.Series, n_iter: int, horiz
     }
 
     fixed_params = {
-        'objective': 'binary',
-        'metric': 'binary_logloss',
+        'objective': 'quantile',  # Quantile regression - predict upper bound
+        'alpha': 0.8,  # 80th percentile (identifies high upside potential)
+        'metric': 'quantile',  # Quantile loss
         'verbosity': -1,
         'bagging_freq': 1,  # Required when using bagging_fraction
         'feature_pre_filter': False,  # Allow dynamic min_data_in_leaf changes
-        'is_unbalance': True,  # Let LightGBM handle class imbalance
     }
 
     best_params = None
@@ -1067,8 +1250,12 @@ async def tune_hyperparameters(X: pd.DataFrame, y: pd.Series, n_iter: int, horiz
             callbacks=[lgb.early_stopping(stopping_rounds=10, verbose=False)]
         )
 
-        # Get best score from model
-        score = model.best_score['valid']['binary_logloss'] if model.best_score else float('inf')
+        # Get best score from model (quantile loss for quantile regression)
+        if model.best_score:
+            # Try quantile first, fall back to l1 for compatibility
+            score = model.best_score['valid'].get('quantile', model.best_score['valid'].get('l1', float('inf')))
+        else:
+            score = float('inf')
 
         state.tuning_history.append({
             "iteration": i + 1,

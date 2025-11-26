@@ -7,9 +7,12 @@ Now includes full Ultra system state broadcasting.
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import logging
 import json
 import asyncio
+import os
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -17,6 +20,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("API")
 
 app = FastAPI(title="BlueBird ULTRA API", version="4.0")
+
+# Serve the dashboard static files
+DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard", "dist")
+if os.path.exists(DASHBOARD_PATH):
+    app.mount("/assets", StaticFiles(directory=os.path.join(DASHBOARD_PATH, "assets")), name="assets")
 
 # Enable CORS for Frontend
 app.add_middleware(
@@ -316,17 +324,29 @@ async def broadcast_log(message: str):
         "timestamp": datetime.now().isoformat(),
         "message": message
     }
-    
+
     system_state["logs"].append(log_entry)
-    
+
     # Keep logs limited to last 100
     if len(system_state["logs"]) > 100:
         system_state["logs"].pop(0)
-    
+
     await manager.broadcast({
         "type": "log",
         "data": log_entry
     })
+
+
+# Serve React dashboard (catch-all route - must be LAST)
+@app.get("/dashboard")
+@app.get("/dashboard/{full_path:path}")
+async def serve_dashboard(full_path: str = ""):
+    """Serve React SPA dashboard."""
+    if os.path.exists(DASHBOARD_PATH):
+        index_path = os.path.join(DASHBOARD_PATH, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+    return {"error": "Dashboard not built. Run: cd dashboard && npm run build"}
 
 
 # For running directly

@@ -1,9 +1,13 @@
 {
-  "optimal_threshold": 0.20000000000000004,
-  "holdout_precision": 0.19009485932335474,
-  "holdout_recall": 0.9849624060150376,
-  "signals_per_day": 1412.8165783437476,
-  "imbalance_ratio": 4.235103264639413,
-  "horizon": 30,
+  "model_type": "3class_classification",
+  "base_timeframe": "5min",
+  "classification_threshold_pct": 0.5,
+  "optimal_up_probability": 0.33,
+  "holdout_accuracy": 0.5885535649873752,
+  "holdout_up_precision": 0.34032634032634035,
+  "holdout_up_recall": 0.08946078431372549,
+  "signals_per_day": 14.855356498737526,
+  "horizon_minutes": 30,
+  "horizon_bars": 6,
   "symbol": "LINK/USD"
 }

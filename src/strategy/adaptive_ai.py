@@ -91,12 +91,22 @@ class AdaptiveAI:
         self.win_count = 0
         self.loss_count = 0
         
-        # Thresholds (configurable)
-        self.buy_threshold = getattr(config, 'BUY_THRESHOLD', 0.65)
-        self.sell_threshold = getattr(config, 'SELL_THRESHOLD', 0.35)
+        # Thresholds for 3-CLASS CLASSIFICATION model
+        # up_threshold: UP class probability must exceed this to trigger BUY
+        # down_threshold: DOWN class probability must exceed this to trigger SELL
+        self.up_threshold = getattr(config, 'UP_THRESHOLD', 0.33)  # Default: equal probability
+        self.down_threshold = getattr(config, 'DOWN_THRESHOLD', 0.33)
         self.min_confidence = getattr(config, 'MIN_CONFIDENCE', 70)
-        
+
+        # Model type (will be detected from metadata)
+        self.model_type = '3class_classification'
+
+        # Try to load optimal threshold from metadata
+        self._load_optimal_threshold()
+
         logger.info(f"AdaptiveAI initialized. Model: {'Loaded' if self.model else 'Not available'}")
+        logger.info(f"Model type: {self.model_type}")
+        logger.info(f"UP threshold: {self.up_threshold:.0%}, DOWN threshold: {self.down_threshold:.0%}")
         
     def _load_model(self) -> Optional[Any]:
         """Load LightGBM model from disk."""
@@ -115,6 +125,34 @@ class AdaptiveAI:
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             return None
+
+    def _load_optimal_threshold(self):
+        """Load optimal threshold from model metadata if available."""
+        import json
+        metadata_path = self.model_path.replace('.txt', '_meta.json')
+
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+
+                # Detect model type
+                self.model_type = metadata.get('model_type', '3class_classification')
+
+                # Load thresholds based on model type
+                if self.model_type == '3class_classification':
+                    # 3-class classification: use UP probability threshold
+                    if 'optimal_up_probability' in metadata:
+                        self.up_threshold = metadata['optimal_up_probability']
+                        logger.info(f"Loaded optimal UP threshold from metadata: {self.up_threshold:.0%}")
+                else:
+                    # Legacy regression model
+                    if 'optimal_threshold_pct' in metadata:
+                        self.up_threshold = metadata['optimal_threshold_pct']
+                        logger.info(f"Loaded optimal threshold from metadata (regression): {self.up_threshold}%")
+
+            except Exception as e:
+                logger.warning(f"Could not load metadata: {e}")
 
     def _load_multi_horizon_models(self) -> Dict[int, Any]:
         """Load multi-horizon models if available (5, 15, 30 min)."""
@@ -608,23 +646,29 @@ class AdaptiveAI:
         
         ind = self.indicators[symbol]['1min']
         
-        # Get AI prediction
+        # Get AI prediction (3-class classification)
         prediction = self._get_ai_prediction(symbol)
-        
+
+        # Extract probabilities from prediction
+        up_prob = prediction.get('up_prob', 0.33) if prediction else 0.33
+        down_prob = prediction.get('down_prob', 0.33) if prediction else 0.33
+        sideways_prob = prediction.get('sideways_prob', 0.34) if prediction else 0.34
+        model_signal = prediction.get('signal', 'HOLD') if prediction else 'HOLD'
+
         # Build reasoning list
         reasoning = []
         confidence_scores = []
-        
-        # 1. AI Model prediction (35% weight)
+
+        # 1. AI Model prediction (35% weight) - now based on class probabilities
         if prediction is not None:
-            if prediction > 0.65:
-                reasoning.append(f"Model bullish ({prediction:.0%})")
-                confidence_scores.append(prediction * 100)
-            elif prediction < 0.35:
-                reasoning.append(f"Model bearish ({prediction:.0%})")
-                confidence_scores.append((1 - prediction) * 100)
+            if up_prob > self.up_threshold and up_prob > down_prob:
+                reasoning.append(f"Model: UP {up_prob:.0%} (>{self.up_threshold:.0%})")
+                confidence_scores.append(up_prob * 100)
+            elif down_prob > self.down_threshold and down_prob > up_prob:
+                reasoning.append(f"Model: DOWN {down_prob:.0%} (>{self.down_threshold:.0%})")
+                confidence_scores.append(down_prob * 100)
             else:
-                reasoning.append(f"Model neutral ({prediction:.0%})")
+                reasoning.append(f"Model: SIDEWAYS {sideways_prob:.0%}")
                 confidence_scores.append(50)
         else:
             reasoning.append("Model unavailable")
@@ -707,13 +751,19 @@ class AdaptiveAI:
         overall_confidence += alignment_bonus
         overall_confidence = min(overall_confidence, 95)  # Cap at 95%
         
-        # Determine signal
+        # Determine signal based on 3-class classification probabilities
+        # Signal triggers when:
+        # - UP probability > threshold AND UP > DOWN
+        # - OR DOWN probability > threshold AND DOWN > UP
+        # Plus RSI filter and minimum confidence check
         signal = 'HOLD'
         if prediction is not None:
-            if prediction > self.buy_threshold and rsi < 60 and overall_confidence >= self.min_confidence:
+            if model_signal == 'BUY' and rsi < 65 and overall_confidence >= self.min_confidence:
                 signal = 'BUY'
-            elif prediction < self.sell_threshold and rsi > 40 and overall_confidence >= self.min_confidence:
+                reasoning.append(f"UP prob {up_prob:.0%} > {self.up_threshold:.0%} threshold")
+            elif model_signal == 'SELL' and rsi > 35 and overall_confidence >= self.min_confidence:
                 signal = 'SELL'
+                reasoning.append(f"DOWN prob {down_prob:.0%} > {self.down_threshold:.0%} threshold")
         else:
             # Fallback to indicator-based signals when model unavailable
             if rsi < 30 and vol_ratio > 0.5 and overall_confidence >= self.min_confidence:
@@ -723,7 +773,12 @@ class AdaptiveAI:
         
         # Build full AI state
         ai_state = {
-            'prediction': prediction,
+            'prediction': {
+                'up_prob': round(up_prob, 3),
+                'down_prob': round(down_prob, 3),
+                'sideways_prob': round(sideways_prob, 3),
+                'model_signal': model_signal
+            } if prediction else None,
             'confidence': int(overall_confidence),
             'signal': signal,
             'reasoning': reasoning,
@@ -763,9 +818,10 @@ class AdaptiveAI:
                 'price_position': round(ind.get('price_position', 0.5), 2),
             },
             'thresholds': {
-                'buy_threshold': self.buy_threshold,
-                'sell_threshold': self.sell_threshold,
-                'min_confidence': self.min_confidence
+                'up_threshold': self.up_threshold,
+                'down_threshold': self.down_threshold,
+                'min_confidence': self.min_confidence,
+                'model_type': self.model_type
             },
             'multi_timeframe': tf_signals,
             'feature_importance': self.FEATURE_WEIGHTS,
@@ -777,16 +833,23 @@ class AdaptiveAI:
         
         return ai_state
     
-    def _get_ai_prediction(self, symbol: str) -> Optional[float]:
+    def _get_ai_prediction(self, symbol: str) -> Optional[Dict]:
         """
-        Get prediction from XGBoost model(s).
+        Get prediction from 3-class classification model(s).
 
         Uses SYMBOL-SPECIFIC models if available, otherwise falls back to defaults.
 
-        Combines predictions with weights:
+        For 3-class models, combines predictions with weights:
         - 5-min: 50% (short-term scalping)
         - 15-min: 30% (medium-term confirmation)
         - 30-min: 20% (trend direction)
+
+        Returns:
+            Dict with:
+                - up_prob: Probability of UP class (>0.5% move)
+                - down_prob: Probability of DOWN class (<-0.5% move)
+                - sideways_prob: Probability of SIDEWAYS class
+                - signal: 'BUY', 'SELL', or 'HOLD'
         """
         # Get models for this specific symbol
         symbol_models = self.get_models_for_symbol(symbol)
@@ -871,27 +934,78 @@ class AdaptiveAI:
 
             # Use symbol-specific multi-horizon models if available
             if symbol_models:
-                predictions = {}
+                # Collect predictions from each horizon model
+                all_probs = {'up': [], 'down': [], 'sideways': []}
                 weights = {5: 0.50, 15: 0.30, 30: 0.20}
 
                 for horizon, model in symbol_models.items():
-                    pred = float(model.predict(features)[0])
-                    predictions[horizon] = pred
+                    proba = model.predict(features)
 
-                # Weighted average
-                weighted_pred = sum(
-                    predictions.get(h, 0.5) * w
-                    for h, w in weights.items()
-                    if h in predictions
-                )
-                total_weight = sum(w for h, w in weights.items() if h in predictions)
-                prediction = weighted_pred / total_weight if total_weight > 0 else 0.5
+                    # Handle 3-class output: shape is (1, 3) for [DOWN, SIDEWAYS, UP]
+                    if len(proba.shape) == 2 and proba.shape[1] == 3:
+                        down_p, sideways_p, up_p = proba[0]
+                    elif len(proba.shape) == 1 and len(proba) == 3:
+                        down_p, sideways_p, up_p = proba
+                    else:
+                        # Fallback for older binary models
+                        up_p = float(proba[0]) if len(proba.shape) == 1 else float(proba[0, 0])
+                        down_p = 1 - up_p
+                        sideways_p = 0
 
-                return prediction
+                    weight = weights.get(horizon, 0.33)
+                    all_probs['up'].append((up_p, weight))
+                    all_probs['down'].append((down_p, weight))
+                    all_probs['sideways'].append((sideways_p, weight))
+
+                # Weighted average of probabilities
+                def weighted_avg(probs_weights):
+                    total_w = sum(w for _, w in probs_weights)
+                    return sum(p * w for p, w in probs_weights) / total_w if total_w > 0 else 0.33
+
+                up_prob = weighted_avg(all_probs['up'])
+                down_prob = weighted_avg(all_probs['down'])
+                sideways_prob = weighted_avg(all_probs['sideways'])
+
+                # Determine signal based on thresholds
+                if up_prob > self.up_threshold and up_prob > down_prob:
+                    signal = 'BUY'
+                elif down_prob > self.down_threshold and down_prob > up_prob:
+                    signal = 'SELL'
+                else:
+                    signal = 'HOLD'
+
+                return {
+                    'up_prob': float(up_prob),
+                    'down_prob': float(down_prob),
+                    'sideways_prob': float(sideways_prob),
+                    'signal': signal
+                }
 
             # Fallback to single model
-            prediction = float(self.model.predict(features)[0])
-            return prediction
+            proba = self.model.predict(features)
+
+            if len(proba.shape) == 2 and proba.shape[1] == 3:
+                down_p, sideways_p, up_p = proba[0]
+            elif len(proba.shape) == 1 and len(proba) == 3:
+                down_p, sideways_p, up_p = proba
+            else:
+                up_p = float(proba[0]) if len(proba.shape) == 1 else float(proba[0, 0])
+                down_p = 1 - up_p
+                sideways_p = 0
+
+            if up_p > self.up_threshold and up_p > down_p:
+                signal = 'BUY'
+            elif down_p > self.down_threshold and down_p > up_p:
+                signal = 'SELL'
+            else:
+                signal = 'HOLD'
+
+            return {
+                'up_prob': float(up_p),
+                'down_prob': float(down_p),
+                'sideways_prob': float(sideways_p),
+                'signal': signal
+            }
 
         except Exception as e:
             logger.warning(f"Prediction error for {symbol}: {e}")
@@ -906,9 +1020,10 @@ class AdaptiveAI:
             'reasoning': ['Insufficient data for analysis'],
             'features': {},
             'thresholds': {
-                'buy_threshold': self.buy_threshold,
-                'sell_threshold': self.sell_threshold,
-                'min_confidence': self.min_confidence
+                'up_threshold': self.up_threshold,
+                'down_threshold': self.down_threshold,
+                'min_confidence': self.min_confidence,
+                'model_type': self.model_type
             },
             'multi_timeframe': {},
             'feature_importance': self.FEATURE_WEIGHTS,

@@ -1,9 +1,13 @@
 {
-  "optimal_threshold": 0.15000000000000002,
-  "holdout_precision": 0.15786462675100935,
-  "holdout_recall": 0.9570904766623725,
-  "signals_per_day": 1334.9965904441515,
-  "imbalance_ratio": 6.053466914549335,
-  "horizon": 30,
+  "model_type": "3class_classification",
+  "base_timeframe": "5min",
+  "classification_threshold_pct": 0.5,
+  "optimal_up_probability": 0.33,
+  "holdout_accuracy": 0.6999878978579208,
+  "holdout_up_precision": 0.2975778546712803,
+  "holdout_up_recall": 0.07356715141146279,
+  "signals_per_day": 10.072854895316471,
+  "horizon_minutes": 30,
+  "horizon_bars": 6,
   "symbol": "ETH/USD"
 }
