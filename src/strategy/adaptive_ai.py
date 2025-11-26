@@ -995,7 +995,11 @@ class AdaptiveAI:
             return None
 
         try:
+            # Get BTC indicators for cross-asset features (needed for non-BTC symbols)
+            btc_ind = self.indicators.get('BTC/USD', {}).get('1min', {}) if symbol != 'BTC/USD' else {}
+
             # Prepare ALL 67 features for model (MUST match training features)
+            # Non-BTC symbols need 74 features (67 + 7 cross-asset BTC features)
             features = pd.DataFrame([{
                 # Core (10)
                 'rsi': ind.get('rsi', 50),
@@ -1080,6 +1084,33 @@ class AdaptiveAI:
                 'bullish_divergence': ind.get('bullish_divergence', 0),
                 'bearish_divergence': ind.get('bearish_divergence', 0),
             }])
+
+            # Add 7 cross-asset BTC features for non-BTC symbols (74 features total)
+            if symbol != 'BTC/USD' and btc_ind:
+                features['btc_momentum_5'] = btc_ind.get('momentum', 0)
+                features['btc_momentum_15'] = btc_ind.get('roc_20', 0)  # Use roc_20 as proxy
+                features['btc_return_5'] = btc_ind.get('return_5', 0)
+                features['btc_rsi'] = btc_ind.get('rsi', 50)
+                features['btc_volume_ratio'] = btc_ind.get('volume_ratio', 1.0)
+                features['btc_macd_hist'] = btc_ind.get('macd_hist', 0)
+                # BTC trend: 1 if bullish, -1 if bearish, 0 if neutral
+                btc_rsi = btc_ind.get('rsi', 50)
+                btc_macd = btc_ind.get('macd_hist', 0)
+                if btc_rsi > 55 and btc_macd > 0:
+                    features['btc_trend'] = 1
+                elif btc_rsi < 45 and btc_macd < 0:
+                    features['btc_trend'] = -1
+                else:
+                    features['btc_trend'] = 0
+            elif symbol != 'BTC/USD':
+                # BTC indicators not available - use neutral defaults
+                features['btc_momentum_5'] = 0
+                features['btc_momentum_15'] = 0
+                features['btc_return_5'] = 0
+                features['btc_rsi'] = 50
+                features['btc_volume_ratio'] = 1.0
+                features['btc_macd_hist'] = 0
+                features['btc_trend'] = 0
 
             # Use symbol-specific multi-horizon models if available
             if symbol_models:
