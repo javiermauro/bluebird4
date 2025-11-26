@@ -527,6 +527,117 @@ class AdaptiveAI:
                 except:
                     indicators['mfi'] = 50.0
 
+                # ============================================
+                # ENHANCED FEATURES (29 features to match training)
+                # ============================================
+
+                # Multi-timeframe ROC (6 features)
+                roc_60 = talib.ROC(closes, timeperiod=60) if len(closes) >= 60 else np.zeros(len(closes))
+                roc_240 = talib.ROC(closes, timeperiod=240) if len(closes) >= 240 else np.zeros(len(closes))
+                indicators['roc_60'] = float(roc_60[-1]) if not np.isnan(roc_60[-1]) else 0.0
+                indicators['roc_240'] = float(roc_240[-1]) if not np.isnan(roc_240[-1]) else 0.0
+
+                # Multi-timeframe momentum alignment
+                mtf_align = 0.0
+                if indicators['roc_5'] > 0:
+                    mtf_align += 0.1
+                if indicators['roc_20'] > 0:
+                    mtf_align += 0.2
+                if indicators['roc_60'] > 0:
+                    mtf_align += 0.3
+                if indicators['roc_240'] > 0:
+                    mtf_align += 0.4
+                indicators['mtf_momentum_align'] = mtf_align
+
+                # Returns at different scales
+                indicators['return_5'] = float((closes[-1] - closes[-6]) / closes[-6] * 100) if len(closes) >= 6 else 0.0
+                indicators['return_20'] = float((closes[-1] - closes[-21]) / closes[-21] * 100) if len(closes) >= 21 else 0.0
+                indicators['return_60'] = float((closes[-1] - closes[-61]) / closes[-61] * 100) if len(closes) >= 61 else 0.0
+
+                # Volatility regime features (3 features)
+                atr_vals = talib.ATR(highs, lows, closes, timeperiod=14)
+                if len(atr_vals) >= 100:
+                    atr_rank = pd.Series(atr_vals[-100:]).rank(pct=True).iloc[-1]
+                    indicators['atr_percentile'] = float(atr_rank)
+                else:
+                    indicators['atr_percentile'] = 0.5
+
+                atr_20_mean = np.mean(atr_vals[-20:]) if len(atr_vals) >= 20 else indicators['atr']
+                indicators['vol_expanding'] = 1.0 if indicators['atr'] > atr_20_mean else 0.0
+                indicators['vol_contracting'] = 1.0 if indicators['atr'] < atr_20_mean * 0.8 else 0.0
+
+                # Price position features (4 features)
+                if len(closes) >= 50:
+                    price_rank_50 = pd.Series(closes[-50:]).rank(pct=True).iloc[-1]
+                    indicators['price_percentile_50'] = float(price_rank_50)
+                else:
+                    indicators['price_percentile_50'] = 0.5
+
+                if len(closes) >= 100:
+                    price_rank_100 = pd.Series(closes[-100:]).rank(pct=True).iloc[-1]
+                    indicators['price_percentile_100'] = float(price_rank_100)
+                else:
+                    indicators['price_percentile_100'] = 0.5
+
+                high_50 = np.max(highs[-50:]) if len(highs) >= 50 else highs[-1]
+                low_50 = np.min(lows[-50:]) if len(lows) >= 50 else lows[-1]
+                indicators['dist_from_high_50'] = float((high_50 - closes[-1]) / closes[-1] * 100)
+                indicators['dist_from_low_50'] = float((closes[-1] - low_50) / closes[-1] * 100)
+
+                # Acceleration features (4 features)
+                mom_prev = float(mom[-6]) if len(mom) >= 6 and not np.isnan(mom[-6]) else indicators['momentum']
+                indicators['momentum_accel'] = indicators['momentum'] - mom_prev
+
+                rsi_prev_5 = float(rsi[-6]) if len(rsi) >= 6 and not np.isnan(rsi[-6]) else indicators['rsi']
+                indicators['rsi_accel'] = indicators['rsi'] - rsi_prev_5
+
+                roc10_prev = float(roc_10[-6]) if len(roc_10) >= 6 and not np.isnan(roc_10[-6]) else indicators['roc_10']
+                indicators['roc_accel'] = indicators['roc_10'] - roc10_prev
+
+                vol_ratio_prev = volumes[-6] / avg_volume if len(volumes) >= 6 and avg_volume > 0 else 1.0
+                indicators['volume_accel'] = indicators['volume_ratio'] - vol_ratio_prev
+
+                # Time features (4 features)
+                try:
+                    if len(bars) > 0 and 'timestamp' in bars[-1]:
+                        ts = bars[-1]['timestamp']
+                        if hasattr(ts, 'hour'):
+                            indicators['hour'] = ts.hour
+                            indicators['day_of_week'] = ts.weekday()
+                            indicators['is_us_session'] = 1.0 if 13 <= ts.hour <= 21 else 0.0
+                            indicators['is_asia_session'] = 1.0 if 0 <= ts.hour <= 8 else 0.0
+                        else:
+                            indicators['hour'] = 12
+                            indicators['day_of_week'] = 2
+                            indicators['is_us_session'] = 0.5
+                            indicators['is_asia_session'] = 0.5
+                    else:
+                        indicators['hour'] = 12
+                        indicators['day_of_week'] = 2
+                        indicators['is_us_session'] = 0.5
+                        indicators['is_asia_session'] = 0.5
+                except:
+                    indicators['hour'] = 12
+                    indicators['day_of_week'] = 2
+                    indicators['is_us_session'] = 0.5
+                    indicators['is_asia_session'] = 0.5
+
+                # Trend strength features (2 features)
+                indicators['strong_trend'] = 1.0 if indicators['adx'] > 25 else 0.0
+                indicators['weak_trend'] = 1.0 if indicators['adx'] < 15 else 0.0
+
+                # Mean reversion features (4 features)
+                indicators['rsi_oversold'] = 1.0 if indicators['rsi'] < 30 else 0.0
+                indicators['rsi_overbought'] = 1.0 if indicators['rsi'] > 70 else 0.0
+                indicators['bb_oversold'] = 1.0 if closes[-1] < indicators['bb_lower'] else 0.0
+                indicators['bb_overbought'] = 1.0 if closes[-1] > indicators['bb_upper'] else 0.0
+
+                # Divergence features (2 features)
+                price_higher = closes[-1] > closes[-21] if len(closes) >= 21 else False
+                rsi_higher = indicators['rsi'] > (float(rsi[-21]) if len(rsi) >= 21 and not np.isnan(rsi[-21]) else 50)
+                indicators['bullish_divergence'] = 1.0 if (not price_higher and rsi_higher) else 0.0
+                indicators['bearish_divergence'] = 1.0 if (price_higher and not rsi_higher) else 0.0
+
             else:
                 # Fallback: manual calculations (basic features only)
                 indicators = self._calculate_indicators_manual(closes, highs, lows, volumes)
@@ -884,7 +995,7 @@ class AdaptiveAI:
             return None
 
         try:
-            # Prepare ALL 38 features for model (MUST match training features)
+            # Prepare ALL 67 features for model (MUST match training features)
             features = pd.DataFrame([{
                 # Core (10)
                 'rsi': ind.get('rsi', 50),
@@ -930,6 +1041,44 @@ class AdaptiveAI:
                 'willr': ind.get('willr', -50),
                 'cci': ind.get('cci', 0),
                 'mfi': ind.get('mfi', 50),
+                # ===== ENHANCED FEATURES (29) =====
+                # Multi-timeframe momentum (6)
+                'roc_60': ind.get('roc_60', 0),
+                'roc_240': ind.get('roc_240', 0),
+                'mtf_momentum_align': ind.get('mtf_momentum_align', 0),
+                'return_5': ind.get('return_5', 0),
+                'return_20': ind.get('return_20', 0),
+                'return_60': ind.get('return_60', 0),
+                # Volatility regime (3)
+                'atr_percentile': ind.get('atr_percentile', 0.5),
+                'vol_expanding': ind.get('vol_expanding', 0),
+                'vol_contracting': ind.get('vol_contracting', 0),
+                # Price position (4)
+                'price_percentile_50': ind.get('price_percentile_50', 0.5),
+                'price_percentile_100': ind.get('price_percentile_100', 0.5),
+                'dist_from_high_50': ind.get('dist_from_high_50', 0),
+                'dist_from_low_50': ind.get('dist_from_low_50', 0),
+                # Acceleration (4)
+                'momentum_accel': ind.get('momentum_accel', 0),
+                'rsi_accel': ind.get('rsi_accel', 0),
+                'roc_accel': ind.get('roc_accel', 0),
+                'volume_accel': ind.get('volume_accel', 0),
+                # Time features (4)
+                'hour': ind.get('hour', 12),
+                'day_of_week': ind.get('day_of_week', 2),
+                'is_us_session': ind.get('is_us_session', 0.5),
+                'is_asia_session': ind.get('is_asia_session', 0.5),
+                # Trend strength (2)
+                'strong_trend': ind.get('strong_trend', 0),
+                'weak_trend': ind.get('weak_trend', 0),
+                # Mean reversion (4)
+                'rsi_oversold': ind.get('rsi_oversold', 0),
+                'rsi_overbought': ind.get('rsi_overbought', 0),
+                'bb_oversold': ind.get('bb_oversold', 0),
+                'bb_overbought': ind.get('bb_overbought', 0),
+                # Divergence (2)
+                'bullish_divergence': ind.get('bullish_divergence', 0),
+                'bearish_divergence': ind.get('bearish_divergence', 0),
             }])
 
             # Use symbol-specific multi-horizon models if available
