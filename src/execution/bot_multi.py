@@ -62,6 +62,10 @@ class AIMultiAssetBot:
         # Track open positions with their SL/TP targets (backup monitoring)
         self.position_targets: Dict[str, Dict] = {}
 
+        # COOLDOWN: Track last trade TIME per symbol to prevent rapid trading
+        self.last_trade_time: Dict[str, datetime] = {}
+        self.trade_cooldown_minutes = 30  # V3: Increased to 30 min to reduce overtrading
+
         logger.info(f"AIMultiAssetBot initialized for {len(self.symbols)} symbols")
         
     def add_bar(self, symbol: str, bar: Any) -> None:
@@ -94,20 +98,28 @@ class AIMultiAssetBot:
         
         return qty
     
-    def should_trade(self, ai_state: Dict, has_position: bool, can_open_new: bool) -> tuple:
+    def should_trade(self, symbol: str, ai_state: Dict, has_position: bool, can_open_new: bool) -> tuple:
         """
         Determine if we should trade based on AI evaluation.
-        
+
         Returns:
             (should_trade: bool, action: str, reason: str)
         """
         signal = ai_state.get('signal', 'HOLD')
         confidence = ai_state.get('confidence', 0)
-        
+
+        # COOLDOWN CHECK: Prevent rapid trading on same symbol
+        if symbol in self.last_trade_time:
+            time_since_last = datetime.now() - self.last_trade_time[symbol]
+            cooldown_remaining = timedelta(minutes=self.trade_cooldown_minutes) - time_since_last
+            if cooldown_remaining.total_seconds() > 0:
+                mins_left = cooldown_remaining.total_seconds() / 60
+                return False, 'HOLD', f"Cooldown: {mins_left:.1f} min remaining for {symbol}"
+
         # Don't trade if confidence too low
         if confidence < self.min_confidence:
             return False, 'HOLD', f"Confidence {confidence}% < {self.min_confidence}% threshold"
-        
+
         # BUY logic
         if signal == 'BUY':
             if has_position:
@@ -115,14 +127,18 @@ class AIMultiAssetBot:
             if not can_open_new:
                 return False, 'HOLD', f"Max positions ({self.max_positions}) reached"
             return True, 'BUY', f"AI signal BUY with {confidence}% confidence"
-        
+
         # SELL logic
         if signal == 'SELL':
             if has_position:
                 return True, 'SELL', f"AI signal SELL with {confidence}% confidence"
             return False, 'HOLD', "No position to sell"
-        
+
         return False, 'HOLD', "AI signal is HOLD"
+
+    def record_trade_time(self, symbol: str) -> None:
+        """Record trade time to enforce cooldown."""
+        self.last_trade_time[symbol] = datetime.now()
     
     def get_all_ai_states(self) -> Dict[str, Dict]:
         """Get AI state for all symbols."""
@@ -195,18 +211,18 @@ async def run_multi_bot(broadcast_update, broadcast_log):
         
         for symbol in symbols:
             try:
-                alpaca_symbol = symbol.replace('/', '')
+                # Alpaca crypto API expects "BTC/USD" format (with slash)
                 req = CryptoBarsRequest(
-                    symbol_or_symbols=[alpaca_symbol],
+                    symbol_or_symbols=[symbol],
                     timeframe=TimeFrame.Minute,
                     start=datetime.now() - timedelta(minutes=100),
                     limit=100
                 )
                 bars = client.data_client.get_crypto_bars(req)
-                if alpaca_symbol in bars.data:
-                    for bar in bars.data[alpaca_symbol]:
+                if symbol in bars.data:
+                    for bar in bars.data[symbol]:
                         bot.add_bar(symbol, bar)
-                    await broadcast_log(f"  ✓ {symbol}: {len(bars.data[alpaca_symbol])} bars loaded")
+                    await broadcast_log(f"  ✓ {symbol}: {len(bars.data[symbol])} bars loaded")
             except Exception as e:
                 await broadcast_log(f"  ✗ {symbol}: Failed ({e})")
         
@@ -260,8 +276,8 @@ async def run_multi_bot(broadcast_update, broadcast_log):
             has_position = alpaca_symbol in current_positions or symbol in current_positions
             can_open_new = num_positions < config.MAX_POSITIONS
             
-            # Get trading decision from AI
-            should_trade, action, reason = bot.should_trade(ai_state, has_position, can_open_new)
+            # Get trading decision from AI (with cooldown check)
+            should_trade, action, reason = bot.should_trade(symbol, ai_state, has_position, can_open_new)
             
             trade_executed = None
             
@@ -277,15 +293,13 @@ async def run_multi_bot(broadcast_update, broadcast_log):
                         stop_loss = round(entry_price * (1 - bot.stop_loss_pct), 2)
                         take_profit = round(entry_price * (1 + bot.take_profit_pct), 2)
 
-                        # Use BRACKET order with stop loss and take profit
+                        # Use simple market order (crypto doesn't support bracket orders)
+                        # SL/TP will be monitored manually via backup monitoring
                         order = MarketOrderRequest(
-                            symbol=alpaca_symbol,
+                            symbol=symbol,  # Use symbol with slash for crypto
                             qty=round(qty, 6),
                             side=OrderSide.BUY,
-                            time_in_force=TimeInForce.GTC,
-                            order_class=OrderClass.BRACKET,
-                            stop_loss=StopLossRequest(stop_price=stop_loss),
-                            take_profit=TakeProfitRequest(limit_price=take_profit)
+                            time_in_force=TimeInForce.GTC
                         )
                         client.trading_client.submit_order(order)
                         
@@ -305,6 +319,9 @@ async def run_multi_bot(broadcast_update, broadcast_log):
 
                         # Record targets for backup monitoring
                         bot.record_position_targets(symbol, entry_price, stop_loss, take_profit)
+
+                        # Record trade time for cooldown
+                        bot.record_trade_time(symbol)
 
                         await broadcast_log(f"🟢 BUY {symbol}: {qty:.4f} @ ${entry_price:,.2f}")
                         await broadcast_log(f"   Confidence: {confidence}% | SL: ${stop_loss:,.2f} | TP: ${take_profit:,.2f}")
@@ -329,6 +346,9 @@ async def run_multi_bot(broadcast_update, broadcast_log):
                         'reasoning': ai_state.get('reasoning', []),
                         'timestamp': datetime.now().isoformat()
                     }
+
+                    # Record trade time for cooldown
+                    bot.record_trade_time(symbol)
 
                     await broadcast_log(f"🔴 SELL {symbol} @ ${bar.close:,.2f}")
                     for r in ai_state.get('reasoning', [])[:3]:

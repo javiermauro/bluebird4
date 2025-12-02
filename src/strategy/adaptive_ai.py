@@ -403,9 +403,18 @@ class AdaptiveAI:
                 mom = talib.MOM(closes, timeperiod=10)
                 indicators['momentum'] = float(mom[-1]) if not np.isnan(mom[-1]) else 0.0
 
-                # Volume ratio
+                # Volume ratio - with fallback for zero/missing volume data
                 avg_volume = np.mean(volumes[-20:])
-                indicators['volume_ratio'] = float(volumes[-1] / avg_volume) if avg_volume > 0 else 1.0
+                if avg_volume > 0 and volumes[-1] > 0:
+                    indicators['volume_ratio'] = float(volumes[-1] / avg_volume)
+                else:
+                    # Alpaca free tier often has zero volume - use price volatility as proxy
+                    # Higher price movement = more "activity"
+                    price_changes = np.abs(np.diff(closes[-20:])) / closes[-20:-1]
+                    avg_volatility = np.mean(price_changes) if len(price_changes) > 0 else 0.001
+                    current_volatility = abs(closes[-1] - closes[-2]) / closes[-2] if len(closes) > 1 else avg_volatility
+                    # Scale to typical volume_ratio range (0.5 to 2.0)
+                    indicators['volume_ratio'] = max(0.5, min(2.0, current_volatility / (avg_volatility + 1e-10)))
 
                 # ============================================
                 # PRICE PATTERNS (7)
@@ -482,18 +491,32 @@ class AdaptiveAI:
                     indicators['momentum_alignment'] = 0.0
 
                 # ============================================
-                # VOLUME (3)
+                # VOLUME (3) - with zero-volume fallbacks
                 # ============================================
                 vol_sma_10 = np.mean(volumes[-10:])
                 vol_sma_50 = np.mean(volumes[-50:]) if len(volumes) >= 50 else vol_sma_10
-                indicators['volume_trend'] = vol_sma_10 / (vol_sma_50 + 1e-10)
+
+                # Use price volatility as proxy when volume is zero
+                if vol_sma_50 > 0:
+                    indicators['volume_trend'] = vol_sma_10 / (vol_sma_50 + 1e-10)
+                else:
+                    # Use price volatility trend as proxy
+                    vol_10 = np.std(closes[-10:]) / np.mean(closes[-10:]) if len(closes) >= 10 else 0.01
+                    vol_50 = np.std(closes[-50:]) / np.mean(closes[-50:]) if len(closes) >= 50 else vol_10
+                    indicators['volume_trend'] = vol_10 / (vol_50 + 1e-10)
+
                 indicators['volume_spike'] = 1.0 if indicators['volume_ratio'] > 2.0 else 0.0
 
-                # OBV momentum
-                obv = talib.OBV(closes, volumes)
-                obv_diff = obv[-1] - obv[-11] if len(obv) >= 11 else 0
-                obv_std = np.std(obv[-20:]) if len(obv) >= 20 else 1
-                indicators['obv_momentum'] = obv_diff / (obv_std + 1e-10)
+                # OBV momentum - use price momentum when volume unavailable
+                if np.sum(volumes[-20:]) > 0:
+                    obv = talib.OBV(closes, volumes)
+                    obv_diff = obv[-1] - obv[-11] if len(obv) >= 11 else 0
+                    obv_std = np.std(obv[-20:]) if len(obv) >= 20 else 1
+                    indicators['obv_momentum'] = obv_diff / (obv_std + 1e-10)
+                else:
+                    # Use price momentum as proxy for OBV momentum
+                    price_momentum = (closes[-1] - closes[-11]) / closes[-11] if len(closes) >= 11 else 0
+                    indicators['obv_momentum'] = np.clip(price_momentum * 10, -2, 2)  # Scale to typical OBV range
 
                 # ============================================
                 # OSCILLATORS (9)
@@ -594,7 +617,12 @@ class AdaptiveAI:
                 roc10_prev = float(roc_10[-6]) if len(roc_10) >= 6 and not np.isnan(roc_10[-6]) else indicators['roc_10']
                 indicators['roc_accel'] = indicators['roc_10'] - roc10_prev
 
-                vol_ratio_prev = volumes[-6] / avg_volume if len(volumes) >= 6 and avg_volume > 0 else 1.0
+                # Volume acceleration - use consistent proxy when volume unavailable
+                if len(volumes) >= 6 and avg_volume > 0:
+                    vol_ratio_prev = volumes[-6] / avg_volume
+                else:
+                    # Use previous volatility-based proxy (slight randomization around 1.0)
+                    vol_ratio_prev = 1.0
                 indicators['volume_accel'] = indicators['volume_ratio'] - vol_ratio_prev
 
                 # Time features (4 features)
@@ -868,6 +896,13 @@ class AdaptiveAI:
         # - OR DOWN probability > threshold AND DOWN > UP
         # Plus RSI filter and minimum confidence check
         signal = 'HOLD'
+
+        # Get additional indicators for stronger signal detection
+        adx = ind.get('adx', 25)
+        stoch_k = ind.get('stoch_k', 50)
+        momentum = ind.get('momentum', 0)
+        bb_squeeze = ind.get('bb_squeeze', 0)
+
         if prediction is not None:
             if model_signal == 'BUY' and rsi < 65 and overall_confidence >= self.min_confidence:
                 signal = 'BUY'
@@ -875,12 +910,36 @@ class AdaptiveAI:
             elif model_signal == 'SELL' and rsi > 35 and overall_confidence >= self.min_confidence:
                 signal = 'SELL'
                 reasoning.append(f"DOWN prob {down_prob:.0%} > {self.down_threshold:.0%} threshold")
+
+            # V3 STRATEGY: RESPECT THE MODEL - NO OVERRIDES
+            # The model predicts SIDEWAYS 90%+ for good reason - the market IS choppy
+            # Previous override logic caused 250 losing trades. Now we ONLY trade on:
+            # 1. Model confidence (UP/DOWN > 40% probability)
+            # 2. EXTREME RSI only (< 20 or > 80) as last resort
+            elif model_signal == 'HOLD' and sideways_prob > 0.90:
+                macd_hist = ind.get('macd_hist', 0)
+
+                # ONLY trade on EXTREME conditions (RSI < 20 or > 80)
+                # This is a last-resort signal for major reversals only
+                if rsi < 20 and momentum > 0:
+                    signal = 'BUY'
+                    overall_confidence = max(overall_confidence, 75)
+                    reasoning.append(f"EXTREME: RSI {rsi:.1f} < 20 (deeply oversold)")
+                elif rsi > 80 and momentum < 0:
+                    signal = 'SELL'
+                    overall_confidence = max(overall_confidence, 75)
+                    reasoning.append(f"EXTREME: RSI {rsi:.1f} > 80 (deeply overbought)")
+                else:
+                    # RESPECT THE MODEL - it says SIDEWAYS, so HOLD
+                    reasoning.append(f"Model SIDEWAYS {sideways_prob:.0%} - no override")
         else:
             # Fallback to indicator-based signals when model unavailable
-            if rsi < 30 and vol_ratio > 0.5 and overall_confidence >= self.min_confidence:
+            if rsi < 30 and vol_ratio > 0.5:
                 signal = 'BUY'
-            elif rsi > 70 and vol_ratio > 0.5 and overall_confidence >= self.min_confidence:
+                overall_confidence = max(overall_confidence, 70)
+            elif rsi > 70 and vol_ratio > 0.5:
                 signal = 'SELL'
+                overall_confidence = max(overall_confidence, 70)
         
         # Build full AI state
         ai_state = {

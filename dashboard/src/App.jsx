@@ -15,7 +15,8 @@ import {
   Activity, TrendingUp, TrendingDown, Terminal, Zap, Brain,
   Target, Clock, BarChart3, Gauge, ArrowUpCircle, ArrowDownCircle,
   PauseCircle, AlertTriangle, CheckCircle2, XCircle, Layers,
-  Cpu, Eye, GitBranch, Sparkles, GraduationCap, LineChart
+  Cpu, Eye, GitBranch, Sparkles, GraduationCap, LineChart,
+  Grid3X3, Shield, DollarSign, AlertOctagon, StopCircle
 } from 'lucide-react';
 import TrainingDashboard from './components/TrainingDashboard';
 
@@ -83,6 +84,26 @@ function App() {
     kelly: {}
   });
 
+  // Grid Trading state
+  const [grid, setGrid] = useState({
+    active: false,
+    total_trades: 0,
+    total_profit: 0,
+    summaries: {}
+  });
+
+  // Risk Management state
+  const [risk, setRisk] = useState({
+    daily_pnl: 0,
+    daily_pnl_pct: 0,
+    drawdown_pct: 0,
+    peak_equity: 0,
+    daily_limit_hit: false,
+    max_drawdown_hit: false,
+    trading_halted: false,
+    stop_losses: {}
+  });
+
   const [market, setMarket] = useState({ high: 0, low: 0, volume: 0, change: 0 });
   const [lastTrade, setLastTrade] = useState(null);
 
@@ -122,6 +143,8 @@ function App() {
         if (updateData.market) setMarket(updateData.market);
         if (updateData.ultra) setUltra(updateData.ultra);
         if (updateData.ai) setAi(updateData.ai);
+        if (updateData.grid) setGrid(updateData.grid);
+        if (updateData.risk) setRisk(updateData.risk);
         if (updateData.last_trade) setLastTrade(updateData.last_trade);
         setLastUpdate(new Date());
         updateChart(updateData.timestamp, updateData.price);
@@ -208,9 +231,9 @@ function App() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-white tracking-tight">
-                BlueBird <span className="text-indigo-400">AI</span>
+                BlueBird <span className="text-emerald-400">Grid</span>
               </h1>
-              <p className="text-xs text-gray-500 font-mono">ADAPTIVE AI TRADING SYSTEM</p>
+              <p className="text-xs text-gray-500 font-mono">GRID TRADING SYSTEM v4.0</p>
             </div>
           </div>
 
@@ -295,128 +318,140 @@ function App() {
 
         {/* LEFT COLUMN */}
         <div className="w-1/4 space-y-4">
-          {/* AI Decision Flow */}
-          <div className="glass-card rounded-xl p-5 border-2 border-indigo-500/30">
+          {/* Grid Trading Status */}
+          <div className={`glass-card rounded-xl p-5 border-2 ${grid.active ? 'border-emerald-500/30' : 'border-gray-500/30'}`}>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <GitBranch className="w-4 h-4 text-indigo-400" />
-                <span className="text-xs font-medium text-indigo-400 uppercase tracking-wider">AI Decision Flow</span>
+                <Grid3X3 className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-medium text-emerald-400 uppercase tracking-wider">Grid Trading</span>
               </div>
-              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <div className={`w-2 h-2 rounded-full ${grid.active ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500'}`} />
             </div>
-            
-            {/* Flow Boxes */}
-            <div className="flex items-center gap-2 mb-4">
-              <div className="bg-blue-500/20 border border-blue-500/30 rounded p-2 text-center flex-1">
-                <div className="text-[10px] text-gray-500">DATA</div>
-                <div className="text-xs font-mono text-blue-400">OHLCV</div>
+
+            {/* Status Summary */}
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <div className="bg-black/30 rounded p-2 text-center">
+                <div className="text-[10px] text-gray-500">TRADES</div>
+                <div className="text-lg font-bold text-white font-mono">{grid.total_trades || 0}</div>
               </div>
-              <span className="text-gray-600">→</span>
-              <div className="bg-purple-500/20 border border-purple-500/30 rounded p-2 text-center flex-1">
-                <div className="text-[10px] text-gray-500">FEATURES</div>
-                <div className="text-xs font-mono text-purple-400">RSI/MACD</div>
-              </div>
-              <span className="text-gray-600">→</span>
-              <div className={`border rounded p-2 text-center flex-1 ${
-                ai.prediction && ai.prediction > 0.65 ? 'bg-emerald-500/20 border-emerald-500/30' :
-                ai.prediction && ai.prediction < 0.35 ? 'bg-red-500/20 border-red-500/30' :
-                'bg-gray-500/20 border-gray-500/30'
-              }`}>
-                <div className="text-[10px] text-gray-500">MODEL</div>
-                <div className={`text-lg font-bold ${
-                  ai.prediction && ai.prediction > 0.65 ? 'text-emerald-400' :
-                  ai.prediction && ai.prediction < 0.35 ? 'text-red-400' :
-                  'text-gray-400'
-                }`}>
-                  {ai.prediction ? `${(ai.prediction * 100).toFixed(0)}%` : '--'}
+              <div className="bg-black/30 rounded p-2 text-center">
+                <div className="text-[10px] text-gray-500">PROFIT</div>
+                <div className={`text-lg font-bold font-mono ${(grid.total_profit || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  ${(grid.total_profit || 0).toFixed(2)}
                 </div>
               </div>
             </div>
 
-            {/* Confidence */}
-            <div className="mb-4">
-              <div className="flex justify-between text-xs mb-2">
-                <span className="text-gray-500">Confidence</span>
-                <span className={ai.confidence >= 70 ? 'text-emerald-400' : 'text-gray-400'}>{ai.confidence}%</span>
+            {/* Mode indicator */}
+            <div className={`flex items-center justify-center gap-3 p-3 rounded-lg ${
+              grid.active ? 'bg-emerald-500/20 border border-emerald-500/30' : 'bg-gray-500/20 border border-gray-500/30'
+            }`}>
+              {grid.active ? <CheckCircle2 className="w-5 h-5 text-emerald-400" /> : <PauseCircle className="w-5 h-5 text-gray-400" />}
+              <span className={`text-sm font-bold ${grid.active ? 'text-emerald-400' : 'text-gray-400'}`}>
+                {grid.active ? 'ACTIVE' : 'INITIALIZING'}
+              </span>
+            </div>
+          </div>
+
+          {/* Risk Management Panel */}
+          <div className={`glass-card rounded-xl p-5 border ${risk.trading_halted ? 'border-red-500/50' : 'border-yellow-500/30'}`}>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-yellow-400" />
+                <span className="text-xs font-medium text-yellow-400 uppercase">Risk Management</span>
               </div>
-              <div className="h-3 bg-black/30 rounded-full overflow-hidden">
-                <div 
-                  className={`h-full transition-all ${ai.confidence >= 70 ? 'bg-emerald-500' : 'bg-gray-600'}`}
-                  style={{ width: `${ai.confidence}%` }}
+              {risk.trading_halted && <AlertOctagon className="w-4 h-4 text-red-400 animate-pulse" />}
+            </div>
+
+            {/* Daily P&L */}
+            <div className="mb-3">
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-gray-500">Daily P&L</span>
+                <span className={risk.daily_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                  ${risk.daily_pnl?.toFixed(2) || '0.00'} ({risk.daily_pnl_pct?.toFixed(2) || '0.00'}%)
+                </span>
+              </div>
+              <div className="h-2 bg-black/30 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all ${risk.daily_pnl >= 0 ? 'bg-emerald-500' : 'bg-red-500'}`}
+                  style={{ width: `${Math.min(Math.abs(risk.daily_pnl_pct || 0) * 20, 100)}%` }}
                 />
               </div>
             </div>
 
-            {/* Signal */}
-            <div className={`flex items-center justify-center gap-3 p-3 rounded-lg ${
-              ai.signal === 'BUY' ? 'bg-emerald-500/20 border border-emerald-500/30' :
-              ai.signal === 'SELL' ? 'bg-red-500/20 border border-red-500/30' :
-              'bg-gray-500/20 border border-gray-500/30'
-            }`}>
-              {ai.signal === 'BUY' ? <ArrowUpCircle className="w-6 h-6 text-emerald-400" /> :
-               ai.signal === 'SELL' ? <ArrowDownCircle className="w-6 h-6 text-red-400" /> :
-               <PauseCircle className="w-6 h-6 text-gray-400" />}
-              <span className={`text-lg font-bold ${
-                ai.signal === 'BUY' ? 'text-emerald-400' :
-                ai.signal === 'SELL' ? 'text-red-400' : 'text-gray-400'
-              }`}>{ai.signal}</span>
+            {/* Drawdown */}
+            <div className="mb-3">
+              <div className="flex justify-between text-xs mb-1">
+                <span className="text-gray-500">Drawdown</span>
+                <span className={risk.drawdown_pct > 5 ? 'text-red-400' : 'text-yellow-400'}>
+                  {risk.drawdown_pct?.toFixed(2) || '0.00'}%
+                </span>
+              </div>
+              <div className="h-2 bg-black/30 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all ${risk.drawdown_pct > 5 ? 'bg-red-500' : 'bg-yellow-500'}`}
+                  style={{ width: `${Math.min((risk.drawdown_pct || 0) * 10, 100)}%` }}
+                />
+              </div>
             </div>
-          </div>
 
-          {/* Reasoning */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Eye className="w-4 h-4 text-gray-400" />
-              <span className="text-xs font-medium text-gray-400 uppercase">AI Reasoning</span>
+            {/* Circuit Breakers */}
+            <div className="space-y-1 text-xs">
+              <div className={`flex items-center justify-between p-2 rounded ${risk.daily_limit_hit ? 'bg-red-500/20' : 'bg-black/20'}`}>
+                <span className="text-gray-400">Daily Limit (5%)</span>
+                {risk.daily_limit_hit ?
+                  <XCircle className="w-4 h-4 text-red-400" /> :
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                }
+              </div>
+              <div className={`flex items-center justify-between p-2 rounded ${risk.max_drawdown_hit ? 'bg-red-500/20' : 'bg-black/20'}`}>
+                <span className="text-gray-400">Max Drawdown (10%)</span>
+                {risk.max_drawdown_hit ?
+                  <XCircle className="w-4 h-4 text-red-400" /> :
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                }
+              </div>
             </div>
-            <div className="space-y-2 max-h-40 overflow-y-auto">
-              {ai.reasoning?.length > 0 ? ai.reasoning.map((r, i) => (
-                <div key={i} className="flex items-start gap-2 text-xs">
-                  <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 text-gray-400 flex-shrink-0" />
-                  <span className="text-gray-300">{r}</span>
+
+            {/* Trading Halted Warning */}
+            {risk.trading_halted && (
+              <div className="mt-3 p-2 bg-red-500/20 border border-red-500/30 rounded text-center">
+                <div className="flex items-center justify-center gap-2">
+                  <StopCircle className="w-4 h-4 text-red-400" />
+                  <span className="text-xs font-bold text-red-400">TRADING HALTED</span>
                 </div>
-              )) : <div className="text-xs text-gray-500">Analyzing...</div>}
-            </div>
+              </div>
+            )}
           </div>
 
-          {/* Multi-Timeframe */}
+          {/* Grid Summaries */}
           <div className="glass-card rounded-xl p-5">
             <div className="flex items-center gap-2 mb-4">
-              <Clock className="w-4 h-4 text-gray-400" />
-              <span className="text-xs font-medium text-gray-400 uppercase">Timeframes</span>
+              <Layers className="w-4 h-4 text-gray-400" />
+              <span className="text-xs font-medium text-gray-400 uppercase">Grid Levels</span>
             </div>
-            <div className="space-y-2">
-              {['1min', '5min', '15min'].map(tf => {
-                const sig = ai.multi_timeframe?.[tf] || 'NEUTRAL';
-                const cfg = TF_SIGNAL_CONFIG[sig];
-                return (
-                  <div key={tf} className={`flex items-center justify-between p-2 rounded ${cfg.bg}`}>
-                    <span className="text-xs font-mono text-gray-400">{tf.toUpperCase()}</span>
-                    <span className={`text-sm font-bold ${cfg.color}`}>{cfg.icon} {sig}</span>
+            <div className="space-y-3 max-h-60 overflow-y-auto">
+              {Object.entries(grid.summaries || {}).map(([symbol, summary]) => (
+                <div key={symbol} className="bg-black/20 rounded p-2">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm font-medium text-white">{symbol}</span>
+                    <span className="text-xs text-gray-500">{summary.range?.spacing_pct?.toFixed(2) || '--'}% spacing</span>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Feature Importance */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <BarChart3 className="w-4 h-4 text-gray-400" />
-              <span className="text-xs font-medium text-gray-400 uppercase">What AI Looks At</span>
-            </div>
-            <div className="space-y-2">
-              {Object.entries(ai.feature_importance || { rsi: 0.35, volume: 0.25, macd: 0.18, bollinger: 0.12, price_action: 0.10 }).map(([f, w]) => (
-                <div key={f}>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-gray-400 capitalize">{f.replace('_', ' ')}</span>
-                    <span className="text-gray-300">{(w * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="h-2 bg-black/30 rounded-full overflow-hidden">
-                    <div className="h-full" style={{ width: `${w * 100}%`, backgroundColor: FEATURE_COLORS[f] || '#6b7280' }} />
+                  <div className="grid grid-cols-2 gap-1 text-xs">
+                    <div className="text-gray-500">Range:</div>
+                    <div className="text-gray-300 text-right font-mono">
+                      ${summary.range?.lower?.toLocaleString() || '--'} - ${summary.range?.upper?.toLocaleString() || '--'}
+                    </div>
+                    <div className="text-gray-500">Pending Buys:</div>
+                    <div className="text-emerald-400 text-right font-mono">{summary.levels?.pending_buys || 0}</div>
+                    <div className="text-gray-500">Pending Sells:</div>
+                    <div className="text-red-400 text-right font-mono">{summary.levels?.pending_sells || 0}</div>
                   </div>
                 </div>
               ))}
+              {Object.keys(grid.summaries || {}).length === 0 && (
+                <div className="text-xs text-gray-500 text-center py-4">Initializing grids...</div>
+              )}
             </div>
           </div>
         </div>
@@ -768,12 +803,13 @@ function App() {
       {/* Footer */}
       <footer className="mt-4 flex items-center justify-between px-4 py-2 glass-card rounded-lg text-xs">
         <div className="flex items-center gap-6">
-          <span className="text-gray-500">Position: <span className="text-indigo-400">3-5%</span></span>
-          <span className="text-gray-500">Confidence: <span className="text-yellow-400">70%+</span></span>
-          <span className="text-gray-500">SL: <span className="text-red-400">2%</span> | TP: <span className="text-emerald-400">6%</span></span>
+          <span className="text-gray-500">Mode: <span className="text-emerald-400">Grid Trading</span></span>
+          <span className="text-gray-500">Daily Limit: <span className="text-yellow-400">5%</span></span>
+          <span className="text-gray-500">Max Drawdown: <span className="text-red-400">10%</span></span>
+          <span className="text-gray-500">Stop Loss: <span className="text-red-400">10% below grid</span></span>
         </div>
         <div className="text-gray-500">
-          BlueBird AI v4.0 • {data.multi_asset ? `Multi-Asset (${data.multi_asset.symbols?.length || 4})` : 'Adaptive AI'} Trading
+          BlueBird Grid v4.0 • {Object.keys(grid.summaries || {}).length || 4} Assets • Buy Dips, Sell Rips
         </div>
       </footer>
       </>

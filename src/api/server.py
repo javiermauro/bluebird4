@@ -259,15 +259,34 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
-# Import bot runner - Try multi-asset first, fall back to single
+# Import bot runner - Grid Trading is now the default
 try:
-    from src.execution.bot_multi import run_multi_bot
-    BOT_RUNNER = run_multi_bot
-    print("✅ Multi-Asset Bot loaded (BTC/USD + ETH/USD)")
-except ImportError as e:
-    print(f"⚠️ Multi-asset not available: {e}, using single-asset")
-    from src.execution.bot import run_bot
-    BOT_RUNNER = run_bot
+    from config_ultra import UltraConfig
+    config = UltraConfig()
+    USE_GRID = getattr(config, 'USE_GRID_TRADING', True)
+except:
+    USE_GRID = True
+
+if USE_GRID:
+    try:
+        from src.execution.bot_grid import run_grid_bot
+        BOT_RUNNER = run_grid_bot
+        print("GRID TRADING BOT loaded")
+        print("  Strategy: Buy dips, sell rips - no predictions needed")
+        print("  Why: Model predicts SIDEWAYS 90%+ = perfect for grids")
+    except ImportError as e:
+        print(f"Grid bot not available: {e}, falling back to multi-asset")
+        from src.execution.bot_multi import run_multi_bot
+        BOT_RUNNER = run_multi_bot
+else:
+    try:
+        from src.execution.bot_multi import run_multi_bot
+        BOT_RUNNER = run_multi_bot
+        print("Multi-Asset Bot loaded (BTC/USD + ETH/USD)")
+    except ImportError as e:
+        print(f"Multi-asset not available: {e}, using single-asset")
+        from src.execution.bot import run_bot
+        BOT_RUNNER = run_bot
 
 
 @app.on_event("startup")

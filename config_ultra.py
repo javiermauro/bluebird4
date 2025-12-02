@@ -230,9 +230,49 @@ class UltraConfig:
     ]
     
     # =========================================
+    # GRID TRADING SETTINGS
+    # =========================================
+
+    # Enable grid trading mode (replaces prediction-based trading)
+    USE_GRID_TRADING = True
+
+    # Grid configuration per symbol
+    # range_pct: Total range as percentage of price (e.g., 0.05 = 5% total range)
+    # num_grids: Number of grid levels (more = smaller profits per trade, more trades)
+    # investment_ratio: Portion of equity allocated to this symbol's grid
+    # OPTIMIZED FOR PROFITABILITY (accounting for ~0.5% round-trip fees)
+    # Rule: Grid spacing must be > 1% to have meaningful profit after fees
+    GRID_CONFIGS = {
+        "BTC/USD": {
+            "num_grids": 5,        # Fewer grids = wider spacing = more profit per trade
+            "range_pct": 0.08,     # 8% range = 1.6% per grid (1.1% after fees)
+            "investment_ratio": 0.25  # Reduced - BTC moves slower
+        },
+        "ETH/USD": {
+            "num_grids": 6,        # 6 levels
+            "range_pct": 0.10,     # 10% range = 1.67% per grid (1.17% after fees)
+            "investment_ratio": 0.25
+        },
+        "SOL/USD": {
+            "num_grids": 5,        # 5 levels - SOL is volatile, needs room
+            "range_pct": 0.12,     # 12% range = 2.4% per grid (1.9% after fees)
+            "investment_ratio": 0.25  # Increased - best profit margin
+        },
+        "LINK/USD": {
+            "num_grids": 5,        # 5 levels
+            "range_pct": 0.12,     # 12% range = 2.4% per grid (1.9% after fees)
+            "investment_ratio": 0.25  # Increased - best profit margin
+        }
+    }
+
+    # Grid safety settings
+    GRID_STOP_LOSS_PCT = 0.10    # Stop loss if price drops 10% below grid
+    GRID_REBALANCE_PCT = 0.03   # Rebalance if price moves 3% outside grid
+
+    # =========================================
     # LOGGING & MONITORING
     # =========================================
-    
+
     LOG_LEVEL = "INFO"
     LOG_TRADES = True
     LOG_SIGNALS = True
