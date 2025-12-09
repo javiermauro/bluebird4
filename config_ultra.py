@@ -48,12 +48,12 @@ class UltraConfig:
     # Multi-asset diversification (reduces single-asset risk)
     # Top 4 most liquid Alpaca crypto pairs for diversification
     SYMBOLS = [
-        "BTC/USD",   # Bitcoin - King, most liquid
-        "ETH/USD",   # Ethereum - #2, smart contracts
-        "SOL/USD",   # Solana - Fast L1, high volatility (good for trading)
-        "LINK/USD",  # Chainlink - Oracles, different sector = less correlation
+        "BTC/USD",   # Bitcoin - King, most liquid (35% allocation)
+        "SOL/USD",   # Solana - Fast L1, good volume (30% allocation)
+        "LTC/USD",   # Litecoin - Payment narrative, lower correlation (20% allocation)
+        "AVAX/USD",  # Avalanche - Lowest BTC correlation 0.738 (15% allocation)
     ]
-    MAX_EXPOSURE_PER_ASSET = 0.25  # Max 25% equity in any single asset
+    MAX_EXPOSURE_PER_ASSET = 0.35  # Max 35% equity in any single asset (BTC)
     
     # Timeframe: 5-minute bars are optimal balance of signal vs noise
     # 1-min = too noisy, 15-min = too slow for scalping
@@ -244,24 +244,24 @@ class UltraConfig:
     # Rule: Grid spacing must be > 1% to have meaningful profit after fees
     GRID_CONFIGS = {
         "BTC/USD": {
-            "num_grids": 5,        # Fewer grids = wider spacing = more profit per trade
-            "range_pct": 0.08,     # 8% range = 1.6% per grid (1.1% after fees)
-            "investment_ratio": 0.25  # Reduced - BTC moves slower
-        },
-        "ETH/USD": {
-            "num_grids": 6,        # 6 levels
-            "range_pct": 0.10,     # 10% range = 1.67% per grid (1.17% after fees)
-            "investment_ratio": 0.25
+            "num_grids": 5,        # 5 levels, 8% range = 1.6% per grid (1.1% after fees)
+            "range_pct": 0.08,     # Tighter range for BTC (less volatile)
+            "investment_ratio": 0.35  # 35% - highest volume, most reliable
         },
         "SOL/USD": {
-            "num_grids": 5,        # 5 levels - SOL is volatile, needs room
-            "range_pct": 0.12,     # 12% range = 2.4% per grid (1.9% after fees)
-            "investment_ratio": 0.25  # Increased - best profit margin
+            "num_grids": 5,        # 5 levels - tighter for more trades
+            "range_pct": 0.08,     # 8% range = 1.6% per grid (1.1% after fees)
+            "investment_ratio": 0.30  # 30% - good volume, second priority
         },
-        "LINK/USD": {
-            "num_grids": 5,        # 5 levels
-            "range_pct": 0.12,     # 12% range = 2.4% per grid (1.9% after fees)
-            "investment_ratio": 0.25  # Increased - best profit margin
+        "LTC/USD": {
+            "num_grids": 5,        # 5 levels - payment coin, different narrative
+            "range_pct": 0.10,     # 10% range = 2.0% per grid (1.5% after fees)
+            "investment_ratio": 0.20  # 20% - lower volume, reduce exposure
+        },
+        "AVAX/USD": {
+            "num_grids": 5,        # 5 levels - lowest BTC correlation (0.738)
+            "range_pct": 0.10,     # 10% range = 2.0% per grid (1.5% after fees) - tighter
+            "investment_ratio": 0.15  # 15% - lowest volume, smallest positions
         }
     }
 

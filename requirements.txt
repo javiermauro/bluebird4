@@ -11,3 +11,5 @@ matplotlib
 fastapi
 uvicorn
 websockets
+twilio
+requests

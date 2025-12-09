@@ -1,8 +1,11 @@
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.live.crypto import CryptoDataStream
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -81,3 +84,187 @@ class AlpacaClient:
         except Exception as e:
             logger.error(f"Failed to submit order: {e}")
             return None
+
+    def get_order_by_id(self, order_id: str) -> Optional[Dict]:
+        """
+        Get order details by order ID from Alpaca.
+
+        Returns order object with status, filled_qty, filled_avg_price, etc.
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return {
+                'id': order_id,
+                'status': 'filled',
+                'filled_qty': '1.0',
+                'filled_avg_price': '100.0',
+                'filled_at': datetime.now().isoformat()
+            }
+
+        try:
+            order = self.trading_client.get_order_by_id(order_id)
+            return order
+        except Exception as e:
+            logger.error(f"Failed to get order {order_id}: {e}")
+            return None
+
+    def verify_order_fill(self, order_id: str, max_wait_seconds: int = 10, poll_interval: float = 0.5) -> Dict:
+        """
+        Verify an order was filled by polling Alpaca API.
+
+        Args:
+            order_id: The Alpaca order ID to verify
+            max_wait_seconds: Maximum time to wait for fill confirmation
+            poll_interval: Time between status checks
+
+        Returns:
+            Dict with: {
+                'confirmed': bool,
+                'status': str,
+                'filled_qty': float,
+                'filled_avg_price': float,
+                'filled_at': str,
+                'slippage_pct': float (if filled),
+                'order_id': str
+            }
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return {
+                'confirmed': True,
+                'status': 'filled',
+                'filled_qty': 1.0,
+                'filled_avg_price': 100.0,
+                'filled_at': datetime.now().isoformat(),
+                'slippage_pct': 0.0,
+                'order_id': order_id
+            }
+
+        start_time = time.time()
+        last_status = None
+
+        while (time.time() - start_time) < max_wait_seconds:
+            try:
+                order = self.trading_client.get_order_by_id(order_id)
+                status = str(order.status).lower()
+                last_status = status
+
+                if 'filled' in status:
+                    filled_qty = float(order.filled_qty) if order.filled_qty else 0.0
+                    filled_price = float(order.filled_avg_price) if order.filled_avg_price else 0.0
+                    filled_at = order.filled_at.isoformat() if order.filled_at else None
+
+                    logger.info(f"[VERIFIED] Order {order_id} FILLED: {filled_qty} @ ${filled_price:,.2f}")
+
+                    return {
+                        'confirmed': True,
+                        'status': 'filled',
+                        'filled_qty': filled_qty,
+                        'filled_avg_price': filled_price,
+                        'filled_at': filled_at,
+                        'symbol': order.symbol,
+                        'side': str(order.side),
+                        'order_id': str(order.id),
+                        'client_order_id': order.client_order_id
+                    }
+
+                elif any(s in status for s in ['canceled', 'expired', 'rejected', 'suspended']):
+                    logger.warning(f"[VERIFY] Order {order_id} not filled: {status}")
+                    return {
+                        'confirmed': False,
+                        'status': status,
+                        'filled_qty': 0.0,
+                        'filled_avg_price': 0.0,
+                        'filled_at': None,
+                        'order_id': str(order.id),
+                        'reason': f"Order {status}"
+                    }
+
+                # Still pending, wait and retry
+                time.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"[VERIFY] Error checking order {order_id}: {e}")
+                time.sleep(poll_interval)
+
+        # Timeout
+        logger.warning(f"[VERIFY] Timeout waiting for order {order_id}, last status: {last_status}")
+        return {
+            'confirmed': False,
+            'status': last_status or 'unknown',
+            'filled_qty': 0.0,
+            'filled_avg_price': 0.0,
+            'filled_at': None,
+            'order_id': order_id,
+            'reason': 'Verification timeout'
+        }
+
+    def get_order_history(self, days: int = 7, symbols: List[str] = None, status: str = 'all') -> List[Dict]:
+        """
+        Fetch order history from Alpaca for reconciliation.
+
+        Args:
+            days: Number of days of history to fetch
+            symbols: Optional list of symbols to filter
+            status: 'all', 'open', or 'closed'
+
+        Returns:
+            List of order dicts with full details
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return []
+
+        try:
+            # Map status string to enum
+            status_map = {
+                'all': QueryOrderStatus.ALL,
+                'open': QueryOrderStatus.OPEN,
+                'closed': QueryOrderStatus.CLOSED
+            }
+            query_status = status_map.get(status, QueryOrderStatus.ALL)
+
+            # Build request
+            request_params = GetOrdersRequest(
+                status=query_status,
+                after=datetime.now() - timedelta(days=days),
+                limit=500
+            )
+
+            if symbols:
+                # Convert symbols to Alpaca format (remove /)
+                alpaca_symbols = [s.replace('/', '') for s in symbols]
+                request_params.symbols = alpaca_symbols
+
+            orders = self.trading_client.get_orders(filter=request_params)
+
+            # Convert to list of dicts
+            order_list = []
+            for order in orders:
+                order_dict = {
+                    'id': str(order.id),
+                    'client_order_id': order.client_order_id,
+                    'symbol': order.symbol,
+                    'side': str(order.side),
+                    'type': str(order.type),
+                    'qty': float(order.qty) if order.qty else 0.0,
+                    'filled_qty': float(order.filled_qty) if order.filled_qty else 0.0,
+                    'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else 0.0,
+                    'status': str(order.status),
+                    'created_at': order.created_at.isoformat() if order.created_at else None,
+                    'filled_at': order.filled_at.isoformat() if order.filled_at else None,
+                    'submitted_at': order.submitted_at.isoformat() if order.submitted_at else None
+                }
+                order_list.append(order_dict)
+
+            logger.info(f"[HISTORY] Fetched {len(order_list)} orders from Alpaca (last {days} days)")
+            return order_list
+
+        except Exception as e:
+            logger.error(f"Failed to fetch order history: {e}")
+            return []
+
+    def get_filled_orders(self, days: int = 7, symbols: List[str] = None) -> List[Dict]:
+        """
+        Get only filled orders for P&L tracking.
+        Convenience method that filters for filled status.
+        """
+        all_orders = self.get_order_history(days=days, symbols=symbols, status='closed')
+        return [o for o in all_orders if o['status'].lower() == 'orderstatus.filled' or o['status'].lower() == 'filled']

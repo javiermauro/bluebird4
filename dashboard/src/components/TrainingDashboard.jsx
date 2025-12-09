@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Line } from 'react-chartjs-2';
-import {
-  Database, Cpu, Target, TrendingDown, BarChart3,
-  Play, Settings, CheckCircle2, Circle, Loader2,
-  Brain, Zap, GitBranch, Activity, Coins, Shield, AlertTriangle
-} from 'lucide-react';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRAINING SUITE - Model Training Interface
+// ═══════════════════════════════════════════════════════════════════════════
 
 const TRAINING_WS_URL = 'ws://localhost:8001/ws';
 const TRAINING_API_URL = 'http://localhost:8001/api/state';
@@ -31,7 +30,6 @@ function TrainingDashboard() {
     error: null
   });
 
-  // Form state
   const [days, setDays] = useState(90);
   const [holdoutDays, setHoldoutDays] = useState(14);
   const [tuneIterations, setTuneIterations] = useState(15);
@@ -56,7 +54,6 @@ function TrainingDashboard() {
 
     ws.current.onopen = async () => {
       setConnected(true);
-      // Fetch current state via REST as fallback (in case we missed WebSocket updates)
       try {
         const response = await fetch(TRAINING_API_URL);
         const msg = await response.json();
@@ -103,27 +100,29 @@ function TrainingDashboard() {
 
   const isTraining = ['fetching_data', 'calculating_features', 'tuning', 'training'].includes(state.status);
 
-  // Chart data
+  // Chart configurations
   const lossChartData = {
     labels: state.training.train_loss.map((_, i) => i + 1),
     datasets: [
       {
         label: 'Train Loss',
         data: state.training.train_loss,
-        borderColor: '#6366f1',
-        backgroundColor: 'rgba(99, 102, 241, 0.1)',
+        borderColor: '#d4af37',
+        backgroundColor: 'rgba(212, 175, 55, 0.08)',
         tension: 0.4,
         pointRadius: 0,
-        fill: true
+        fill: true,
+        borderWidth: 2
       },
       {
         label: 'Val Loss',
         data: state.training.val_loss,
-        borderColor: '#f59e0b',
-        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+        borderColor: '#3ecf8e',
+        backgroundColor: 'rgba(62, 207, 142, 0.08)',
         tension: 0.4,
         pointRadius: 0,
-        fill: true
+        fill: true,
+        borderWidth: 2
       }
     ]
   };
@@ -133,11 +132,12 @@ function TrainingDashboard() {
     datasets: [{
       label: 'Score',
       data: state.tuning.history.map(h => h.score),
-      borderColor: '#10b981',
-      backgroundColor: 'rgba(16, 185, 129, 0.1)',
+      borderColor: '#64b5f6',
+      backgroundColor: 'rgba(100, 181, 246, 0.08)',
       tension: 0.4,
       pointRadius: 2,
-      fill: true
+      fill: true,
+      borderWidth: 2
     }]
   };
 
@@ -146,18 +146,21 @@ function TrainingDashboard() {
     maintainAspectRatio: false,
     plugins: {
       legend: {
-        labels: { color: '#9ca3af', font: { size: 10 } },
+        labels: {
+          color: '#6b7a94',
+          font: { family: 'DM Sans', size: 11 }
+        },
         position: 'top'
       }
     },
     scales: {
       x: {
-        grid: { color: 'rgba(255,255,255,0.03)' },
-        ticks: { color: '#6b7280', font: { size: 10 } }
+        grid: { color: 'rgba(255, 255, 255, 0.03)', drawBorder: false },
+        ticks: { color: '#6b7a94', font: { family: 'DM Sans', size: 10 } }
       },
       y: {
-        grid: { color: 'rgba(255,255,255,0.03)' },
-        ticks: { color: '#6b7280', font: { size: 10 } }
+        grid: { color: 'rgba(255, 255, 255, 0.03)', drawBorder: false },
+        ticks: { color: '#6b7a94', font: { family: 'JetBrains Mono', size: 10 } }
       }
     }
   };
@@ -171,311 +174,288 @@ function TrainingDashboard() {
       'calculating_features': `Calculating features${symbolInfo}...`,
       'tuning': `Tuning ${state.current_horizon}-min model${symbolInfo}...`,
       'training': `Training ${state.current_horizon}-min model${symbolInfo}...`,
-      'complete': `Training complete! Trained ${Object.keys(state.symbol_metrics).length} assets`,
+      'complete': `Training complete! ${Object.keys(state.symbol_metrics).length} assets trained`,
       'error': `Error: ${state.error}`
     };
     return statusMap[state.status] || state.status;
   };
 
   return (
-    <div className="space-y-4">
-      {/* Connection Status + Controls */}
-      <div className="glass-card rounded-xl p-5">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-gradient-to-br from-purple-500/20 to-pink-500/20 rounded-lg border border-purple-500/30">
-              <Brain className="w-5 h-5 text-purple-400" />
+    <div className="space-y-5">
+      {/* ═══════════════════════════════════════════════════════════════════
+          CONTROL PANEL
+      ═══════════════════════════════════════════════════════════════════ */}
+      <div className="card card-gold">
+        <div className="card-header">
+          <div className={`status-dot ${connected ? 'success pulse' : 'danger'}`} />
+          <span className="card-title text-gold">Model Training</span>
+          <span className="text-muted text-sm ml-2">LightGBM Multi-Horizon</span>
+          <div className="flex-1" />
+          <div className={`badge ${connected ? 'badge-success' : 'badge-danger'}`}>
+            {connected ? 'Connected' : 'Disconnected'}
+          </div>
+        </div>
+
+        <div className="card-body">
+          {!connected && (
+            <div className="mb-5 p-4 rounded-xl bg-[rgba(212,175,55,0.05)] border border-[rgba(212,175,55,0.15)]">
+              <div className="text-gold font-medium mb-1">Training Server Offline</div>
+              <div className="text-muted text-sm font-mono">python train_with_dashboard.py</div>
+            </div>
+          )}
+
+          {/* Controls */}
+          <div className="flex items-end gap-5 flex-wrap mb-5">
+            <div>
+              <label className="text-muted text-xs uppercase tracking-wider block mb-2">Total Days</label>
+              <input
+                type="number"
+                min="1"
+                value={days}
+                onChange={(e) => setDays(e.target.value === '' ? '' : parseInt(e.target.value))}
+                onBlur={(e) => setDays(parseInt(e.target.value) || 90)}
+                disabled={isTraining}
+                className="input w-28"
+              />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-white">Model Training</h2>
-              <p className="text-xs text-gray-500">LightGBM Multi-Horizon Training</p>
+              <label className="text-gold text-xs uppercase tracking-wider block mb-2">Holdout Days</label>
+              <input
+                type="number"
+                min="1"
+                value={holdoutDays}
+                onChange={(e) => setHoldoutDays(e.target.value === '' ? '' : parseInt(e.target.value))}
+                onBlur={(e) => setHoldoutDays(parseInt(e.target.value) || 14)}
+                disabled={isTraining}
+                className="input input-gold w-24"
+              />
             </div>
+            <div>
+              <label className="text-muted text-xs uppercase tracking-wider block mb-2">Tune Iterations</label>
+              <input
+                type="number"
+                min="1"
+                value={tuneIterations}
+                onChange={(e) => setTuneIterations(e.target.value === '' ? '' : parseInt(e.target.value))}
+                onBlur={(e) => setTuneIterations(parseInt(e.target.value) || 15)}
+                disabled={isTraining}
+                className="input w-28"
+              />
+            </div>
+            <div className="flex items-center gap-3 pb-2">
+              <input
+                type="checkbox"
+                checked={enableTuning}
+                onChange={(e) => setEnableTuning(e.target.checked)}
+                disabled={isTraining}
+                className="w-4 h-4 rounded"
+                style={{ accentColor: '#d4af37' }}
+              />
+              <label className="text-secondary text-sm">Hyperparameter Tuning</label>
+            </div>
+            <button
+              onClick={startTraining}
+              disabled={!connected || isTraining}
+              className="btn btn-primary"
+            >
+              {isTraining ? 'Training...' : 'Start Training'}
+            </button>
           </div>
 
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${
-            connected
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-              : 'bg-red-500/10 border-red-500/30 text-red-400'
-          }`}>
-            <div className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
-            <span className="text-xs font-medium">{connected ? 'Connected' : 'Disconnected'}</span>
+          {/* Data Split Info */}
+          <div className="flex items-center gap-6 text-sm">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded bg-[#d4af37]" />
+              <span className="text-muted">Training:</span>
+              <span className="text-gold font-mono">{days - holdoutDays} days</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded bg-[#3ecf8e]" />
+              <span className="text-muted">Holdout:</span>
+              <span className="text-success font-mono">{holdoutDays} days</span>
+            </div>
+            <span className="text-muted">•</span>
+            <span className="text-muted italic">Holdout = true out-of-sample test</span>
           </div>
-        </div>
-
-        {!connected && (
-          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 mb-4">
-            <p className="text-yellow-400 text-sm">
-              Training server not running. Start it with:
-            </p>
-            <code className="text-xs text-gray-400 bg-black/30 px-2 py-1 rounded mt-2 block">
-              python train_with_dashboard.py
-            </code>
-          </div>
-        )}
-
-        {/* Controls */}
-        <div className="flex items-end gap-4 flex-wrap">
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">Total Days</label>
-            <input
-              type="number"
-              min="1"
-              value={days}
-              onChange={(e) => setDays(e.target.value === '' ? '' : parseInt(e.target.value))}
-              onBlur={(e) => setDays(parseInt(e.target.value) || 90)}
-              disabled={isTraining}
-              className="bg-black/30 border border-gray-700 rounded px-3 py-2 w-24 text-white text-sm disabled:opacity-50"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">Holdout Days</label>
-            <input
-              type="number"
-              min="1"
-              value={holdoutDays}
-              onChange={(e) => setHoldoutDays(e.target.value === '' ? '' : parseInt(e.target.value))}
-              onBlur={(e) => setHoldoutDays(parseInt(e.target.value) || 14)}
-              disabled={isTraining}
-              className="bg-black/30 border border-amber-500/30 rounded px-3 py-2 w-20 text-amber-300 text-sm disabled:opacity-50"
-              title="Days reserved for true out-of-sample testing"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">Tune Iterations</label>
-            <input
-              type="number"
-              min="1"
-              value={tuneIterations}
-              onChange={(e) => setTuneIterations(e.target.value === '' ? '' : parseInt(e.target.value))}
-              onBlur={(e) => setTuneIterations(parseInt(e.target.value) || 15)}
-              disabled={isTraining}
-              className="bg-black/30 border border-gray-700 rounded px-3 py-2 w-24 text-white text-sm disabled:opacity-50"
-            />
-          </div>
-          <div className="flex items-center gap-2 pb-2">
-            <input
-              type="checkbox"
-              checked={enableTuning}
-              onChange={(e) => setEnableTuning(e.target.checked)}
-              disabled={isTraining}
-              className="w-4 h-4 rounded"
-            />
-            <label className="text-sm text-gray-400">Hyperparameter Tuning</label>
-          </div>
-          <button
-            onClick={startTraining}
-            disabled={!connected || isTraining}
-            className={`flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition ${
-              !connected || isTraining
-                ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
-                : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-            }`}
-          >
-            {isTraining ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Training...
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4" />
-                Start Training
-              </>
-            )}
-          </button>
-        </div>
-
-        {/* Data Split Info */}
-        <div className="mt-3 flex items-center gap-4 text-xs">
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded bg-emerald-500"></div>
-            <span className="text-gray-400">Training: <span className="text-emerald-400 font-mono">{days - holdoutDays}</span> days</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded bg-amber-500"></div>
-            <span className="text-gray-400">Holdout: <span className="text-amber-400 font-mono">{holdoutDays}</span> days</span>
-          </div>
-          <span className="text-gray-600">|</span>
-          <span className="text-gray-500 italic">Holdout = true out-of-sample test (never seen during training)</span>
         </div>
       </div>
 
-      {/* Progress Bar */}
-      <div className="glass-card rounded-xl p-5">
-        <div className="flex justify-between items-center mb-3">
-          <span className={`text-sm ${state.status === 'error' ? 'text-red-400' : 'text-gray-400'}`}>
-            {getStatusText()}
+      {/* ═══════════════════════════════════════════════════════════════════
+          PROGRESS
+      ═══════════════════════════════════════════════════════════════════ */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Progress</span>
+          <div className="flex-1" />
+          <span className={`font-display text-2xl ${state.status === 'error' ? 'text-danger' : state.status === 'complete' ? 'text-success' : 'text-gold'}`}>
+            {state.progress}%
           </span>
-          <span className="text-sm text-indigo-400 font-mono">{state.progress}%</span>
         </div>
-        <div className="h-3 bg-black/30 rounded-full overflow-hidden">
-          <div
-            className={`h-full transition-all duration-300 ${
-              state.status === 'complete' ? 'bg-emerald-500' :
-              state.status === 'error' ? 'bg-red-500' :
-              'bg-gradient-to-r from-indigo-500 to-purple-500'
-            }`}
-            style={{ width: `${state.progress}%` }}
-          />
-        </div>
-
-        {/* Symbol badges */}
-        {state.symbols && state.symbols.length > 0 && (
-          <div className="mt-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Coins className="w-4 h-4 text-yellow-400" />
-              <span className="text-xs text-gray-500 uppercase">Assets</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {state.symbols.map((sym, idx) => {
-                const done = state.symbol_metrics && state.symbol_metrics[sym];
-                const current = sym === state.current_symbol;
-                return (
-                  <span
-                    key={sym}
-                    className={`flex items-center gap-1 px-3 py-1.5 rounded-lg border text-xs font-medium ${
-                      done ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-400' :
-                      current ? 'bg-indigo-500/20 border-indigo-500/30 text-indigo-400 animate-pulse' :
-                      'bg-gray-500/10 border-gray-500/30 text-gray-500'
-                    }`}
-                  >
-                    {done ? <CheckCircle2 className="w-3 h-3" /> :
-                     current ? <Loader2 className="w-3 h-3 animate-spin" /> :
-                     <Circle className="w-3 h-3" />}
-                    {sym}
-                  </span>
-                );
-              })}
-            </div>
+        <div className="card-body">
+          <div className={`text-sm mb-4 ${state.status === 'error' ? 'text-danger' : 'text-secondary'}`}>
+            {getStatusText()}
           </div>
-        )}
 
-        {/* Horizon badges */}
-        <div className="flex gap-2 mt-4">
-          <span className="text-xs text-gray-500 mr-2">Horizons:</span>
-          {state.horizons.map(h => {
-            const done = state.metrics[h];
-            const current = h === state.current_horizon;
-            return (
-              <span
-                key={h}
-                className={`flex items-center gap-1 px-3 py-1 rounded border text-xs ${
-                  done ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-400' :
-                  current ? 'bg-indigo-500/20 border-indigo-500/30 text-indigo-400' :
-                  'bg-gray-500/20 border-gray-500/30 text-gray-400'
-                }`}
-              >
-                {done ? <CheckCircle2 className="w-3 h-3" /> :
-                 current ? <Loader2 className="w-3 h-3 animate-spin" /> :
-                 <Circle className="w-3 h-3" />}
-                {h}min
-              </span>
-            );
-          })}
+          <div className="progress mb-5">
+            <div
+              className={`progress-fill ${
+                state.status === 'complete' ? 'success' :
+                state.status === 'error' ? 'danger' : ''
+              }`}
+              style={{ width: `${state.progress}%` }}
+            />
+          </div>
+
+          {/* Symbol badges */}
+          {state.symbols && state.symbols.length > 0 && (
+            <div className="mb-4">
+              <div className="text-xs text-muted uppercase tracking-wider mb-3">Assets</div>
+              <div className="flex flex-wrap gap-2">
+                {state.symbols.map((sym) => {
+                  const done = state.symbol_metrics && state.symbol_metrics[sym];
+                  const current = sym === state.current_symbol;
+                  return (
+                    <span
+                      key={sym}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
+                        done ? 'bg-[rgba(62,207,142,0.1)] text-success border border-[rgba(62,207,142,0.2)]' :
+                        current ? 'bg-[rgba(212,175,55,0.1)] text-gold border border-[rgba(212,175,55,0.2)]' :
+                        'bg-[rgba(255,255,255,0.02)] text-muted border border-[rgba(255,255,255,0.06)]'
+                      }`}
+                    >
+                      {sym}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Horizon badges */}
+          <div className="flex gap-2 items-center">
+            <span className="text-xs text-muted uppercase tracking-wider mr-2">Horizons:</span>
+            {state.horizons.map(h => {
+              const done = state.metrics[h];
+              const current = h === state.current_horizon;
+              return (
+                <span
+                  key={h}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-mono ${
+                    done ? 'bg-[rgba(62,207,142,0.1)] text-success' :
+                    current ? 'bg-[rgba(212,175,55,0.1)] text-gold' :
+                    'bg-[rgba(255,255,255,0.02)] text-muted'
+                  }`}
+                >
+                  {h}min
+                </span>
+              );
+            })}
+          </div>
         </div>
       </div>
 
-      {/* Main Grid */}
-      <div className="grid grid-cols-3 gap-4">
-        {/* Left Column */}
-        <div className="space-y-4">
+      {/* ═══════════════════════════════════════════════════════════════════
+          MAIN GRID
+      ═══════════════════════════════════════════════════════════════════ */}
+      <div className="grid grid-cols-3 gap-5">
+        {/* LEFT COLUMN */}
+        <div className="space-y-5">
           {/* Data Info */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Database className="w-4 h-4 text-blue-400" />
-              <span className="text-xs font-medium text-blue-400 uppercase">Training Data</span>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Training Data</span>
             </div>
-            <div className="space-y-3">
+            <div className="card-body space-y-3">
               <div className="flex justify-between">
-                <span className="text-gray-500 text-sm">Samples</span>
-                <span className="text-white font-mono">{state.data.rows.toLocaleString()}</span>
+                <span className="text-muted">Samples</span>
+                <span className="font-mono">{state.data.rows.toLocaleString()}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500 text-sm">Days</span>
-                <span className="text-white font-mono">{state.data.days}</span>
+                <span className="text-muted">Days</span>
+                <span className="font-mono">{state.data.days}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500 text-sm">Features</span>
-                <span className="text-white font-mono">{state.data.features}</span>
+                <span className="text-muted">Features</span>
+                <span className="font-mono">{state.data.features}</span>
               </div>
             </div>
           </div>
 
           {/* Tuning Progress */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Settings className="w-4 h-4 text-emerald-400" />
-              <span className="text-xs font-medium text-emerald-400 uppercase">Hyperparameter Tuning</span>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Hyperparameter Tuning</span>
             </div>
-            <div className="space-y-3">
+            <div className="card-body space-y-3">
               <div className="flex justify-between">
-                <span className="text-gray-500 text-sm">Iteration</span>
-                <span className="text-white font-mono">{state.tuning.iteration}/{state.tuning.total}</span>
+                <span className="text-muted">Iteration</span>
+                <span className="font-mono">{state.tuning.iteration}/{state.tuning.total}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500 text-sm">Best Score</span>
-                <span className="text-emerald-400 font-mono">{state.tuning.best_score || '-'}</span>
+                <span className="text-muted">Best Score</span>
+                <span className="font-mono text-success">{state.tuning.best_score || '--'}</span>
               </div>
-            </div>
-            <div className="mt-4 h-2 bg-black/30 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-emerald-500 transition-all"
-                style={{ width: `${state.tuning.total > 0 ? (state.tuning.iteration / state.tuning.total * 100) : 0}%` }}
-              />
+              <div className="progress">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${state.tuning.total > 0 ? (state.tuning.iteration / state.tuning.total * 100) : 0}%` }}
+                />
+              </div>
             </div>
           </div>
 
           {/* Walk-Forward Validation */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <GitBranch className="w-4 h-4 text-yellow-400" />
-              <span className="text-xs font-medium text-yellow-400 uppercase">Walk-Forward Validation</span>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Walk-Forward Validation</span>
             </div>
-            <div className="space-y-2">
+            <div className="card-body">
               {state.walk_forward.results.length > 0 ? (
-                state.walk_forward.results.map(r => (
-                  <div key={r.fold} className="flex justify-between items-center p-2 bg-black/20 rounded text-sm">
-                    <span className="text-gray-400">Fold {r.fold}</span>
-                    <span className="text-emerald-400 font-mono">{r.accuracy}%</span>
-                  </div>
-                ))
+                <div className="space-y-2">
+                  {state.walk_forward.results.map(r => (
+                    <div key={r.fold} className="flex justify-between p-3 rounded-xl bg-[rgba(255,255,255,0.02)]">
+                      <span className="text-muted">Fold {r.fold}</span>
+                      <span className="font-mono text-success">{r.accuracy}%</span>
+                    </div>
+                  ))}
+                </div>
               ) : (
-                <div className="text-gray-500 text-sm text-center py-4">No results yet</div>
+                <div className="text-center py-6 text-muted text-sm">
+                  No results yet
+                </div>
               )}
             </div>
           </div>
         </div>
 
-        {/* Center Column */}
-        <div className="space-y-4">
+        {/* CENTER COLUMN */}
+        <div className="space-y-5">
           {/* Loss Chart */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <TrendingDown className="w-4 h-4 text-indigo-400" />
-              <span className="text-xs font-medium text-indigo-400 uppercase">Training Loss</span>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Training Loss</span>
             </div>
-            <div className="h-48">
+            <div className="card-body h-52 chart-container">
               {state.training.train_loss.length > 0 ? (
                 <Line data={lossChartData} options={chartOptions} />
               ) : (
-                <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-                  Training will show loss curves here
+                <div className="h-full flex items-center justify-center text-muted text-sm">
+                  Loss curves will appear here
                 </div>
               )}
             </div>
           </div>
 
           {/* Tuning History Chart */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Activity className="w-4 h-4 text-emerald-400" />
-              <span className="text-xs font-medium text-emerald-400 uppercase">Tuning History</span>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Tuning History</span>
             </div>
-            <div className="h-40">
+            <div className="card-body h-44 chart-container">
               {state.tuning.history.length > 0 ? (
                 <Line data={tuneChartData} options={chartOptions} />
               ) : (
-                <div className="h-full flex items-center justify-center text-gray-500 text-sm">
+                <div className="h-full flex items-center justify-center text-muted text-sm">
                   Tuning scores will appear here
                 </div>
               )}
@@ -483,137 +463,126 @@ function TrainingDashboard() {
           </div>
         </div>
 
-        {/* Right Column */}
-        <div className="space-y-4">
-          {/* Model Metrics (Training) */}
-          <div className="glass-card rounded-xl p-5 max-h-64 overflow-y-auto">
-            <div className="flex items-center gap-2 mb-4">
-              <Target className="w-4 h-4 text-purple-400" />
-              <span className="text-xs font-medium text-purple-400 uppercase">Training Metrics</span>
-              <span className="text-xs text-gray-500">(may be optimistic)</span>
+        {/* RIGHT COLUMN */}
+        <div className="space-y-5">
+          {/* Training Metrics */}
+          <div className="card max-h-72 overflow-y-auto">
+            <div className="card-header">
+              <span className="card-title">Training Metrics</span>
+              <span className="text-xs text-muted ml-2">(may be optimistic)</span>
             </div>
-            <div className="space-y-3">
-              {/* Show per-symbol metrics if training complete */}
+            <div className="card-body">
               {Object.keys(state.symbol_metrics || {}).length > 0 ? (
                 Object.entries(state.symbol_metrics).map(([symbol, symMetrics]) => (
-                  <div key={symbol} className="p-3 bg-black/20 rounded border border-gray-700/50">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Coins className="w-3 h-3 text-yellow-400" />
-                      <span className="text-yellow-400 font-semibold text-sm">{symbol}</span>
-                    </div>
+                  <div key={symbol} className="mb-4 p-3 rounded-xl bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.04)]">
+                    <div className="text-gold font-semibold mb-2">{symbol}</div>
                     {Object.entries(symMetrics).map(([horizon, m]) => (
-                      <div key={horizon} className="ml-4 mb-2 p-2 bg-black/20 rounded">
-                        <div className="text-indigo-400 text-xs mb-1">{horizon}-min</div>
-                        <div className="flex gap-3 text-xs">
-                          <span className="text-gray-400">Acc: <span className="text-white">{m.accuracy}%</span></span>
-                          <span className="text-gray-400">Buy: <span className="text-emerald-400">{m.buy_precision}%</span></span>
+                      <div key={horizon} className="ml-2 mb-2 p-2 bg-[rgba(255,255,255,0.02)] rounded-lg">
+                        <div className="text-info text-xs mb-1 font-medium">{horizon}-min</div>
+                        <div className="flex gap-4 text-xs">
+                          <span className="text-muted">Acc: <span className="text-secondary">{m.accuracy}%</span></span>
+                          <span className="text-muted">Buy: <span className="text-success">{m.buy_precision}%</span></span>
                         </div>
                       </div>
                     ))}
                   </div>
                 ))
               ) : Object.keys(state.metrics).length > 0 ? (
-                // Show current training metrics
                 Object.entries(state.metrics).map(([horizon, m]) => (
-                  <div key={horizon} className="p-3 bg-black/20 rounded">
-                    <div className="text-indigo-400 font-semibold text-sm mb-2">
-                      {state.current_symbol && `${state.current_symbol} - `}{horizon}-min Model
+                  <div key={horizon} className="p-3 rounded-xl bg-[rgba(255,255,255,0.02)] mb-3">
+                    <div className="text-info font-medium mb-2">
+                      {state.current_symbol && `${state.current_symbol} · `}{horizon}-min model
                     </div>
-                    <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="grid grid-cols-3 gap-2 text-sm">
                       <div>
-                        <span className="text-gray-500 block">Accuracy</span>
-                        <span className="text-white font-mono">{m.accuracy}%</span>
+                        <span className="text-muted block text-xs">Accuracy</span>
+                        <span className="font-mono">{m.accuracy}%</span>
                       </div>
                       <div>
-                        <span className="text-gray-500 block">Confident</span>
-                        <span className="text-emerald-400 font-mono">{m.confident_accuracy}%</span>
+                        <span className="text-muted block text-xs">Confident</span>
+                        <span className="font-mono text-success">{m.confident_accuracy}%</span>
                       </div>
                       <div>
-                        <span className="text-gray-500 block">Buy Prec</span>
-                        <span className="text-yellow-400 font-mono">{m.buy_precision}%</span>
+                        <span className="text-muted block text-xs">Buy Prec</span>
+                        <span className="font-mono text-gold">{m.buy_precision}%</span>
                       </div>
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="text-gray-500 text-sm text-center py-4">
-                  Metrics will appear after training
+                <div className="text-center py-6 text-muted text-sm">
+                  Metrics appear after training
                 </div>
               )}
             </div>
           </div>
 
-          {/* HOLDOUT Metrics (TRUE Performance) */}
-          <div className="glass-card rounded-xl p-5 max-h-64 overflow-y-auto border border-amber-500/30">
-            <div className="flex items-center gap-2 mb-4">
-              <Shield className="w-4 h-4 text-amber-400" />
-              <span className="text-xs font-medium text-amber-400 uppercase">Holdout Metrics</span>
-              <span className="text-xs text-gray-500">(TRUE performance)</span>
+          {/* Holdout Metrics */}
+          <div className="card card-gold max-h-72 overflow-y-auto">
+            <div className="card-header">
+              <span className="card-title text-gold">Holdout Metrics</span>
+              <span className="text-xs text-muted ml-2">(true performance)</span>
             </div>
-            <div className="space-y-3">
+            <div className="card-body">
               {Object.keys(state.holdout_metrics || {}).length > 0 ? (
                 Object.entries(state.holdout_metrics).map(([symbol, symMetrics]) => (
-                  <div key={symbol} className="p-3 bg-black/20 rounded border border-amber-500/20">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Coins className="w-3 h-3 text-amber-400" />
-                      <span className="text-amber-400 font-semibold text-sm">{symbol}</span>
-                    </div>
+                  <div key={symbol} className="mb-4 p-3 rounded-xl bg-[rgba(212,175,55,0.03)] border border-[rgba(212,175,55,0.1)]">
+                    <div className="text-gold font-semibold mb-2">{symbol}</div>
                     {Object.entries(symMetrics).map(([horizon, m]) => (
-                      <div key={horizon} className="ml-4 mb-2 p-2 bg-black/20 rounded">
+                      <div key={horizon} className="ml-2 mb-2 p-2 bg-[rgba(255,255,255,0.02)] rounded-lg">
                         <div className="flex justify-between items-center mb-1">
-                          <span className="text-amber-400 text-xs font-semibold">{horizon}-min</span>
+                          <span className="text-gold text-xs font-medium">{horizon}-min</span>
                           {m.optimal_threshold && (
-                            <span className="text-xs text-gray-500">@{m.optimal_threshold}</span>
+                            <span className="text-xs text-muted">@{m.optimal_threshold}</span>
                           )}
                         </div>
                         <div className="grid grid-cols-2 gap-1 text-xs">
-                          <span className="text-gray-400">Precision: <span className={`font-mono ${m.buy_precision > 50 ? 'text-emerald-400' : m.buy_precision > 30 ? 'text-amber-300' : 'text-red-400'}`}>{m.buy_precision}%</span></span>
-                          <span className="text-gray-400">Recall: <span className="text-amber-300 font-mono">{m.recall || 0}%</span></span>
-                          <span className="text-gray-400">Signals/day: <span className="text-cyan-400 font-mono">{m.signals_per_day || 0}</span></span>
-                          <span className="text-gray-400">Acc: <span className="text-gray-300 font-mono">{m.accuracy}%</span></span>
+                          <span className="text-muted">Prec: <span className={`font-mono ${m.buy_precision > 50 ? 'text-success' : m.buy_precision > 30 ? 'text-gold' : 'text-danger'}`}>{m.buy_precision}%</span></span>
+                          <span className="text-muted">Rec: <span className="text-gold font-mono">{m.recall || 0}%</span></span>
+                          <span className="text-muted">Sig/Day: <span className="text-info font-mono">{m.signals_per_day || 0}</span></span>
+                          <span className="text-muted">Acc: <span className="font-mono">{m.accuracy}%</span></span>
                         </div>
                       </div>
                     ))}
                   </div>
                 ))
               ) : (
-                <div className="text-gray-500 text-sm text-center py-4 flex flex-col items-center gap-2">
-                  <AlertTriangle className="w-5 h-5 text-gray-600" />
-                  <span>Holdout metrics appear after training</span>
-                  <span className="text-xs text-gray-600">This shows TRUE out-of-sample performance</span>
+                <div className="text-center py-6 text-muted text-sm">
+                  <p>Holdout metrics appear</p>
+                  <p>after training complete</p>
+                  <p className="text-xs italic mt-2">True out-of-sample performance</p>
                 </div>
               )}
             </div>
           </div>
 
           {/* Feature Importance */}
-          <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <BarChart3 className="w-4 h-4 text-pink-400" />
-              <span className="text-xs font-medium text-pink-400 uppercase">Feature Importance</span>
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Feature Importance</span>
             </div>
-            <div className="space-y-2">
+            <div className="card-body">
               {(() => {
                 const horizon = state.current_horizon || Object.keys(state.feature_importance)[0];
                 const importance = state.feature_importance[horizon] || {};
                 const sorted = Object.entries(importance).sort((a, b) => b[1] - a[1]).slice(0, 6);
 
                 return sorted.length > 0 ? sorted.map(([feature, weight]) => (
-                  <div key={feature}>
-                    <div className="flex justify-between text-xs mb-1">
-                      <span className="text-gray-400">{feature}</span>
-                      <span className="text-gray-300">{(weight * 100).toFixed(1)}%</span>
+                  <div key={feature} className="mb-3">
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-muted">{feature}</span>
+                      <span className="font-mono">{(weight * 100).toFixed(1)}%</span>
                     </div>
-                    <div className="h-2 bg-black/30 rounded-full overflow-hidden">
+                    <div className="progress h-1.5">
                       <div
-                        className="h-full bg-gradient-to-r from-pink-500 to-purple-500"
+                        className="progress-fill"
                         style={{ width: `${weight * 100}%` }}
                       />
                     </div>
                   </div>
                 )) : (
-                  <div className="text-gray-500 text-sm text-center py-4">
-                    Feature weights will appear after training
+                  <div className="text-center py-6 text-muted text-sm">
+                    Feature weights appear after training
                   </div>
                 );
               })()}
@@ -621,16 +590,19 @@ function TrainingDashboard() {
           </div>
 
           {/* Logs */}
-          <div className="glass-card rounded-xl p-5 max-h-48 flex flex-col">
-            <div className="flex items-center gap-2 mb-3">
-              <Cpu className="w-4 h-4 text-gray-400" />
-              <span className="text-xs font-medium text-gray-400 uppercase">Logs</span>
+          <div className="card" style={{ maxHeight: '200px' }}>
+            <div className="card-header">
+              <span className="card-title">Activity</span>
             </div>
-            <div className="flex-1 overflow-y-auto space-y-1 text-xs font-mono">
-              {state.logs.slice(-15).map((log, i) => (
-                <div key={i} className="text-gray-400 py-0.5">{log}</div>
-              ))}
-              <div ref={logsEndRef} />
+            <div className="card-body h-full overflow-hidden">
+              <div className="log-panel h-full overflow-y-auto text-xs">
+                {state.logs.slice(-15).map((log, i) => (
+                  <div key={i} className="log-entry py-1">
+                    <span className="text-muted">{log}</span>
+                  </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
             </div>
           </div>
         </div>

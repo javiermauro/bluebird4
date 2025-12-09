@@ -18,13 +18,18 @@ Key concepts:
 - Upper/Lower Limits: Safety boundaries for the grid
 """
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from enum import Enum
 
 logger = logging.getLogger("GridTrading")
+
+# Grid state persistence file
+GRID_STATE_FILE = "/tmp/bluebird-grid-state.json"
 
 
 class GridOrderSide(Enum):
@@ -41,6 +46,29 @@ class GridLevel:
     order_id: Optional[str] = None
     filled_at: Optional[datetime] = None
     quantity: float = 0.0
+
+    def to_dict(self) -> dict:
+        """Serialize grid level for persistence."""
+        return {
+            'price': self.price,
+            'side': self.side.value,
+            'is_filled': self.is_filled,
+            'order_id': self.order_id,
+            'filled_at': self.filled_at.isoformat() if self.filled_at else None,
+            'quantity': self.quantity
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'GridLevel':
+        """Deserialize grid level from persistence."""
+        return cls(
+            price=data['price'],
+            side=GridOrderSide(data['side']),
+            is_filled=data['is_filled'],
+            order_id=data.get('order_id'),
+            filled_at=datetime.fromisoformat(data['filled_at']) if data.get('filled_at') else None,
+            quantity=data['quantity']
+        )
 
 
 @dataclass
@@ -83,6 +111,29 @@ class GridState:
     avg_buy_price: float = 0.0
     avg_sell_price: float = 0.0
 
+    def to_dict(self) -> dict:
+        """Serialize grid state for persistence."""
+        return {
+            'symbol': self.config.symbol,
+            'config': {
+                'symbol': self.config.symbol,
+                'upper_price': self.config.upper_price,
+                'lower_price': self.config.lower_price,
+                'num_grids': self.config.num_grids,
+                'investment_per_grid': self.config.investment_per_grid
+            },
+            'levels': [level.to_dict() for level in self.levels],
+            'is_active': self.is_active,
+            'total_profit': self.total_profit,
+            'completed_trades': self.completed_trades,
+            'total_buys': self.total_buys,
+            'total_sells': self.total_sells,
+            'avg_buy_price': self.avg_buy_price,
+            'avg_sell_price': self.avg_sell_price,
+            'created_at': self.created_at.isoformat(),
+            'last_trade_at': self.last_trade_at.isoformat() if self.last_trade_at else None
+        }
+
 
 class GridTradingStrategy:
     """
@@ -95,6 +146,77 @@ class GridTradingStrategy:
     def __init__(self):
         self.grids: Dict[str, GridState] = {}  # symbol -> GridState
         logger.info("GridTradingStrategy initialized")
+
+    def save_state(self) -> None:
+        """Save all grid states to file for persistence across restarts."""
+        try:
+            data = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'saved_at': datetime.now().isoformat(),
+                'grids': {symbol: state.to_dict() for symbol, state in self.grids.items()}
+            }
+            with open(GRID_STATE_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug(f"Grid state saved for {len(self.grids)} symbols")
+        except Exception as e:
+            logger.error(f"Failed to save grid state: {e}")
+
+    def load_state(self) -> bool:
+        """
+        Load grid states from file. Returns True if valid state was loaded.
+
+        Only loads state from the same day to avoid stale grids after overnight price changes.
+        """
+        try:
+            if not os.path.exists(GRID_STATE_FILE):
+                logger.info("No grid state file found, will create fresh grids")
+                return False
+
+            with open(GRID_STATE_FILE, 'r') as f:
+                data = json.load(f)
+
+            # Only load if from today (grids may be stale after overnight)
+            saved_date = data.get('date')
+            today = datetime.now().strftime('%Y-%m-%d')
+            if saved_date != today:
+                logger.info(f"Grid state from {saved_date} is stale, will create fresh grids")
+                return False
+
+            # Restore each grid
+            for symbol, grid_data in data.get('grids', {}).items():
+                config = GridConfig(
+                    symbol=grid_data['config']['symbol'],
+                    upper_price=grid_data['config']['upper_price'],
+                    lower_price=grid_data['config']['lower_price'],
+                    num_grids=grid_data['config']['num_grids'],
+                    investment_per_grid=grid_data['config']['investment_per_grid']
+                )
+
+                levels = [GridLevel.from_dict(l) for l in grid_data['levels']]
+
+                state = GridState(config=config, levels=levels)
+                state.is_active = grid_data['is_active']
+                state.total_profit = grid_data['total_profit']
+                state.completed_trades = grid_data['completed_trades']
+                state.total_buys = grid_data['total_buys']
+                state.total_sells = grid_data['total_sells']
+                state.avg_buy_price = grid_data['avg_buy_price']
+                state.avg_sell_price = grid_data['avg_sell_price']
+                state.created_at = datetime.fromisoformat(grid_data['created_at'])
+                if grid_data.get('last_trade_at'):
+                    state.last_trade_at = datetime.fromisoformat(grid_data['last_trade_at'])
+
+                self.grids[symbol] = state
+
+                filled_count = sum(1 for l in levels if l.is_filled)
+                logger.info(f"Restored grid for {symbol}: {filled_count}/{len(levels)} levels filled")
+
+            logger.info(f"Grid state restored for {len(self.grids)} symbols")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load grid state: {e}")
+            return False
 
     def create_grid(self, config: GridConfig, current_price: float) -> GridState:
         """
@@ -221,21 +343,50 @@ class GridTradingStrategy:
         config = state.config
 
         # Check if price is outside grid range
-        if current_price > config.upper_price * (1 + config.rebalance_threshold):
-            return {
-                "action": "REBALANCE_UP",
-                "reason": f"Price ${current_price:,.2f} above grid upper ${config.upper_price:,.2f}",
-                "grid_active": True,
-                "recommendation": "Consider moving grid up or taking profits"
-            }
+        price_above_range = current_price > config.upper_price * (1 + config.rebalance_threshold)
+        price_below_range = current_price < config.lower_price * (1 - config.rebalance_threshold)
 
-        if current_price < config.lower_price * (1 - config.rebalance_threshold):
-            return {
-                "action": "REBALANCE_DOWN",
-                "reason": f"Price ${current_price:,.2f} below grid lower ${config.lower_price:,.2f}",
-                "grid_active": True,
-                "recommendation": "Consider moving grid down or stopping loss"
-            }
+        if price_above_range or price_below_range:
+            # AUTO-REBALANCE: Automatically recenter grid around current price
+            if config.auto_rebalance:
+                old_lower = config.lower_price
+                old_upper = config.upper_price
+
+                # Rebalance the grid around current price
+                self.rebalance_grid(symbol, current_price, preserve_positions=True)
+
+                new_state = self.grids[symbol]
+                new_config = new_state.config
+
+                direction = "UP" if price_above_range else "DOWN"
+                logger.info(f"AUTO-REBALANCED {symbol} grid {direction}")
+                logger.info(f"  Old: ${old_lower:,.2f} - ${old_upper:,.2f}")
+                logger.info(f"  New: ${new_config.lower_price:,.2f} - ${new_config.upper_price:,.2f}")
+
+                return {
+                    "action": f"REBALANCED_{direction}",
+                    "reason": f"Auto-rebalanced grid around ${current_price:,.2f}",
+                    "grid_active": True,
+                    "old_range": {"lower": old_lower, "upper": old_upper},
+                    "new_range": {"lower": new_config.lower_price, "upper": new_config.upper_price},
+                    "auto_rebalanced": True
+                }
+            else:
+                # Manual rebalance mode - just notify
+                if price_above_range:
+                    return {
+                        "action": "REBALANCE_UP",
+                        "reason": f"Price ${current_price:,.2f} above grid upper ${config.upper_price:,.2f}",
+                        "grid_active": True,
+                        "recommendation": "Consider moving grid up or taking profits"
+                    }
+                else:
+                    return {
+                        "action": "REBALANCE_DOWN",
+                        "reason": f"Price ${current_price:,.2f} below grid lower ${config.lower_price:,.2f}",
+                        "grid_active": True,
+                        "recommendation": "Consider moving grid down or stopping loss"
+                    }
 
         # Find triggered levels
         triggered_buys = []
@@ -534,26 +685,27 @@ class GridTradingStrategy:
 
 
 # Pre-configured grid setups for our symbols
+# Optimized for diversification: BTC + SOL + LTC + AVAX (low correlation portfolio)
 DEFAULT_GRID_CONFIGS = {
     "BTC/USD": {
-        "num_grids": 10,
-        "range_pct": 0.05,  # 5% range (+/- 2.5%)
-        "investment_ratio": 0.4  # 40% of capital
-    },
-    "ETH/USD": {
-        "num_grids": 10,
-        "range_pct": 0.06,  # 6% range (ETH more volatile)
-        "investment_ratio": 0.25
+        "num_grids": 5,
+        "range_pct": 0.08,  # 8% range - tighter for less volatile BTC
+        "investment_ratio": 0.35  # 35% - highest volume, most reliable
     },
     "SOL/USD": {
-        "num_grids": 8,
-        "range_pct": 0.08,  # 8% range (SOL even more volatile)
-        "investment_ratio": 0.2
+        "num_grids": 5,
+        "range_pct": 0.12,  # 12% range - SOL more volatile
+        "investment_ratio": 0.30  # 30% - good volume
     },
-    "LINK/USD": {
-        "num_grids": 8,
-        "range_pct": 0.08,
-        "investment_ratio": 0.15
+    "LTC/USD": {
+        "num_grids": 5,
+        "range_pct": 0.10,  # 10% range - payment coin, moderate volatility
+        "investment_ratio": 0.20  # 20% - lower volume, reduce exposure
+    },
+    "AVAX/USD": {
+        "num_grids": 5,
+        "range_pct": 0.15,  # 15% range - most volatile, lowest BTC correlation (0.738)
+        "investment_ratio": 0.15  # 15% - lowest volume, smallest positions
     }
 }
 
