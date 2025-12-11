@@ -197,6 +197,12 @@ function App() {
     }
   });
 
+  // Stream health state (independent of WebSocket - detects Alpaca stream issues)
+  const [streamHealth, setStreamHealth] = useState({
+    status: 'unknown',
+    secondsSinceBar: 0
+  });
+
   // Circuit Breaker state (persists across bot restarts)
   const [circuitBreaker, setCircuitBreaker] = useState({
     from_file: {},
@@ -530,6 +536,21 @@ function App() {
     }
   };
 
+  // Fetch stream health from /health endpoint (independent of WebSocket)
+  const fetchStreamHealth = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/health');
+      if (response.ok) {
+        const data = await response.json();
+        if (data.stream_health) {
+          setStreamHealth(data.stream_health);
+        }
+      }
+    } catch (error) {
+      setStreamHealth({ status: 'error', secondsSinceBar: 0 });
+    }
+  };
+
   // Toggle watchdog on/off
   const toggleWatchdog = async () => {
     try {
@@ -656,6 +677,13 @@ function App() {
   useEffect(() => {
     fetchNotifierData();
     const interval = setInterval(fetchNotifierData, 10000); // Every 10 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch stream health periodically (detects Alpaca stream issues)
+  useEffect(() => {
+    fetchStreamHealth();
+    const interval = setInterval(fetchStreamHealth, 10000); // Every 10 seconds
     return () => clearInterval(interval);
   }, []);
 
@@ -813,6 +841,25 @@ function App() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
                   {secondsSinceUpdate <= 2 ? 'Live' : `${secondsSinceUpdate}s ago`}
+                </div>
+
+                {/* Stream Health Badge - detects Alpaca stream issues */}
+                <div className={`badge ${
+                  streamHealth.status === 'healthy' ? 'badge-success' :
+                  streamHealth.status === 'degraded' ? 'badge-gold' :
+                  'badge-danger'
+                }`} title={`Alpaca stream: ${streamHealth.status} (${streamHealth.secondsSinceBar}s since last bar)`}>
+                  <div className={`status-dot ${
+                    streamHealth.status === 'healthy' ? 'success pulse' :
+                    streamHealth.status === 'degraded' ? 'warning' :
+                    'danger'
+                  }`} />
+                  <span className="font-mono text-xs">
+                    {streamHealth.status === 'healthy' ? 'Stream' :
+                     streamHealth.status === 'degraded' ? `Stream ${streamHealth.secondsSinceBar}s` :
+                     streamHealth.status === 'stale' ? 'Stream DOWN' :
+                     'Stream ?'}
+                  </span>
                 </div>
 
                 {/* SMS Notifier Badge */}

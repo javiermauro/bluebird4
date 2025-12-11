@@ -212,7 +212,7 @@ async def get_stats():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with stream health monitoring."""
     # Check if grid trading mode is active
     try:
         from config_ultra import UltraConfig
@@ -221,11 +221,35 @@ async def health_check():
     except:
         is_grid = False
 
+    # Calculate stream health from last_update timestamp
+    last_update_str = system_state.get("timestamp")
+    stream_status = "unknown"
+    seconds_since_bar = 0
+
+    if last_update_str:
+        try:
+            # Parse timestamp (format: "2025-12-11 05:16:00+00:00")
+            last_update = datetime.fromisoformat(str(last_update_str).replace('+00:00', '').replace('Z', ''))
+            seconds_since_bar = (datetime.utcnow() - last_update).total_seconds()
+
+            if seconds_since_bar < 90:
+                stream_status = "healthy"
+            elif seconds_since_bar < 180:
+                stream_status = "degraded"
+            else:
+                stream_status = "stale"
+        except Exception:
+            stream_status = "unknown"
+
     return {
         "status": "healthy",
         "connections": len(manager.active_connections),
         "regime": "GRID_TRADING" if is_grid else system_state["ultra"]["regime"],
-        "last_update": system_state["timestamp"]
+        "last_update": system_state["timestamp"],
+        "stream_health": {
+            "status": stream_status,
+            "seconds_since_bar": int(seconds_since_bar)
+        }
     }
 
 

@@ -84,6 +84,11 @@ class NotificationService:
         self.last_daily_summary_date: Optional[datetime] = None
         self.starting_equity: Optional[float] = None
 
+        # Watchdog state - detect stale data (bot stream disconnected)
+        self.last_bot_update: Optional[datetime] = None
+        self.stale_alert_sent = False
+        self.stale_threshold_minutes = 5  # Alert if no update for 5 minutes
+
         # SMS counter (persisted to disk)
         self.sms_count_today = 0
         self.sms_count_date: Optional[str] = None
@@ -356,6 +361,54 @@ class NotificationService:
                     if self.send_sms(message, sms_type="summary"):
                         self.last_daily_summary_date = today
 
+    def check_stale_data(self, stats: Dict[str, Any]) -> None:
+        """
+        Watchdog check - alert if bot data is stale (stream disconnected).
+
+        This catches the scenario where the bot process is running but
+        the Alpaca WebSocket stream silently disconnected.
+        """
+        # Get last_update from health endpoint
+        try:
+            response = requests.get(f"{self.config.bot_api_url}/health", timeout=5)
+            if response.status_code == 200:
+                health = response.json()
+                last_update_str = health.get('last_update')
+
+                if last_update_str:
+                    # Parse the timestamp (format: "2025-12-11 05:16:00+00:00")
+                    last_update = datetime.fromisoformat(last_update_str.replace('+00:00', ''))
+                    now = datetime.utcnow()
+
+                    minutes_stale = (now - last_update).total_seconds() / 60
+
+                    if minutes_stale >= self.stale_threshold_minutes:
+                        if not self.stale_alert_sent:
+                            message = (
+                                f"⚠️ BLUEBIRD WATCHDOG ALERT\n\n"
+                                f"Bot data is STALE!\n"
+                                f"Last update: {int(minutes_stale)} min ago\n"
+                                f"Stream may be disconnected.\n\n"
+                                f"Action: Check bot logs and restart if needed:\n"
+                                f"python3 start.py --stop && python3 start.py"
+                            )
+                            logger.warning(f"Stale data detected: {minutes_stale:.1f} minutes old")
+                            self.send_sms(message, force=True, sms_type="alert")
+                            self.stale_alert_sent = True
+                    else:
+                        # Data is fresh - reset alert flag
+                        if self.stale_alert_sent:
+                            logger.info("Bot data is fresh again - resetting stale alert")
+                            self.send_sms(
+                                f"✅ BLUEBIRD RECOVERED\n\nBot is receiving data again.",
+                                force=True, sms_type="alert"
+                            )
+                        self.stale_alert_sent = False
+                        self.last_bot_update = last_update
+
+        except Exception as e:
+            logger.error(f"Failed to check bot health: {e}")
+
     def initialize_starting_equity(self, stats: Dict[str, Any]) -> None:
         """Initialize starting equity from stats or risk data."""
         if self.starting_equity is None:
@@ -414,6 +467,7 @@ class NotificationService:
                     self.check_for_new_trades(stats)
                     self.check_risk_alerts(stats)
                     self.check_daily_summary(stats)
+                    self.check_stale_data(stats)
 
                 # Wait for next poll
                 time.sleep(self.config.poll_interval)

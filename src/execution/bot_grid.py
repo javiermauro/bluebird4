@@ -1622,6 +1622,10 @@ async def run_grid_bot(broadcast_update, broadcast_log):
         # Main trading loop
         from alpaca.data.live import CryptoDataStream
 
+        # Heartbeat tracking for stream health monitoring
+        last_bar_time = [datetime.now()]  # Use list for mutable reference in nested function
+        STALE_THRESHOLD_SECONDS = 180  # 3 minutes without a bar = stale
+
         stream = CryptoDataStream(
             config.API_KEY,
             config.SECRET_KEY
@@ -1629,6 +1633,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
         async def handle_bar(bar):
             """Handle incoming bar with grid evaluation and risk management."""
+            # Update heartbeat timestamp
+            last_bar_time[0] = datetime.now()
+
             symbol = bar.symbol
             current_price = float(bar.close)
 
@@ -2156,17 +2163,62 @@ async def run_grid_bot(broadcast_update, broadcast_log):
         stream.subscribe_bars(handle_bar, *symbols)
         await broadcast_log(f"Subscribed to: {', '.join(symbols)}")
 
+        # Stream watchdog - monitors for stale data and forces reconnect
+        stream_should_restart = [False]
+
+        async def stream_watchdog():
+            """Monitor stream health and trigger restart if stale."""
+            while True:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                seconds_since_bar = (datetime.now() - last_bar_time[0]).total_seconds()
+
+                if seconds_since_bar > STALE_THRESHOLD_SECONDS:
+                    logger.warning(f"[WATCHDOG] Stream stale! No bar for {seconds_since_bar:.0f}s")
+                    await broadcast_log(f"[WATCHDOG] Stream stale ({seconds_since_bar:.0f}s) - forcing reconnect...")
+                    stream_should_restart[0] = True
+
+                    # Force close the stream to trigger reconnection
+                    try:
+                        await stream.close()
+                    except Exception as e:
+                        logger.error(f"[WATCHDOG] Error closing stream: {e}")
+
+                    # Reset timer to avoid repeated triggers
+                    last_bar_time[0] = datetime.now()
+
+        # Start watchdog task
+        watchdog_task = asyncio.create_task(stream_watchdog())
+        await broadcast_log("[WATCHDOG] Stream health monitor started (3 min threshold)")
+
         # Run stream with reconnection
         backoff = 1
         max_backoff = 60
 
         while True:
             try:
+                stream_should_restart[0] = False
                 await broadcast_log("Connecting to Alpaca stream...")
+
+                # Create fresh stream on reconnect
+                stream = CryptoDataStream(
+                    config.API_KEY,
+                    config.SECRET_KEY
+                )
+                stream.subscribe_bars(handle_bar, *symbols)
+
                 await stream._run_forever()
                 backoff = 1
+
+                # If we exit cleanly, log it (unusual)
+                await broadcast_log("[STREAM] Connection ended cleanly - reconnecting...")
+
             except Exception as e:
-                await broadcast_log(f"Stream disconnected: {e}")
+                if stream_should_restart[0]:
+                    await broadcast_log(f"[WATCHDOG] Reconnecting after forced restart...")
+                    backoff = 1  # Reset backoff for watchdog-triggered restarts
+                else:
+                    await broadcast_log(f"Stream disconnected: {e}")
+
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
