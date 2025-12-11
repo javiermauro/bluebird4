@@ -1,0 +1,839 @@
+"""
+BLUEBIRD 4.0 - SQLite Database Module
+
+Persistent storage for:
+- Trade history (all buys/sells with profit tracking)
+- Equity snapshots (hourly/daily equity values)
+- Order log (full order execution details)
+- Grid state history
+"""
+
+import sqlite3
+import logging
+import os
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+from contextlib import contextmanager
+import json
+
+logger = logging.getLogger("BlueBirdDB")
+
+# Database location - use project directory for persistence
+DB_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DB_PATH = os.path.join(DB_DIR, "data", "bluebird.db")
+
+
+def ensure_db_dir():
+    """Ensure the data directory exists."""
+    data_dir = os.path.dirname(DB_PATH)
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+        logger.info(f"Created data directory: {data_dir}")
+
+
+@contextmanager
+def get_db_connection():
+    """Get a database connection with automatic cleanup."""
+    ensure_db_dir()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Return rows as dicts
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_database():
+    """Initialize the database with all required tables."""
+    ensure_db_dir()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Trades table - every buy/sell execution
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,  -- 'buy' or 'sell'
+                quantity REAL NOT NULL,
+                price REAL NOT NULL,
+                total_value REAL NOT NULL,
+                order_id TEXT,
+                profit REAL DEFAULT 0,  -- Realized profit (for sells)
+                fees REAL DEFAULT 0,
+                source TEXT DEFAULT 'grid',  -- 'grid', 'manual', 'signal'
+                notes TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Equity snapshots - track account value over time
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                equity REAL NOT NULL,
+                cash REAL,
+                buying_power REAL,
+                positions_value REAL,
+                daily_pnl REAL,
+                daily_pnl_pct REAL,
+                source TEXT DEFAULT 'auto',  -- 'auto', 'manual', 'backfill'
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(timestamp)
+            )
+        """)
+
+        # Orders table - full order details from Alpaca
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT UNIQUE NOT NULL,
+                client_order_id TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT,
+                qty REAL,
+                filled_qty REAL,
+                filled_avg_price REAL,
+                status TEXT,
+                submitted_at TEXT,
+                filled_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Daily summary table - aggregated daily stats
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_summary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT UNIQUE NOT NULL,
+                starting_equity REAL,
+                ending_equity REAL,
+                high_equity REAL,
+                low_equity REAL,
+                total_trades INTEGER DEFAULT 0,
+                total_buys INTEGER DEFAULT 0,
+                total_sells INTEGER DEFAULT 0,
+                realized_pnl REAL DEFAULT 0,
+                unrealized_pnl REAL DEFAULT 0,
+                fees REAL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Grid snapshots - track grid state changes
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS grid_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                lower_price REAL,
+                upper_price REAL,
+                num_grids INTEGER,
+                filled_levels INTEGER,
+                total_levels INTEGER,
+                total_profit REAL,
+                completed_trades INTEGER,
+                state_json TEXT,  -- Full grid state as JSON
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create indexes for faster queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_equity_timestamp ON equity_snapshots(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_filled_at ON orders(filled_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summary(date)")
+
+        conn.commit()
+        logger.info(f"Database initialized at {DB_PATH}")
+
+
+# ============ TRADE FUNCTIONS ============
+
+def record_trade(
+    symbol: str,
+    side: str,
+    quantity: float,
+    price: float,
+    order_id: str = None,
+    profit: float = 0,
+    fees: float = 0,
+    source: str = 'grid',
+    notes: str = None,
+    timestamp: datetime = None
+) -> int:
+    """Record a trade execution."""
+    if timestamp is None:
+        timestamp = datetime.now()
+
+    total_value = quantity * price
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO trades (timestamp, symbol, side, quantity, price, total_value,
+                              order_id, profit, fees, source, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (timestamp.isoformat(), symbol, side.lower(), quantity, price, total_value,
+              order_id, profit, fees, source, notes))
+        conn.commit()
+        trade_id = cursor.lastrowid
+        logger.debug(f"Recorded trade #{trade_id}: {side} {quantity} {symbol} @ ${price:.2f}")
+        return trade_id
+
+
+def get_trades(
+    symbol: str = None,
+    side: str = None,
+    days: int = None,
+    start_date: datetime = None,
+    end_date: datetime = None,
+    limit: int = 1000
+) -> List[Dict]:
+    """Get trade history with optional filters."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM trades WHERE 1=1"
+        params = []
+
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+
+        if side:
+            query += " AND side = ?"
+            params.append(side.lower())
+
+        if days:
+            start = (datetime.now() - timedelta(days=days)).isoformat()
+            query += " AND timestamp >= ?"
+            params.append(start)
+
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_trade_stats(days: int = None) -> Dict:
+    """Get aggregated trade statistics."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        where_clause = ""
+        params = []
+        if days:
+            start = (datetime.now() - timedelta(days=days)).isoformat()
+            where_clause = "WHERE timestamp >= ?"
+            params.append(start)
+
+        # Total stats
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN side = 'buy' THEN 1 ELSE 0 END) as total_buys,
+                SUM(CASE WHEN side = 'sell' THEN 1 ELSE 0 END) as total_sells,
+                SUM(total_value) as total_volume,
+                SUM(profit) as total_profit,
+                SUM(fees) as total_fees,
+                AVG(price) as avg_price
+            FROM trades {where_clause}
+        """, params)
+
+        stats = dict(cursor.fetchone())
+
+        # By symbol
+        cursor.execute(f"""
+            SELECT symbol,
+                   COUNT(*) as trades,
+                   SUM(profit) as profit,
+                   SUM(total_value) as volume
+            FROM trades {where_clause}
+            GROUP BY symbol
+        """, params)
+
+        stats['by_symbol'] = {row['symbol']: {
+            'trades': row['trades'],
+            'profit': row['profit'] or 0,
+            'volume': row['volume'] or 0
+        } for row in cursor.fetchall()}
+
+        return stats
+
+
+# ============ EQUITY FUNCTIONS ============
+
+def record_equity_snapshot(
+    equity: float,
+    cash: float = None,
+    buying_power: float = None,
+    positions_value: float = None,
+    daily_pnl: float = None,
+    daily_pnl_pct: float = None,
+    source: str = 'auto',
+    timestamp: datetime = None
+) -> int:
+    """Record an equity snapshot."""
+    if timestamp is None:
+        timestamp = datetime.now()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT OR REPLACE INTO equity_snapshots
+                (timestamp, equity, cash, buying_power, positions_value, daily_pnl, daily_pnl_pct, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (timestamp.isoformat(), equity, cash, buying_power, positions_value,
+                  daily_pnl, daily_pnl_pct, source))
+            conn.commit()
+            return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            # Timestamp already exists, update instead
+            cursor.execute("""
+                UPDATE equity_snapshots
+                SET equity = ?, cash = ?, buying_power = ?, positions_value = ?,
+                    daily_pnl = ?, daily_pnl_pct = ?, source = ?
+                WHERE timestamp = ?
+            """, (equity, cash, buying_power, positions_value, daily_pnl, daily_pnl_pct,
+                  source, timestamp.isoformat()))
+            conn.commit()
+            return -1
+
+
+def get_equity_history(days: int = 30, interval: str = 'daily') -> List[Dict]:
+    """
+    Get equity history.
+
+    Args:
+        days: Number of days of history
+        interval: 'hourly' or 'daily'
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        start = (datetime.now() - timedelta(days=days)).isoformat()
+
+        if interval == 'daily':
+            # Get one snapshot per day (latest of each day)
+            cursor.execute("""
+                SELECT date(timestamp) as date,
+                       MAX(equity) as high,
+                       MIN(equity) as low,
+                       (SELECT equity FROM equity_snapshots e2
+                        WHERE date(e2.timestamp) = date(e1.timestamp)
+                        ORDER BY e2.timestamp DESC LIMIT 1) as close,
+                       (SELECT equity FROM equity_snapshots e3
+                        WHERE date(e3.timestamp) = date(e1.timestamp)
+                        ORDER BY e3.timestamp ASC LIMIT 1) as open
+                FROM equity_snapshots e1
+                WHERE timestamp >= ?
+                GROUP BY date(timestamp)
+                ORDER BY date(timestamp) ASC
+            """, (start,))
+        else:
+            # Get all snapshots
+            cursor.execute("""
+                SELECT timestamp, equity, cash, buying_power, positions_value,
+                       daily_pnl, daily_pnl_pct
+                FROM equity_snapshots
+                WHERE timestamp >= ?
+                ORDER BY timestamp ASC
+            """, (start,))
+
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_equity_range(days: int = 30) -> Dict:
+    """Get equity statistics for a time range."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        start = (datetime.now() - timedelta(days=days)).isoformat()
+
+        cursor.execute("""
+            SELECT
+                MIN(equity) as trough,
+                MAX(equity) as peak,
+                (SELECT equity FROM equity_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1) as starting,
+                (SELECT equity FROM equity_snapshots ORDER BY timestamp DESC LIMIT 1) as current,
+                (SELECT timestamp FROM equity_snapshots WHERE equity = (SELECT MIN(equity) FROM equity_snapshots WHERE timestamp >= ?)) as trough_date,
+                (SELECT timestamp FROM equity_snapshots WHERE equity = (SELECT MAX(equity) FROM equity_snapshots WHERE timestamp >= ?)) as peak_date
+            FROM equity_snapshots
+            WHERE timestamp >= ?
+        """, (start, start, start, start))
+
+        result = dict(cursor.fetchone())
+
+        # Calculate recovery percentage
+        if result['starting'] and result['trough'] and result['starting'] > result['trough']:
+            recovery_pct = ((result['current'] - result['trough']) / (result['starting'] - result['trough'])) * 100
+        else:
+            recovery_pct = 0 if result['current'] < result['starting'] else 100
+
+        result['recovery_pct'] = round(recovery_pct, 2)
+
+        if result['starting']:
+            result['total_return_pct'] = round(((result['current'] - result['starting']) / result['starting']) * 100, 2)
+        else:
+            result['total_return_pct'] = 0
+
+        return result
+
+
+# ============ ORDER FUNCTIONS ============
+
+def record_order(order_data: Dict) -> int:
+    """Record an order from Alpaca."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                INSERT OR REPLACE INTO orders
+                (order_id, client_order_id, symbol, side, order_type, qty,
+                 filled_qty, filled_avg_price, status, submitted_at, filled_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                order_data.get('order_id') or order_data.get('id'),
+                order_data.get('client_order_id'),
+                order_data.get('symbol'),
+                str(order_data.get('side', '')).lower().replace('orderside.', ''),
+                str(order_data.get('order_type') or order_data.get('type', '')),
+                order_data.get('qty'),
+                order_data.get('filled_qty'),
+                order_data.get('filled_avg_price'),
+                str(order_data.get('status', '')),
+                order_data.get('submitted_at'),
+                order_data.get('filled_at')
+            ))
+            conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Failed to record order: {e}")
+            return -1
+
+
+def get_orders(days: int = 7, symbol: str = None, status: str = None, limit: int = 500) -> List[Dict]:
+    """Get orders from database."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM orders WHERE 1=1"
+        params = []
+
+        if days:
+            start = (datetime.now() - timedelta(days=days)).isoformat()
+            query += " AND (filled_at >= ? OR submitted_at >= ?)"
+            params.extend([start, start])
+
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+
+        if status:
+            query += " AND status LIKE ?"
+            params.append(f"%{status}%")
+
+        query += " ORDER BY filled_at DESC NULLS LAST LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_order_stats() -> Dict:
+    """Get order statistics."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_orders,
+                SUM(CASE WHEN side LIKE '%buy%' THEN 1 ELSE 0 END) as buys,
+                SUM(CASE WHEN side LIKE '%sell%' THEN 1 ELSE 0 END) as sells,
+                SUM(filled_qty * filled_avg_price) as total_volume,
+                COUNT(DISTINCT symbol) as symbols_traded
+            FROM orders
+            WHERE status LIKE '%filled%'
+        """)
+
+        return dict(cursor.fetchone())
+
+
+# ============ DAILY SUMMARY FUNCTIONS ============
+
+def update_daily_summary(
+    date: str = None,
+    starting_equity: float = None,
+    ending_equity: float = None,
+    high_equity: float = None,
+    low_equity: float = None,
+    trades: int = None,
+    buys: int = None,
+    sells: int = None,
+    realized_pnl: float = None
+):
+    """Update or create daily summary."""
+    if date is None:
+        date = datetime.now().strftime('%Y-%m-%d')
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Check if exists
+        cursor.execute("SELECT * FROM daily_summary WHERE date = ?", (date,))
+        existing = cursor.fetchone()
+
+        if existing:
+            # Update existing
+            updates = []
+            params = []
+
+            if ending_equity is not None:
+                updates.append("ending_equity = ?")
+                params.append(ending_equity)
+            if high_equity is not None:
+                updates.append("high_equity = MAX(COALESCE(high_equity, 0), ?)")
+                params.append(high_equity)
+            if low_equity is not None:
+                updates.append("low_equity = MIN(COALESCE(low_equity, 999999999), ?)")
+                params.append(low_equity)
+            if trades is not None:
+                updates.append("total_trades = ?")
+                params.append(trades)
+            if buys is not None:
+                updates.append("total_buys = ?")
+                params.append(buys)
+            if sells is not None:
+                updates.append("total_sells = ?")
+                params.append(sells)
+            if realized_pnl is not None:
+                updates.append("realized_pnl = ?")
+                params.append(realized_pnl)
+
+            updates.append("updated_at = ?")
+            params.append(datetime.now().isoformat())
+            params.append(date)
+
+            if updates:
+                cursor.execute(f"""
+                    UPDATE daily_summary SET {', '.join(updates)} WHERE date = ?
+                """, params)
+        else:
+            # Insert new
+            cursor.execute("""
+                INSERT INTO daily_summary
+                (date, starting_equity, ending_equity, high_equity, low_equity,
+                 total_trades, total_buys, total_sells, realized_pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (date, starting_equity, ending_equity, high_equity, low_equity,
+                  trades or 0, buys or 0, sells or 0, realized_pnl or 0))
+
+        conn.commit()
+
+
+def get_daily_summaries(days: int = 30) -> List[Dict]:
+    """Get daily summaries."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        start = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+        cursor.execute("""
+            SELECT * FROM daily_summary
+            WHERE date >= ?
+            ORDER BY date DESC
+        """, (start,))
+
+        return [dict(row) for row in cursor.fetchall()]
+
+
+# ============ BACKFILL FUNCTIONS ============
+
+def backfill_orders_from_alpaca(alpaca_orders: List[Dict]) -> int:
+    """Backfill orders from Alpaca API response."""
+    count = 0
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        for order in alpaca_orders:
+            try:
+                # Normalize symbol
+                symbol = order.get('symbol', '')
+                if '/' not in symbol:
+                    symbol = symbol.replace('USD', '/USD')
+
+                cursor.execute("""
+                    INSERT OR IGNORE INTO orders
+                    (order_id, client_order_id, symbol, side, order_type, qty,
+                     filled_qty, filled_avg_price, status, submitted_at, filled_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    order.get('id'),
+                    order.get('client_order_id'),
+                    symbol,
+                    str(order.get('side', '')).lower().replace('orderside.', ''),
+                    str(order.get('type', '')),
+                    order.get('qty'),
+                    order.get('filled_qty'),
+                    order.get('filled_avg_price'),
+                    str(order.get('status', '')),
+                    order.get('submitted_at'),
+                    order.get('filled_at')
+                ))
+                if cursor.rowcount > 0:
+                    count += 1
+            except Exception as e:
+                logger.warning(f"Failed to backfill order {order.get('id')}: {e}")
+
+        conn.commit()
+
+    logger.info(f"Backfilled {count} orders from Alpaca")
+    return count
+
+
+def backfill_equity_from_alpaca(equity_history: Dict) -> int:
+    """Backfill equity snapshots from Alpaca portfolio history."""
+    count = 0
+
+    timestamps = equity_history.get('timestamps', [])
+    equity_values = equity_history.get('equity', [])
+    pnl_values = equity_history.get('profit_loss', [])
+    pnl_pct_values = equity_history.get('profit_loss_pct', [])
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        for i, (ts, eq) in enumerate(zip(timestamps, equity_values)):
+            if eq is None:
+                continue
+
+            try:
+                # Parse timestamp
+                if isinstance(ts, str):
+                    timestamp = ts
+                else:
+                    timestamp = ts
+
+                pnl = pnl_values[i] if i < len(pnl_values) else None
+                pnl_pct = pnl_pct_values[i] if i < len(pnl_pct_values) else None
+
+                cursor.execute("""
+                    INSERT OR IGNORE INTO equity_snapshots
+                    (timestamp, equity, daily_pnl, daily_pnl_pct, source)
+                    VALUES (?, ?, ?, ?, 'backfill')
+                """, (timestamp, eq, pnl, pnl_pct))
+
+                if cursor.rowcount > 0:
+                    count += 1
+            except Exception as e:
+                logger.warning(f"Failed to backfill equity snapshot: {e}")
+
+        conn.commit()
+
+    logger.info(f"Backfilled {count} equity snapshots from Alpaca")
+    return count
+
+
+# ============ RECONCILIATION FUNCTIONS ============
+
+def reconcile_with_alpaca(alpaca_orders: List[Dict]) -> Dict:
+    """
+    Compare database orders with Alpaca orders to find discrepancies.
+
+    Returns:
+        Dict with reconciliation results:
+        - matched: orders in both DB and Alpaca
+        - missing_in_db: orders in Alpaca but not in DB
+        - extra_in_db: orders in DB but not in Alpaca (shouldn't happen)
+        - mismatched: orders with different data
+    """
+    results = {
+        'matched': 0,
+        'missing_in_db': [],
+        'extra_in_db': [],
+        'mismatched': [],
+        'total_alpaca': len(alpaca_orders),
+        'total_db': 0,
+        'synced': True,
+        'last_check': datetime.now().isoformat()
+    }
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Get all DB order IDs
+        cursor.execute("SELECT order_id, symbol, side, filled_qty, filled_avg_price, status FROM orders")
+        db_orders = {row['order_id']: dict(row) for row in cursor.fetchall()}
+        results['total_db'] = len(db_orders)
+
+        # Compare each Alpaca order
+        for alpaca_order in alpaca_orders:
+            order_id = alpaca_order.get('id')
+
+            if order_id in db_orders:
+                # Check if data matches
+                db_order = db_orders[order_id]
+
+                # Compare key fields
+                alpaca_qty = float(alpaca_order.get('filled_qty') or 0)
+                db_qty = float(db_order.get('filled_qty') or 0)
+                alpaca_price = float(alpaca_order.get('filled_avg_price') or 0)
+                db_price = float(db_order.get('filled_avg_price') or 0)
+
+                # Allow small floating point differences
+                if abs(alpaca_qty - db_qty) > 0.0001 or abs(alpaca_price - db_price) > 0.01:
+                    results['mismatched'].append({
+                        'order_id': order_id,
+                        'alpaca': {'qty': alpaca_qty, 'price': alpaca_price},
+                        'db': {'qty': db_qty, 'price': db_price}
+                    })
+                    results['synced'] = False
+                else:
+                    results['matched'] += 1
+
+                # Remove from db_orders to track extras
+                del db_orders[order_id]
+            else:
+                # Missing in DB
+                results['missing_in_db'].append({
+                    'order_id': order_id,
+                    'symbol': alpaca_order.get('symbol'),
+                    'side': str(alpaca_order.get('side', '')),
+                    'qty': alpaca_order.get('filled_qty'),
+                    'price': alpaca_order.get('filled_avg_price'),
+                    'filled_at': alpaca_order.get('filled_at')
+                })
+                results['synced'] = False
+
+        # Any remaining db_orders are extra (in DB but not in Alpaca)
+        for order_id, order in db_orders.items():
+            results['extra_in_db'].append({
+                'order_id': order_id,
+                'symbol': order.get('symbol'),
+                'side': order.get('side')
+            })
+
+        # Extra in DB doesn't necessarily mean out of sync (could be older than Alpaca's window)
+        # Only flag as not synced if there are missing or mismatched
+
+    return results
+
+
+def sync_missing_orders(missing_orders: List[Dict]) -> int:
+    """
+    Add missing orders to the database.
+
+    Args:
+        missing_orders: List of orders from reconciliation that are missing in DB
+
+    Returns:
+        Number of orders added
+    """
+    count = 0
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        for order in missing_orders:
+            try:
+                # Normalize symbol
+                symbol = order.get('symbol', '')
+                if '/' not in symbol:
+                    symbol = symbol.replace('USD', '/USD')
+
+                cursor.execute("""
+                    INSERT OR IGNORE INTO orders
+                    (order_id, symbol, side, filled_qty, filled_avg_price, status, filled_at)
+                    VALUES (?, ?, ?, ?, ?, 'filled', ?)
+                """, (
+                    order.get('order_id'),
+                    symbol,
+                    str(order.get('side', '')).lower().replace('orderside.', ''),
+                    order.get('qty'),
+                    order.get('price'),
+                    order.get('filled_at')
+                ))
+
+                if cursor.rowcount > 0:
+                    count += 1
+                    logger.info(f"Synced missing order: {order.get('order_id')}")
+
+            except Exception as e:
+                logger.warning(f"Failed to sync order {order.get('order_id')}: {e}")
+
+        conn.commit()
+
+    return count
+
+
+def get_reconciliation_status() -> Dict:
+    """Get the last reconciliation status."""
+    # This would be stored in a metadata table, but for now return basic stats
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) as count FROM orders WHERE status LIKE '%filled%'")
+        filled_orders = cursor.fetchone()['count']
+
+        cursor.execute("SELECT MAX(filled_at) as last_order FROM orders")
+        last_order = cursor.fetchone()['last_order']
+
+        return {
+            'db_filled_orders': filled_orders,
+            'last_order_time': last_order,
+            'status': 'ok'
+        }
+
+
+# ============ UTILITY FUNCTIONS ============
+
+def get_database_stats() -> Dict:
+    """Get database statistics."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        stats = {}
+
+        for table in ['trades', 'equity_snapshots', 'orders', 'daily_summary', 'grid_snapshots']:
+            cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+            stats[table] = cursor.fetchone()['count']
+
+        # Get date ranges
+        cursor.execute("SELECT MIN(timestamp) as oldest, MAX(timestamp) as newest FROM trades")
+        row = cursor.fetchone()
+        stats['trades_range'] = {'oldest': row['oldest'], 'newest': row['newest']}
+
+        cursor.execute("SELECT MIN(timestamp) as oldest, MAX(timestamp) as newest FROM equity_snapshots")
+        row = cursor.fetchone()
+        stats['equity_range'] = {'oldest': row['oldest'], 'newest': row['newest']}
+
+        # Database file size
+        if os.path.exists(DB_PATH):
+            stats['db_size_mb'] = round(os.path.getsize(DB_PATH) / (1024 * 1024), 2)
+        else:
+            stats['db_size_mb'] = 0
+
+        return stats
+
+
+# Initialize database on import
+init_database()

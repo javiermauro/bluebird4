@@ -21,8 +21,22 @@ import signal
 import logging
 import requests
 import json
+import platform
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Set
+
+# Disable macOS App Nap to prevent the process from being suspended
+# This is critical for long-running background services
+if platform.system() == 'Darwin':
+    try:
+        import subprocess
+        # Set the process to be exempt from App Nap
+        subprocess.run(
+            ['defaults', 'write', 'NSGlobalDomain', 'NSAppSleepDisabled', '-bool', 'YES'],
+            capture_output=True
+        )
+    except Exception:
+        pass  # Non-critical, continue anyway
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -34,6 +48,11 @@ from src.notifications import templates
 PID_FILE = "/tmp/bluebird-notifier.pid"
 SMS_COUNT_FILE = "/tmp/bluebird-notifier-count.json"
 LOG_FILE = "/tmp/bluebird-notifier.log"
+LAST_STARTUP_FILE = "/tmp/bluebird-notifier-startup.json"
+
+# Minimum time between startup SMS notifications (in seconds)
+# Prevents SMS spam when launchd restarts the service frequently
+STARTUP_SMS_COOLDOWN = 3600  # 1 hour
 
 # Configure logging - both console and file
 logging.basicConfig(
@@ -99,6 +118,29 @@ class NotificationService:
                 logger.info("PID file removed")
         except Exception as e:
             logger.error(f"Failed to remove PID file: {e}")
+
+    def _should_send_startup_sms(self) -> bool:
+        """Check if enough time has passed since last startup SMS."""
+        try:
+            if os.path.exists(LAST_STARTUP_FILE):
+                with open(LAST_STARTUP_FILE, 'r') as f:
+                    data = json.load(f)
+                    last_startup = datetime.fromisoformat(data.get('timestamp', '2000-01-01'))
+                    elapsed = (datetime.now() - last_startup).total_seconds()
+                    if elapsed < STARTUP_SMS_COOLDOWN:
+                        logger.info(f"Startup SMS suppressed (last sent {elapsed:.0f}s ago, cooldown is {STARTUP_SMS_COOLDOWN}s)")
+                        return False
+        except Exception as e:
+            logger.debug(f"Could not check startup file: {e}")
+        return True
+
+    def _record_startup_sms(self) -> None:
+        """Record that a startup SMS was sent."""
+        try:
+            with open(LAST_STARTUP_FILE, 'w') as f:
+                json.dump({'timestamp': datetime.now().isoformat()}, f)
+        except Exception as e:
+            logger.debug(f"Could not write startup file: {e}")
 
     def _load_sms_count(self) -> None:
         """Load SMS count from disk."""
@@ -351,12 +393,13 @@ class NotificationService:
 
         self.running = True
 
-        # Send startup notification
-        if self.config.is_configured():
+        # Send startup notification (with cooldown to prevent spam on restarts)
+        if self.config.is_configured() and self._should_send_startup_sms():
             self.send_sms(templates.format_startup_message(
                 f"Polling every {self.config.poll_interval}s\n"
                 f"Quiet hours: {self.config.quiet_hours_start}:00-{self.config.quiet_hours_end}:00"
             ), sms_type="startup")
+            self._record_startup_sms()
 
         while self.running:
             try:

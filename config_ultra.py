@@ -240,34 +240,53 @@ class UltraConfig:
     # range_pct: Total range as percentage of price (e.g., 0.05 = 5% total range)
     # num_grids: Number of grid levels (more = smaller profits per trade, more trades)
     # investment_ratio: Portion of equity allocated to this symbol's grid
-    # OPTIMIZED FOR PROFITABILITY (accounting for ~0.5% round-trip fees)
-    # Rule: Grid spacing must be > 1% to have meaningful profit after fees
+    # OPTIMIZED FOR MORE TRADES & FASTER RECOVERY (Dec 9, 2025)
+    # Tighter ranges = more grid completions = more profits
     GRID_CONFIGS = {
         "BTC/USD": {
-            "num_grids": 5,        # 5 levels, 8% range = 1.6% per grid (1.1% after fees)
-            "range_pct": 0.08,     # Tighter range for BTC (less volatile)
-            "investment_ratio": 0.35  # 35% - highest volume, most reliable
+            "num_grids": 4,        # 4 levels, 5% range = 1.25% per grid (0.75% after fees)
+            "range_pct": 0.05,     # TIGHTER: 5% range for more trades
+            "investment_ratio": 0.30  # 30% - reduced from 35%, still largest
         },
         "SOL/USD": {
-            "num_grids": 5,        # 5 levels - tighter for more trades
-            "range_pct": 0.08,     # 8% range = 1.6% per grid (1.1% after fees)
-            "investment_ratio": 0.30  # 30% - good volume, second priority
+            "num_grids": 4,        # 4 levels, 5% range = 1.25% per grid
+            "range_pct": 0.05,     # TIGHTER: 5% range for more trades
+            "investment_ratio": 0.25  # 25% - reduced from 30%, less concentration
         },
         "LTC/USD": {
-            "num_grids": 5,        # 5 levels - payment coin, different narrative
-            "range_pct": 0.10,     # 10% range = 2.0% per grid (1.5% after fees)
-            "investment_ratio": 0.20  # 20% - lower volume, reduce exposure
+            "num_grids": 5,        # 5 levels - 100% completion rate, working great!
+            "range_pct": 0.08,     # TIGHTER: 8% range (was 10%)
+            "investment_ratio": 0.25  # INCREASED: 25% - best performer!
         },
         "AVAX/USD": {
-            "num_grids": 5,        # 5 levels - lowest BTC correlation (0.738)
-            "range_pct": 0.10,     # 10% range = 2.0% per grid (1.5% after fees) - tighter
-            "investment_ratio": 0.15  # 15% - lowest volume, smallest positions
+            "num_grids": 5,        # 5 levels - 120% completion rate, excellent!
+            "range_pct": 0.08,     # TIGHTER: 8% range (was 10%)
+            "investment_ratio": 0.20  # INCREASED: 20% - second best performer!
         }
     }
 
     # Grid safety settings
     GRID_STOP_LOSS_PCT = 0.10    # Stop loss if price drops 10% below grid
     GRID_REBALANCE_PCT = 0.03   # Rebalance if price moves 3% outside grid
+
+    # =========================================
+    # WINDFALL PROFIT-TAKING SETTINGS
+    # =========================================
+    # Capture profits when positions show significant unrealized gains
+    # Prevents profits from evaporating when price reverses before grid sells
+    #
+    # Logic (Option B - Momentum-Triggered Exit):
+    # IF (unrealized > 4% AND RSI > 70) OR (unrealized > 6%):
+    #     SELL 70% of position
+    #     LOG transaction for weekly review
+    WINDFALL_PROFIT_CONFIG = {
+        "enabled": True,
+        "soft_threshold_pct": 4.0,    # Sell if > 4% AND RSI > 70 (overbought)
+        "hard_threshold_pct": 6.0,    # Sell if > 6% regardless of RSI
+        "rsi_threshold": 70,          # RSI overbought level for soft trigger
+        "sell_portion": 0.70,         # Sell 70%, keep 30% for continued upside
+        "cooldown_minutes": 30,       # Wait 30 min between windfall sells per symbol
+    }
 
     # =========================================
     # LOGGING & MONITORING

@@ -500,16 +500,25 @@ class GridTradingStrategy:
                 else:
                     state.avg_sell_price = (state.avg_sell_price + price) / 2
 
-                # Calculate profit from this cycle
-                profit = (price - state.avg_buy_price) * quantity
-                state.total_profit += profit
+                # Calculate profit from this cycle - with validation
+                profit = 0.0
+                if state.avg_buy_price > 0:
+                    raw_profit = (price - state.avg_buy_price) * quantity
+                    # Sanity check: profit shouldn't exceed 20% of sale value
+                    # (indicates avg_buy_price was likely wrong)
+                    max_reasonable_profit = price * quantity * 0.20
+                    if abs(raw_profit) <= max_reasonable_profit:
+                        profit = raw_profit
+                        state.total_profit += profit
+                    # else: skip adding bogus profit
+                # else: avg_buy_price is 0, can't calculate real profit
 
                 # Create corresponding buy level
                 buy_price = price - state.config.grid_spacing
                 if buy_price >= state.config.lower_price:
                     self._add_buy_level(state, buy_price, quantity)
 
-                return profit
+                return profit if profit != 0 else None
 
         return None
 
@@ -598,6 +607,17 @@ class GridTradingStrategy:
         unfilled_buys = [l for l in state.levels if not l.is_filled and l.side == GridOrderSide.BUY]
         unfilled_sells = [l for l in state.levels if not l.is_filled and l.side == GridOrderSide.SELL]
 
+        # Calculate estimated profit from spread if total_profit is 0 but we have sells
+        estimated_profit = state.total_profit
+        if state.total_profit == 0 and state.total_sells > 0 and state.avg_buy_price > 0 and state.avg_sell_price > 0:
+            # Estimate profit from avg spread * investment per grid * number of sells
+            avg_spread = state.avg_sell_price - state.avg_buy_price
+            if avg_spread > 0:
+                # Rough estimate: avg spread * num_sells * (investment / avg_price)
+                avg_qty_per_trade = config.investment_per_grid / state.avg_buy_price
+                estimated_profit = avg_spread * avg_qty_per_trade * state.total_sells
+                logger.debug(f"Estimated profit for {symbol}: spread={avg_spread:.2f}, qty={avg_qty_per_trade:.4f}, sells={state.total_sells} -> ${estimated_profit:.2f}")
+
         return {
             "symbol": symbol,
             "is_active": state.is_active,
@@ -614,7 +634,7 @@ class GridTradingStrategy:
                 "pending_sells": len(unfilled_sells)
             },
             "performance": {
-                "total_profit": state.total_profit,
+                "total_profit": estimated_profit,
                 "completed_trades": state.completed_trades,
                 "total_buys": state.total_buys,
                 "total_sells": state.total_sells,

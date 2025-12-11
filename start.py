@@ -73,15 +73,16 @@ class ServiceManager:
         return False
 
     def start_bot(self) -> bool:
-        """Start the trading bot."""
-        logger.info("Starting Trading Bot...")
+        """Start the grid trading bot."""
+        logger.info("Starting Grid Trading Bot...")
 
         if not self.check_port(8000):
             logger.error("Port 8000 is already in use!")
             return False
 
+        # Run the grid bot server with caffeinate to prevent sleep
         proc = subprocess.Popen(
-            [sys.executable, "main.py"],
+            ["caffeinate", "-i", sys.executable, "-m", "src.api.server"],
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -90,11 +91,11 @@ class ServiceManager:
         self.processes['bot'] = proc
 
         # Wait for bot to start
-        if self.wait_for_port(8000, timeout=15):
-            logger.info("Trading Bot started on http://localhost:8000")
+        if self.wait_for_port(8000, timeout=30):
+            logger.info("Grid Trading Bot started on http://localhost:8000")
             return True
         else:
-            logger.error("Trading Bot failed to start")
+            logger.error("Grid Trading Bot failed to start")
             return False
 
     def start_dashboard(self) -> bool:
@@ -139,8 +140,10 @@ class ServiceManager:
         """Start the SMS notifier."""
         logger.info("Starting SMS Notifier...")
 
+        # Use caffeinate to prevent macOS from killing the process due to App Nap
+        # -i flag prevents idle sleep
         proc = subprocess.Popen(
-            [sys.executable, "src/notifications/notifier.py"],
+            ["caffeinate", "-i", sys.executable, "src/notifications/notifier.py"],
             cwd=str(PROJECT_ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -265,7 +268,7 @@ class ServiceManager:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         print("\n" + "=" * 60)
-        print(" BLUEBIRD 4.0 - Intelligent Grid Trading")
+        print(" BLUEBIRD 4.0 - Grid Trading Bot")
         print("=" * 60)
 
         # Start bot first
@@ -287,7 +290,7 @@ class ServiceManager:
         print("\n" + "-" * 60)
         print(" Services Running:")
         print("-" * 60)
-        print(f"  Bot API:    http://localhost:8000")
+        print(f"  Grid Bot:   http://localhost:8000")
         print(f"  API Docs:   http://localhost:8000/docs")
         if start_dashboard:
             print(f"  Dashboard:  http://localhost:5173")

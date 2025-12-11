@@ -1585,3 +1585,1017 @@ input:focus {
   cursor: not-allowed;
   transform: none !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CIRCUIT BREAKER PANEL - Emergency Trading Halt Controls
+   Distinctive danger-zone aesthetic with amber/red warning colors
+═══════════════════════════════════════════════════════════════════════════ */
+
+.circuit-breaker-panel {
+  margin-top: 1rem;
+  padding: 1.25rem;
+  background: linear-gradient(135deg,
+    rgba(229, 115, 115, 0.08) 0%,
+    rgba(255, 193, 7, 0.04) 50%,
+    rgba(229, 115, 115, 0.06) 100%
+  );
+  border: 1px solid rgba(229, 115, 115, 0.25);
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+  animation: circuit-pulse 3s ease-in-out infinite;
+}
+
+.circuit-breaker-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(229, 115, 115, 0.8) 20%,
+    rgba(255, 193, 7, 0.6) 50%,
+    rgba(229, 115, 115, 0.8) 80%,
+    transparent 100%
+  );
+  animation: danger-line-sweep 2s linear infinite;
+}
+
+@keyframes danger-line-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes circuit-pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(229, 115, 115, 0.1),
+                inset 0 0 30px rgba(229, 115, 115, 0.02);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(229, 115, 115, 0.2),
+                inset 0 0 40px rgba(229, 115, 115, 0.04);
+  }
+}
+
+.circuit-breaker-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.circuit-breaker-icon {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(229, 115, 115, 0.2), rgba(255, 193, 7, 0.15));
+  border: 1px solid rgba(229, 115, 115, 0.3);
+  border-radius: 12px;
+  box-shadow: 0 0 15px rgba(229, 115, 115, 0.2);
+}
+
+.circuit-flash {
+  font-size: 1.5rem;
+  animation: flash-icon 1.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px rgba(255, 193, 7, 0.6));
+}
+
+@keyframes flash-icon {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.1); }
+}
+
+.circuit-breaker-title {
+  display: flex;
+  flex-direction: column;
+}
+
+.circuit-breaker-title .font-display {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.circuit-breaker-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.circuit-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.6rem 0.85rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 10px;
+  border-left: 3px solid transparent;
+}
+
+.circuit-item.triggered {
+  border-left-color: var(--danger);
+  background: rgba(229, 115, 115, 0.08);
+}
+
+.circuit-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.circuit-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--danger);
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  background: rgba(229, 115, 115, 0.15);
+  border-radius: 4px;
+}
+
+.circuit-breaker-note {
+  text-align: center;
+  margin-bottom: 1rem;
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+
+.btn-circuit-reset {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  background: linear-gradient(135deg,
+    rgba(255, 193, 7, 0.15) 0%,
+    rgba(255, 152, 0, 0.12) 100%
+  );
+  border: 1px solid rgba(255, 193, 7, 0.4);
+  border-radius: 12px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ffc107;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  transition: all 0.25s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.btn-circuit-reset:hover:not(:disabled) {
+  background: linear-gradient(135deg,
+    rgba(255, 193, 7, 0.25) 0%,
+    rgba(255, 152, 0, 0.2) 100%
+  );
+  border-color: #ffc107;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(255, 193, 7, 0.25);
+}
+
+.btn-circuit-reset:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.reset-icon {
+  font-size: 1.1rem;
+  display: inline-block;
+  animation: rotate-icon 2s linear infinite paused;
+}
+
+.btn-circuit-reset:hover .reset-icon {
+  animation-play-state: running;
+}
+
+@keyframes rotate-icon {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* All Clear Status - Calm green indicator */
+.circuit-all-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-top: 1rem;
+  background: linear-gradient(135deg,
+    rgba(62, 207, 142, 0.08) 0%,
+    rgba(62, 207, 142, 0.04) 100%
+  );
+  border: 1px solid rgba(62, 207, 142, 0.2);
+  border-radius: 12px;
+}
+
+.all-clear-icon {
+  font-size: 1rem;
+  color: var(--success);
+  font-weight: bold;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WINDFALL PROFIT CAPTURES - Celebratory profit-taking panel
+   Gold & emerald aesthetic celebrating captured gains
+═══════════════════════════════════════════════════════════════════════════ */
+
+.windfall-card {
+  border-color: rgba(62, 207, 142, 0.15);
+  background: linear-gradient(135deg,
+    var(--midnight-surface) 0%,
+    rgba(62, 207, 142, 0.03) 100%
+  );
+  position: relative;
+  overflow: hidden;
+}
+
+.windfall-card::before {
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(62, 207, 142, 0.4),
+    rgba(212, 175, 55, 0.3),
+    transparent
+  );
+}
+
+.windfall-card:hover {
+  border-color: rgba(62, 207, 142, 0.25);
+  box-shadow: var(--shadow-lg), 0 0 30px rgba(62, 207, 142, 0.1);
+}
+
+.windfall-icon-container {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(62, 207, 142, 0.15), rgba(212, 175, 55, 0.1));
+  border: 1px solid rgba(62, 207, 142, 0.2);
+  border-radius: 10px;
+  animation: windfall-glow 3s ease-in-out infinite;
+}
+
+@keyframes windfall-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(62, 207, 142, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(62, 207, 142, 0.4); }
+}
+
+.windfall-icon {
+  font-size: 1.1rem;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+}
+
+/* Stats Hero */
+.windfall-stats-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(135deg,
+    rgba(62, 207, 142, 0.08) 0%,
+    rgba(212, 175, 55, 0.04) 100%
+  );
+  border: 1px solid rgba(62, 207, 142, 0.12);
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.windfall-stats-hero::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(62, 207, 142, 0.5),
+    transparent
+  );
+}
+
+.windfall-stat-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.windfall-stat-value {
+  font-family: 'Playfair Display', serif;
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  text-shadow: 0 2px 8px rgba(62, 207, 142, 0.3);
+}
+
+.windfall-stat-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.windfall-stat-secondary {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.windfall-mini-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.windfall-mini-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--gold-primary);
+}
+
+.windfall-mini-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Config Display */
+.windfall-config {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.windfall-config-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  min-width: 80px;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.windfall-config-item .config-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.2rem;
+}
+
+.windfall-config-item .config-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Transactions List */
+.windfall-transactions {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.windfall-transactions-header {
+  padding: 0.6rem 0.85rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.windfall-transactions-list {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.windfall-transaction-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  transition: background 0.15s ease;
+}
+
+.windfall-transaction-item:hover {
+  background: rgba(62, 207, 142, 0.04);
+}
+
+.windfall-transaction-item:last-child {
+  border-bottom: none;
+}
+
+.windfall-tx-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(62, 207, 142, 0.2), rgba(62, 207, 142, 0.1));
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.windfall-tx-check {
+  color: var(--success);
+  font-size: 0.7rem;
+  font-weight: bold;
+}
+
+.windfall-tx-details {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.windfall-tx-symbol {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.windfall-tx-trigger {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.windfall-tx-profit {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+/* Empty State */
+.windfall-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  gap: 0.5rem;
+}
+
+.windfall-empty-icon {
+  font-size: 1.5rem;
+  opacity: 0.5;
+}
+
+.windfall-empty-text {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Cooldowns */
+.windfall-cooldowns {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0;
+}
+
+.windfall-cooldown-list {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.windfall-cooldown-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  background: rgba(183, 110, 121, 0.15);
+  border: 1px solid rgba(183, 110, 121, 0.25);
+  border-radius: 6px;
+  color: var(--rose-gold);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   HISTORY DASHBOARD STYLES
+   Account history, equity curve, and realized P/L tracking
+═══════════════════════════════════════════════════════════════════════════ */
+
+.history-dashboard {
+  padding: 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+}
+
+.history-title h2 {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  color: var(--gold);
+  margin: 0;
+}
+
+.history-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+.history-controls {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.history-select {
+  background: var(--card-bg);
+  border: 1px solid rgba(212, 175, 55, 0.2);
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+.history-select:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+
+.history-error {
+  background: rgba(255, 100, 100, 0.1);
+  border: 1px solid rgba(255, 100, 100, 0.3);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  color: #ff6464;
+}
+
+/* Key Metrics Grid */
+.history-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.history-metric-card {
+  background: var(--card-bg);
+  border: 1px solid rgba(212, 175, 55, 0.15);
+  border-radius: 12px;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.history-metric-card .metric-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.history-metric-card .metric-value {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.history-metric-card .metric-value.positive {
+  color: var(--mint);
+}
+
+.history-metric-card .metric-value.negative {
+  color: var(--rose-gold);
+}
+
+.history-metric-card .metric-value.recovery {
+  color: var(--gold);
+}
+
+.history-metric-card .metric-sublabel {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 0.35rem;
+}
+
+/* History Sections */
+.history-section {
+  background: var(--card-bg);
+  border: 1px solid rgba(212, 175, 55, 0.15);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.history-section .section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+}
+
+.history-section .section-header h3 {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.history-section .section-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.equity-stats {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.equity-stats .stat {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.equity-stats .stat small {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* Equity Chart Container */
+.equity-chart-container {
+  height: 280px;
+  position: relative;
+}
+
+/* Recovery Section */
+.recovery-section {
+  background: linear-gradient(135deg, var(--card-bg), rgba(212, 175, 55, 0.05));
+}
+
+.recovery-target {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--mint);
+}
+
+.recovery-bar-container {
+  padding: 1rem 0;
+}
+
+.recovery-bar {
+  height: 24px;
+  background: rgba(212, 175, 55, 0.1);
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+.recovery-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold), var(--mint));
+  border-radius: 12px;
+  transition: width 0.5s ease;
+}
+
+.recovery-markers {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  justify-content: space-between;
+  padding: 0 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+}
+
+.recovery-markers .marker {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.recovery-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.recovery-pct {
+  color: var(--gold);
+  font-weight: 600;
+}
+
+/* Two Column Layout */
+.history-two-column {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+/* Daily P/L Table */
+.daily-pnl-table {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.daily-pnl-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.daily-pnl-table th {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-align: left;
+  padding: 0.5rem;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+}
+
+.daily-pnl-table td {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.05);
+}
+
+.daily-pnl-table .date {
+  color: var(--text-primary);
+}
+
+.daily-pnl-table .trades {
+  color: var(--gold);
+}
+
+.daily-pnl-table .buys {
+  color: var(--mint);
+}
+
+.daily-pnl-table .sells {
+  color: var(--rose-gold);
+}
+
+/* Symbol Performance */
+.symbol-performance {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.symbol-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  align-items: center;
+  gap: 1rem;
+}
+
+.symbol-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.symbol-name {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.symbol-trades {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.symbol-pnl-bar {
+  height: 8px;
+  background: rgba(212, 175, 55, 0.1);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.pnl-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.pnl-fill.positive {
+  background: var(--mint);
+}
+
+.pnl-fill.negative {
+  background: var(--rose-gold);
+}
+
+.symbol-pnl {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  min-width: 80px;
+  text-align: right;
+}
+
+.symbol-pnl.positive {
+  color: var(--mint);
+}
+
+.symbol-pnl.negative {
+  color: var(--rose-gold);
+}
+
+/* Trade History Table */
+.trade-history-section {
+  margin-bottom: 1rem;
+}
+
+.trade-filters {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.trade-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.trade-history-table {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.trade-history-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.trade-history-table th {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-align: left;
+  padding: 0.6rem;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+  position: sticky;
+  top: 0;
+  background: var(--card-bg);
+}
+
+.trade-history-table td {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.6rem;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.05);
+}
+
+.trade-history-table tr:hover td {
+  background: rgba(212, 175, 55, 0.03);
+}
+
+.trade-history-table .time {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.trade-history-table .time .date {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.trade-history-table .time .clock {
+  color: var(--text-primary);
+}
+
+.trade-history-table .symbol {
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.trade-history-table .side {
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.trade-history-table .side.buy {
+  color: var(--mint);
+}
+
+.trade-history-table .side.sell {
+  color: var(--rose-gold);
+}
+
+.trade-history-table .qty {
+  color: var(--text-primary);
+}
+
+.trade-history-table .price {
+  color: var(--text-primary);
+}
+
+.trade-history-table .value {
+  color: var(--gold);
+}
+
+.trade-history-table .pnl {
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.trade-history-table .pnl.positive {
+  color: var(--success-green);
+}
+
+.trade-history-table .pnl.negative {
+  color: var(--rose-gold);
+}
+
+.trade-history-table .no-data {
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 2rem;
+}
+
+/* History Footer */
+.history-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding-top: 1rem;
+  border-top: 1px solid rgba(212, 175, 55, 0.1);
+}
+
+/* No Data State */
+.no-data {
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 1.5rem;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .history-metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .history-two-column {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .history-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .history-header {
+    flex-direction: column;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .equity-stats {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+}

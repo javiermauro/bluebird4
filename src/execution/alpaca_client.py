@@ -268,3 +268,122 @@ class AlpacaClient:
         """
         all_orders = self.get_order_history(days=days, symbols=symbols, status='closed')
         return [o for o in all_orders if o['status'].lower() == 'orderstatus.filled' or o['status'].lower() == 'filled']
+
+    def get_portfolio_history(self, period: str = "1M", timeframe: str = "1D") -> Dict:
+        """
+        Get portfolio equity history from Alpaca.
+
+        Args:
+            period: Time period - 1D, 1W, 1M, 3M, 1A (1 year), all
+            timeframe: Resolution - 1Min, 5Min, 15Min, 1H, 1D
+
+        Returns:
+            Dict with equity curve data: {
+                'timestamps': [],
+                'equity': [],
+                'profit_loss': [],
+                'profit_loss_pct': [],
+                'base_value': float
+            }
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return {
+                'timestamps': [],
+                'equity': [],
+                'profit_loss': [],
+                'profit_loss_pct': [],
+                'base_value': 100000
+            }
+
+        try:
+            from alpaca.trading.requests import GetPortfolioHistoryRequest
+            from datetime import datetime as dt
+
+            # Build proper request object
+            request = GetPortfolioHistoryRequest(
+                period=period,
+                timeframe=timeframe
+            )
+
+            history = self.trading_client.get_portfolio_history(history_filter=request)
+
+            # Convert timestamps (unix epoch) to ISO format
+            timestamps = []
+            if history.timestamp:
+                for ts in history.timestamp:
+                    if isinstance(ts, (int, float)):
+                        timestamps.append(dt.fromtimestamp(ts).isoformat())
+                    elif hasattr(ts, 'isoformat'):
+                        timestamps.append(ts.isoformat())
+                    else:
+                        timestamps.append(str(ts))
+
+            # Convert to dict format
+            return {
+                'timestamps': timestamps,
+                'equity': list(history.equity) if history.equity else [],
+                'profit_loss': list(history.profit_loss) if history.profit_loss else [],
+                'profit_loss_pct': list(history.profit_loss_pct) if history.profit_loss_pct else [],
+                'base_value': float(history.base_value) if history.base_value else 0.0
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to fetch portfolio history: {e}")
+            return {
+                'timestamps': [],
+                'equity': [],
+                'profit_loss': [],
+                'profit_loss_pct': [],
+                'base_value': 0.0,
+                'error': str(e)
+            }
+
+    def get_all_filled_orders(self, days: int = 30) -> List[Dict]:
+        """
+        Get all filled orders for comprehensive P/L calculation.
+        Uses pagination to get all orders.
+
+        Args:
+            days: Number of days of history
+
+        Returns:
+            List of all filled orders
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return []
+
+        try:
+            all_orders = []
+            after_date = datetime.now() - timedelta(days=days)
+
+            # Fetch in batches
+            request_params = GetOrdersRequest(
+                status=QueryOrderStatus.CLOSED,
+                after=after_date,
+                limit=500
+            )
+
+            orders = self.trading_client.get_orders(filter=request_params)
+
+            for order in orders:
+                status = str(order.status).lower()
+                if 'filled' in status:
+                    order_dict = {
+                        'id': str(order.id),
+                        'symbol': order.symbol,
+                        'side': str(order.side).replace('OrderSide.', '').lower(),
+                        'qty': float(order.filled_qty) if order.filled_qty else 0.0,
+                        'price': float(order.filled_avg_price) if order.filled_avg_price else 0.0,
+                        'value': float(order.filled_qty or 0) * float(order.filled_avg_price or 0),
+                        'status': 'filled',
+                        'created_at': order.created_at.isoformat() if order.created_at else None,
+                        'filled_at': order.filled_at.isoformat() if order.filled_at else None,
+                    }
+                    all_orders.append(order_dict)
+
+            logger.info(f"[HISTORY] Fetched {len(all_orders)} filled orders (last {days} days)")
+            return all_orders
+
+        except Exception as e:
+            logger.error(f"Failed to fetch all filled orders: {e}")
+            return []

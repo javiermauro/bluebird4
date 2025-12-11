@@ -27,9 +27,15 @@ def format_trade_alert(trade: Dict[str, Any]) -> str:
     msg = f"BLUEBIRD: {side} {symbol}\n"
     msg += f"{qty:.4f} @ ${price:,.2f}"
 
+    # Only show profit if it passes sanity check
+    # Profit > 20% of sale value is likely a calculation bug
     if profit is not None and side == 'SELL':
-        sign = '+' if profit >= 0 else ''
-        msg += f"\nProfit: {sign}${profit:.2f}"
+        sale_value = qty * price
+        max_reasonable_profit = sale_value * 0.20  # 20% max
+        if abs(profit) <= max_reasonable_profit and profit != 0:
+            sign = '+' if profit >= 0 else ''
+            msg += f"\nProfit: {sign}${profit:.2f}"
+        # else: skip showing bogus profit
 
     return msg
 

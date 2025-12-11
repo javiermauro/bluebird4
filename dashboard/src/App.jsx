@@ -12,6 +12,7 @@ import {
   Filler
 } from 'chart.js';
 import TrainingDashboard from './components/TrainingDashboard';
+import HistoryDashboard from './components/HistoryDashboard';
 
 ChartJS.register(
   CategoryScale,
@@ -87,7 +88,17 @@ function App() {
     daily_limit_hit: false,
     max_drawdown_hit: false,
     trading_halted: false,
-    stop_losses: {}
+    stop_losses: {},
+    // All-time performance (since Nov 24)
+    alltime_starting_equity: 96811.55,
+    alltime_starting_date: '2025-11-24',
+    alltime_pnl: 0,
+    alltime_pnl_pct: 0,
+    // Grid trading performance (since Dec 2)
+    grid_starting_equity: 90276.26,
+    grid_starting_date: '2025-12-02',
+    grid_pnl: 0,
+    grid_pnl_pct: 0
   });
 
   // New profitability tracking state
@@ -171,6 +182,31 @@ function App() {
     }
   });
 
+  // Circuit Breaker state (persists across bot restarts)
+  const [circuitBreaker, setCircuitBreaker] = useState({
+    from_file: {},
+    from_api: {},
+    loading: false,
+    lastFetch: null,
+    anyTriggered: false
+  });
+  const [circuitBreakerResetting, setCircuitBreakerResetting] = useState(false);
+
+  // Windfall Profit-Taking state (captures profits on big unrealized gains)
+  const [windfall, setWindfall] = useState({
+    enabled: false,
+    total_captures: 0,
+    total_profit: 0,
+    transactions: [],
+    config: {
+      soft_threshold_pct: 4.0,
+      hard_threshold_pct: 6.0,
+      rsi_threshold: 70,
+      sell_portion: 0.70
+    },
+    active_cooldowns: {}
+  });
+
   // Per-symbol chart data storage
   const [symbolChartData, setSymbolChartData] = useState({
     'BTC/USD': { labels: [], data: [] },
@@ -230,6 +266,7 @@ function App() {
         }
         if (updateData.performance) setPerformance(updateData.performance);
         if (updateData.orders) setOrders(updateData.orders);
+        if (updateData.windfall) setWindfall(updateData.windfall);
 
         // Track per-symbol prices from positions and grid data
         if (updateData.positions || updateData.grid?.summaries) {
@@ -333,6 +370,7 @@ function App() {
               }
               if (updateData.performance) setPerformance(updateData.performance);
               if (updateData.orders) setOrders(updateData.orders);
+              if (updateData.windfall) setWindfall(updateData.windfall);
               setLastUpdate(new Date());
               updateChart(updateData.timestamp, updateData.price, updateData.symbol, updateData.positions || []);
             } else if (message.type === 'log') {
@@ -508,6 +546,68 @@ function App() {
     }
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CIRCUIT BREAKER FUNCTIONS - Emergency Trading Halt Controls
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Fetch circuit breaker status from persistent file
+  const fetchCircuitBreakerStatus = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/risk/status');
+      if (response.ok) {
+        const data = await response.json();
+        const fileData = data.from_file || {};
+        const anyTriggered = fileData.max_drawdown_hit ||
+                            fileData.daily_limit_hit ||
+                            Object.keys(fileData.stop_losses_triggered || {}).length > 0;
+        setCircuitBreaker({
+          from_file: fileData,
+          from_api: data.from_api || {},
+          loading: false,
+          lastFetch: new Date().toISOString(),
+          anyTriggered
+        });
+      }
+    } catch (error) {
+      console.log('Could not fetch circuit breaker status');
+    }
+  };
+
+  // Reset circuit breakers (requires confirmation)
+  const resetCircuitBreaker = async (resetType = 'all') => {
+    if (!window.confirm(`Are you sure you want to reset circuit breakers (${resetType})?\n\nThis will allow trading to resume. Make sure the underlying issue is resolved!`)) {
+      return;
+    }
+
+    setCircuitBreakerResetting(true);
+    try {
+      const response = await fetch(`http://localhost:8000/api/risk/reset?reset_type=${resetType}`, {
+        method: 'POST'
+      });
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Circuit breaker reset:', result);
+        // Refresh status after reset
+        setTimeout(() => {
+          fetchCircuitBreakerStatus();
+          setCircuitBreakerResetting(false);
+        }, 500);
+      } else {
+        setCircuitBreakerResetting(false);
+      }
+    } catch (error) {
+      console.error('Failed to reset circuit breaker:', error);
+      setCircuitBreakerResetting(false);
+    }
+  };
+
+  // Fetch circuit breaker status periodically
+  useEffect(() => {
+    fetchCircuitBreakerStatus();
+    const interval = setInterval(fetchCircuitBreakerStatus, 15000); // Every 15 seconds
+    return () => clearInterval(interval);
+  }, []);
+
   // Fetch notifier status periodically
   useEffect(() => {
     fetchNotifierData();
@@ -639,6 +739,12 @@ function App() {
                 className={`btn btn-secondary ${currentView === 'training' ? 'active' : ''}`}
               >
                 Training
+              </button>
+              <button
+                onClick={() => setCurrentView('history')}
+                className={`btn btn-secondary ${currentView === 'history' ? 'active' : ''}`}
+              >
+                History
               </button>
             </div>
 
@@ -975,6 +1081,8 @@ function App() {
 
         {currentView === 'training' ? (
           <TrainingDashboard />
+        ) : currentView === 'history' ? (
+          <HistoryDashboard />
         ) : (
           <>
             {/* ═══════════════════════════════════════════════════════════════════
@@ -1020,6 +1128,39 @@ function App() {
                     <span className="card-title">Risk Management</span>
                   </div>
                   <div className="card-body space-y-4">
+                    {/* All-Time P/L (since Nov 24) */}
+                    <div>
+                      <div className="flex justify-between text-sm mb-2">
+                        <span className="text-muted">All-Time P&L <span className="text-xs opacity-60">(Nov 24)</span></span>
+                        <span className={risk.alltime_pnl >= 0 ? 'text-success' : 'text-danger'}>
+                          ${risk.alltime_pnl?.toFixed(2) || '0.00'} ({risk.alltime_pnl_pct?.toFixed(2) || '0.00'}%)
+                        </span>
+                      </div>
+                      <div className="progress">
+                        <div
+                          className={`progress-fill ${risk.alltime_pnl >= 0 ? 'success' : 'danger'}`}
+                          style={{ width: `${Math.min(Math.abs(risk.alltime_pnl_pct || 0) * 10, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Grid P/L (since Dec 2) */}
+                    <div>
+                      <div className="flex justify-between text-sm mb-2">
+                        <span className="text-muted">Grid P&L <span className="text-xs opacity-60">(Dec 2)</span></span>
+                        <span className={risk.grid_pnl >= 0 ? 'text-success' : 'text-danger'}>
+                          ${risk.grid_pnl?.toFixed(2) || '0.00'} ({risk.grid_pnl_pct?.toFixed(2) || '0.00'}%)
+                        </span>
+                      </div>
+                      <div className="progress">
+                        <div
+                          className={`progress-fill ${risk.grid_pnl >= 0 ? 'success' : 'danger'}`}
+                          style={{ width: `${Math.min(Math.abs(risk.grid_pnl_pct || 0) * 20, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Daily P/L */}
                     <div>
                       <div className="flex justify-between text-sm mb-2">
                         <span className="text-muted">Daily P&L</span>
@@ -1067,9 +1208,70 @@ function App() {
                       </div>
                     </div>
 
-                    {risk.trading_halted && (
-                      <div className="p-3 rounded-xl bg-[rgba(229,115,115,0.1)] border border-[rgba(229,115,115,0.2)] text-center">
-                        <span className="text-danger font-semibold">Trading Halted</span>
+                    {/* Circuit Breaker Panel - Persistent Emergency Controls */}
+                    {(risk.trading_halted || circuitBreaker.anyTriggered) && (
+                      <div className="circuit-breaker-panel">
+                        <div className="circuit-breaker-header">
+                          <div className="circuit-breaker-icon">
+                            <span className="circuit-flash">⚡</span>
+                          </div>
+                          <div className="circuit-breaker-title">
+                            <span className="font-display text-danger">Circuit Breaker Active</span>
+                            <span className="text-xs text-muted">Trading halted for safety</span>
+                          </div>
+                        </div>
+
+                        <div className="circuit-breaker-status">
+                          {circuitBreaker.from_file?.max_drawdown_hit && (
+                            <div className="circuit-item triggered">
+                              <span className="circuit-label">Max Drawdown</span>
+                              <span className="circuit-value">TRIGGERED</span>
+                            </div>
+                          )}
+                          {circuitBreaker.from_file?.daily_limit_hit && (
+                            <div className="circuit-item triggered">
+                              <span className="circuit-label">Daily Limit</span>
+                              <span className="circuit-value">TRIGGERED</span>
+                            </div>
+                          )}
+                          {Object.entries(circuitBreaker.from_file?.stop_losses_triggered || {}).map(([symbol, triggered]) => (
+                            triggered && (
+                              <div key={symbol} className="circuit-item triggered">
+                                <span className="circuit-label">{symbol} Stop-Loss</span>
+                                <span className="circuit-value">TRIGGERED</span>
+                              </div>
+                            )
+                          ))}
+                        </div>
+
+                        <div className="circuit-breaker-note">
+                          <span className="text-xs text-muted italic">
+                            Persists across restarts. Use reset to resume trading.
+                          </span>
+                        </div>
+
+                        <button
+                          className="btn-circuit-reset"
+                          onClick={() => resetCircuitBreaker('all')}
+                          disabled={circuitBreakerResetting}
+                        >
+                          {circuitBreakerResetting ? (
+                            <>Resetting...</>
+                          ) : (
+                            <>
+                              <span className="reset-icon">↻</span>
+                              Reset All Circuit Breakers
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* All Clear Status */}
+                    {!risk.trading_halted && !circuitBreaker.anyTriggered && (
+                      <div className="circuit-all-clear">
+                        <span className="all-clear-icon">✓</span>
+                        <span className="text-success text-sm font-medium">All Systems Operational</span>
                       </div>
                     )}
                   </div>
@@ -1102,6 +1304,103 @@ function App() {
                     {Object.keys(grid.summaries || {}).length === 0 && (
                       <div className="text-center py-6 text-muted text-sm">
                         Initializing grid levels...
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Windfall Profit Captures */}
+                <div className="card windfall-card">
+                  <div className="card-header">
+                    <div className="windfall-icon-container">
+                      <span className="windfall-icon">💰</span>
+                    </div>
+                    <span className="card-title">Windfall Captures</span>
+                    <span className={`badge ${windfall.enabled ? 'badge-success' : 'badge-neutral'} ml-auto`}>
+                      {windfall.enabled ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <div className="card-body space-y-4">
+                    {/* Stats Hero */}
+                    <div className="windfall-stats-hero">
+                      <div className="windfall-stat-main">
+                        <span className="windfall-stat-value text-success">
+                          ${windfall.total_profit?.toFixed(2) || '0.00'}
+                        </span>
+                        <span className="windfall-stat-label">Total Captured</span>
+                      </div>
+                      <div className="windfall-stat-secondary">
+                        <div className="windfall-mini-stat">
+                          <span className="windfall-mini-value">{windfall.total_captures || 0}</span>
+                          <span className="windfall-mini-label">Captures</span>
+                        </div>
+                        <div className="windfall-mini-stat">
+                          <span className="windfall-mini-value">
+                            ${windfall.total_captures > 0 ? (windfall.total_profit / windfall.total_captures).toFixed(2) : '0.00'}
+                          </span>
+                          <span className="windfall-mini-label">Avg/Capture</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Config Display */}
+                    <div className="windfall-config">
+                      <div className="windfall-config-item">
+                        <span className="config-label">Soft Trigger</span>
+                        <span className="config-value">{windfall.config?.soft_threshold_pct || 4}% + RSI&gt;{windfall.config?.rsi_threshold || 70}</span>
+                      </div>
+                      <div className="windfall-config-item">
+                        <span className="config-label">Hard Trigger</span>
+                        <span className="config-value">{windfall.config?.hard_threshold_pct || 6}%</span>
+                      </div>
+                      <div className="windfall-config-item">
+                        <span className="config-label">Sell Portion</span>
+                        <span className="config-value">{((windfall.config?.sell_portion || 0.70) * 100).toFixed(0)}%</span>
+                      </div>
+                    </div>
+
+                    {/* Recent Transactions */}
+                    <div className="windfall-transactions">
+                      <div className="windfall-transactions-header">
+                        <span className="text-xs text-muted uppercase tracking-wider">Recent Captures</span>
+                      </div>
+                      <div className="windfall-transactions-list">
+                        {(windfall.transactions || []).slice(-5).reverse().map((tx, idx) => (
+                          <div key={idx} className="windfall-transaction-item">
+                            <div className="windfall-tx-icon">
+                              <span className="windfall-tx-check">✓</span>
+                            </div>
+                            <div className="windfall-tx-details">
+                              <span className="windfall-tx-symbol">{tx.symbol}</span>
+                              <span className="windfall-tx-trigger">
+                                {tx.trigger_type === 'hard_threshold' ? `${tx.unrealized_pct}%` : `RSI ${tx.rsi}`}
+                              </span>
+                            </div>
+                            <div className="windfall-tx-profit">
+                              <span className="text-success font-mono">+${tx.profit?.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        ))}
+                        {(!windfall.transactions || windfall.transactions.length === 0) && (
+                          <div className="windfall-empty">
+                            <span className="windfall-empty-icon">🎯</span>
+                            <span className="windfall-empty-text">Waiting for windfall opportunities...</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Active Cooldowns */}
+                    {Object.keys(windfall.active_cooldowns || {}).length > 0 && (
+                      <div className="windfall-cooldowns">
+                        <span className="text-xs text-muted">Active Cooldowns:</span>
+                        <div className="windfall-cooldown-list">
+                          {Object.entries(windfall.active_cooldowns).map(([symbol, time]) => (
+                            <span key={symbol} className="windfall-cooldown-badge">
+                              {symbol}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>
