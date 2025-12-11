@@ -500,25 +500,36 @@ class GridTradingStrategy:
                 else:
                     state.avg_sell_price = (state.avg_sell_price + price) / 2
 
-                # Calculate profit from this cycle - with validation
+                # Calculate profit from this grid cycle
+                # Use grid spacing as the profit basis (more reliable than avg_buy tracking)
                 profit = 0.0
-                if state.avg_buy_price > 0:
-                    raw_profit = (price - state.avg_buy_price) * quantity
-                    # Sanity check: profit shouldn't exceed 20% of sale value
-                    # (indicates avg_buy_price was likely wrong)
-                    max_reasonable_profit = price * quantity * 0.20
-                    if abs(raw_profit) <= max_reasonable_profit:
-                        profit = raw_profit
-                        state.total_profit += profit
-                    # else: skip adding bogus profit
-                # else: avg_buy_price is 0, can't calculate real profit
+                grid_spacing = state.config.grid_spacing
+
+                # Method 1: Use grid spacing (most reliable)
+                # Each completed grid cycle profits by the grid spacing * quantity
+                # Minus fees (~0.5% round trip)
+                fee_pct = 0.005  # 0.5% round trip fees
+                gross_profit = grid_spacing * quantity
+                fees = price * quantity * fee_pct
+                profit = gross_profit - fees
+
+                # Sanity check: profit shouldn't be negative for a proper grid sell
+                # (sell should be above buy by at least grid_spacing)
+                if profit > 0:
+                    state.total_profit += profit
+                    logger.info(f"[PROFIT] {symbol}: +${profit:.2f} (grid spacing: ${grid_spacing:.2f}, qty: {quantity:.4f}, fees: ${fees:.2f})")
+                else:
+                    # If profit would be negative, this might be a forced sell or stop-loss
+                    # Don't add to total_profit but log it
+                    logger.warning(f"[PROFIT] {symbol}: Negative profit ${profit:.2f} - possibly forced sell")
+                    profit = 0.0
 
                 # Create corresponding buy level
                 buy_price = price - state.config.grid_spacing
                 if buy_price >= state.config.lower_price:
                     self._add_buy_level(state, buy_price, quantity)
 
-                return profit if profit != 0 else None
+                return profit if profit > 0 else None
 
         return None
 
@@ -607,16 +618,28 @@ class GridTradingStrategy:
         unfilled_buys = [l for l in state.levels if not l.is_filled and l.side == GridOrderSide.BUY]
         unfilled_sells = [l for l in state.levels if not l.is_filled and l.side == GridOrderSide.SELL]
 
-        # Calculate estimated profit from spread if total_profit is 0 but we have sells
+        # Calculate estimated profit from grid spacing if total_profit is 0 but we have sells
         estimated_profit = state.total_profit
-        if state.total_profit == 0 and state.total_sells > 0 and state.avg_buy_price > 0 and state.avg_sell_price > 0:
-            # Estimate profit from avg spread * investment per grid * number of sells
-            avg_spread = state.avg_sell_price - state.avg_buy_price
-            if avg_spread > 0:
-                # Rough estimate: avg spread * num_sells * (investment / avg_price)
-                avg_qty_per_trade = config.investment_per_grid / state.avg_buy_price
-                estimated_profit = avg_spread * avg_qty_per_trade * state.total_sells
-                logger.debug(f"Estimated profit for {symbol}: spread={avg_spread:.2f}, qty={avg_qty_per_trade:.4f}, sells={state.total_sells} -> ${estimated_profit:.2f}")
+        if state.total_profit == 0 and state.total_sells > 0:
+            # Use grid spacing for more reliable profit estimation
+            # Each sell should profit by approximately: grid_spacing * quantity - fees
+            grid_spacing = config.grid_spacing
+            fee_pct = 0.005  # ~0.5% round trip fees
+
+            # Estimate average quantity per trade
+            avg_price = state.avg_sell_price if state.avg_sell_price > 0 else config.upper_price
+            avg_qty_per_trade = config.investment_per_grid / avg_price
+
+            # Gross profit from grid spacing
+            gross_profit_per_sell = grid_spacing * avg_qty_per_trade
+            # Estimated fees per trade
+            fees_per_trade = avg_price * avg_qty_per_trade * fee_pct
+            # Net profit per sell
+            net_profit_per_sell = gross_profit_per_sell - fees_per_trade
+
+            if net_profit_per_sell > 0:
+                estimated_profit = net_profit_per_sell * state.total_sells
+                logger.debug(f"Estimated profit for {symbol}: spacing=${grid_spacing:.2f}, qty={avg_qty_per_trade:.4f}, sells={state.total_sells} -> ${estimated_profit:.2f}")
 
         return {
             "symbol": symbol,

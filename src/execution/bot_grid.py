@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 import numpy as np
 
+import pandas as pd
+
 from config_ultra import UltraConfig
 from src.execution.alpaca_client import AlpacaClient
 from src.strategy.grid_trading import (
@@ -34,6 +36,8 @@ from src.strategy.grid_trading import (
     DEFAULT_GRID_CONFIGS,
     create_default_grids
 )
+from src.strategy.regime_detector import RegimeDetector, MarketRegime
+from src.strategy.feature_calculator import FeatureCalculator
 
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -78,6 +82,15 @@ class GridTradingBot:
         # Trade tracking
         self.total_trades = 0
         self.total_profit = 0.0
+
+        # === REGIME DETECTION (Smart Grid) ===
+        # Detects market regime to PAUSE grid during strong trends
+        self.regime_detector = RegimeDetector(config)
+        self.regime_pause: Dict[str, bool] = {s: False for s in self.symbols}  # Per-symbol pause state
+        self.current_regime: Dict[str, str] = {s: MarketRegime.UNKNOWN for s in self.symbols}
+        self.regime_metrics: Dict[str, Dict] = {}  # Store latest regime metrics per symbol
+        self.regime_adx_threshold = getattr(config, 'REGIME_ADX_THRESHOLD', 40)  # ADX threshold for "strong trend"
+        logger.info(f"  Regime Detection: ENABLED (ADX threshold={self.regime_adx_threshold})")
 
         # === RISK MANAGEMENT STATE ===
         # Track peak equity for drawdown calculation
@@ -497,6 +510,103 @@ class GridTradingBot:
         self.price_history[symbol].append(price)
         if len(self.price_history[symbol]) > self.correlation_window:
             self.price_history[symbol].pop(0)
+
+    def detect_regime(self, symbol: str) -> Dict[str, Any]:
+        """
+        Detect market regime for a symbol using stored bars.
+
+        Returns:
+            Dict with regime info, whether to allow buys/sells, and ADX value
+        """
+        result = {
+            'regime': MarketRegime.UNKNOWN,
+            'allow_buy': True,
+            'allow_sell': True,
+            'is_strong_trend': False,
+            'adx': 0,
+            'confidence': 0,
+            'reason': 'Insufficient data'
+        }
+
+        bars = self.bars.get(symbol, [])
+        if len(bars) < 50:
+            return result
+
+        try:
+            # Build DataFrame from bars
+            data = []
+            for bar in bars:
+                data.append({
+                    'open': float(bar.open) if hasattr(bar, 'open') else float(bar.get('open', 0)),
+                    'high': float(bar.high) if hasattr(bar, 'high') else float(bar.get('high', 0)),
+                    'low': float(bar.low) if hasattr(bar, 'low') else float(bar.get('low', 0)),
+                    'close': float(bar.close) if hasattr(bar, 'close') else float(bar.get('close', 0)),
+                    'volume': float(bar.volume) if hasattr(bar, 'volume') else float(bar.get('volume', 0))
+                })
+
+            df = pd.DataFrame(data)
+
+            # Calculate features for regime detection
+            df = FeatureCalculator.calculate_features(df, drop_warmup=False)
+
+            # Run regime detection
+            regime_result = self.regime_detector.detect(df)
+
+            regime = regime_result.get('regime', MarketRegime.UNKNOWN)
+            adx = regime_result.get('metrics', {}).get('adx', 0)
+            confidence = regime_result.get('confidence', 0)
+
+            # Store metrics
+            self.current_regime[symbol] = regime
+            self.regime_metrics[symbol] = regime_result.get('metrics', {})
+
+            # Check for strong trend
+            is_strong_trend = (
+                regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN]
+                and adx > self.regime_adx_threshold
+            )
+
+            # Determine whether to allow buys/sells based on regime
+            allow_buy = True
+            allow_sell = True
+            reason = f"Regime: {regime}"
+
+            if is_strong_trend:
+                self.regime_pause[symbol] = True
+
+                if regime == MarketRegime.TRENDING_DOWN:
+                    # Strong downtrend: PAUSE buys (don't catch falling knife)
+                    # ALLOW sells (take profit on existing positions)
+                    allow_buy = False
+                    allow_sell = True
+                    reason = f"STRONG DOWNTREND (ADX={adx:.0f}) - Pausing buys"
+
+                elif regime == MarketRegime.TRENDING_UP:
+                    # Strong uptrend: PAUSE sells (let winners run)
+                    # ALLOW buys (can still accumulate)
+                    allow_buy = True
+                    allow_sell = False
+                    reason = f"STRONG UPTREND (ADX={adx:.0f}) - Holding sells"
+            else:
+                self.regime_pause[symbol] = False
+                reason = f"{regime} (ADX={adx:.0f}) - Grid active"
+
+            result = {
+                'regime': regime,
+                'allow_buy': allow_buy,
+                'allow_sell': allow_sell,
+                'is_strong_trend': is_strong_trend,
+                'adx': adx,
+                'confidence': confidence,
+                'reason': reason,
+                'strategy_hint': regime_result.get('strategy_hint', 'WAIT'),
+                'metrics': regime_result.get('metrics', {})
+            }
+
+        except Exception as e:
+            logger.warning(f"Regime detection failed for {symbol}: {e}")
+
+        return result
 
     def is_optimal_trading_time(self) -> Dict[str, Any]:
         """
@@ -1548,6 +1658,16 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             # === MOMENTUM FILTER ===
             momentum_status = bot.get_momentum_filter(symbol)
 
+            # === REGIME DETECTION (Smart Grid) ===
+            regime_status = bot.detect_regime(symbol)
+            regime_allow_buy = regime_status.get('allow_buy', True)
+            regime_allow_sell = regime_status.get('allow_sell', True)
+            current_regime = regime_status.get('regime', 'UNKNOWN')
+            regime_adx = regime_status.get('adx', 0)
+
+            if regime_status.get('is_strong_trend'):
+                await broadcast_log(f"[REGIME] {symbol}: {regime_status['reason']}")
+
             # Get current positions
             try:
                 positions = client.get_positions()
@@ -1723,8 +1843,12 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             trade_executed = None
 
             if action == 'BUY' and order_details and not skip_trading:
+                # Check regime filter first (Smart Grid - avoid buying in strong downtrend)
+                if not regime_allow_buy:
+                    logger.info(f"[REGIME] Skipping BUY {symbol}: {regime_status['reason']}")
+                    await broadcast_log(f"[REGIME] Skipping BUY: {regime_status['reason']}")
                 # Check momentum filter
-                if not momentum_status['allow_buy']:
+                elif not momentum_status['allow_buy']:
                     logger.info(f"[MOM] Skipping BUY {symbol}: {momentum_status['reason']}")
                     await broadcast_log(f"[MOM] Skipping BUY: {momentum_status['reason']}")
                 # Check allocation limit - prevent over-buying
@@ -1800,8 +1924,12 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             await broadcast_log(f"[GRID] Order failed: {e}")
 
             elif action == 'SELL' and order_details and not skip_trading:
+                # Check regime filter first (Smart Grid - hold sells in strong uptrend)
+                if not regime_allow_sell:
+                    logger.info(f"[REGIME] Holding SELL {symbol}: {regime_status['reason']}")
+                    await broadcast_log(f"[REGIME] Holding SELL: {regime_status['reason']}")
                 # Check momentum filter (optional for sells - let profits run in uptrend)
-                if not momentum_status['allow_sell']:
+                elif not momentum_status['allow_sell']:
                     await broadcast_log(f"[MOM] Delaying SELL: {momentum_status['reason']}")
                 else:
                     base_qty = order_details['quantity']
@@ -1987,6 +2115,19 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     "status": momentum_status,
                     "allow_buy": momentum_status.get('allow_buy', True),
                     "allow_sell": momentum_status.get('allow_sell', True)
+                },
+                "regime": {
+                    "current": current_regime,
+                    "adx": regime_adx,
+                    "allow_buy": regime_allow_buy,
+                    "allow_sell": regime_allow_sell,
+                    "is_strong_trend": regime_status.get('is_strong_trend', False),
+                    "paused": bot.regime_pause.get(symbol, False),
+                    "reason": regime_status.get('reason', ''),
+                    "strategy_hint": regime_status.get('strategy_hint', 'WAIT'),
+                    "confidence": regime_status.get('confidence', 0),
+                    "all_regimes": dict(bot.current_regime),
+                    "all_paused": dict(bot.regime_pause)
                 },
                 "performance": bot.get_performance_report(),
                 "risk": bot.get_risk_status(equity),

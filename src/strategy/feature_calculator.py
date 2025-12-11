@@ -122,6 +122,8 @@ class FeatureCalculator:
 
         df['momentum'] = talib.MOM(close, timeperiod=10)
         df['adx'] = talib.ADX(high, low, close, timeperiod=14)
+        df['plus_di'] = talib.PLUS_DI(high, low, close, timeperiod=14)
+        df['minus_di'] = talib.MINUS_DI(high, low, close, timeperiod=14)
 
         # ============================================
         # PRICE PATTERNS (7)

@@ -108,6 +108,21 @@ function App() {
     momentum: { status: {}, allow_buy: true, allow_sell: true }
   });
 
+  // Smart Grid Regime Detection state
+  const [regime, setRegime] = useState({
+    current: 'UNKNOWN',
+    adx: 0,
+    allow_buy: true,
+    allow_sell: true,
+    is_strong_trend: false,
+    paused: false,
+    reason: 'Initializing...',
+    strategy_hint: 'WAIT',
+    confidence: 0,
+    all_regimes: {},
+    all_paused: {}
+  });
+
   const [performance, setPerformance] = useState({
     total_trades: 0,
     total_profit: 0,
@@ -371,6 +386,7 @@ function App() {
               if (updateData.performance) setPerformance(updateData.performance);
               if (updateData.orders) setOrders(updateData.orders);
               if (updateData.windfall) setWindfall(updateData.windfall);
+              if (updateData.regime) setRegime(updateData.regime);
               setLastUpdate(new Date());
               updateChart(updateData.timestamp, updateData.price, updateData.symbol, updateData.positions || []);
             } else if (message.type === 'log') {
@@ -557,16 +573,44 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         const fileData = data.from_file || {};
+        const apiData = data.from_api || {};
         const anyTriggered = fileData.max_drawdown_hit ||
                             fileData.daily_limit_hit ||
                             Object.keys(fileData.stop_losses_triggered || {}).length > 0;
         setCircuitBreaker({
           from_file: fileData,
-          from_api: data.from_api || {},
+          from_api: apiData,
           loading: false,
           lastFetch: new Date().toISOString(),
           anyTriggered
         });
+
+        // Also update risk state with API data (for when WebSocket isn't connected)
+        if (apiData.daily_pnl !== undefined) {
+          setRisk(prev => ({
+            ...prev,
+            daily_pnl: apiData.daily_pnl || 0,
+            daily_pnl_pct: apiData.daily_pnl_pct || 0,
+            alltime_pnl: apiData.alltime_pnl || 0,
+            alltime_pnl_pct: apiData.alltime_pnl_pct || 0,
+            grid_pnl: apiData.grid_pnl || 0,
+            grid_pnl_pct: apiData.grid_pnl_pct || 0,
+            drawdown_pct: apiData.drawdown_pct || 0,
+            peak_equity: apiData.peak_equity || 0,
+            daily_limit_hit: apiData.daily_limit_hit || false,
+            max_drawdown_hit: apiData.max_drawdown_hit || false,
+            trading_halted: apiData.trading_halted || false
+          }));
+        }
+      }
+
+      // Also fetch positions from API (fallback when WebSocket isn't connected)
+      const posResponse = await fetch('http://localhost:8000/api/positions');
+      if (posResponse.ok) {
+        const posData = await posResponse.json();
+        if (posData.positions && posData.positions.length > 0) {
+          setPositions(posData.positions);
+        }
       }
     } catch (error) {
       console.log('Could not fetch circuit breaker status');
@@ -1455,6 +1499,100 @@ function App() {
                           SELL {smartFilters.momentum?.allow_sell ? '✓' : 'HOLD'}
                         </div>
                       </div>
+                    </div>
+
+                    {/* Smart Grid Regime Detection - Safety Switch */}
+                    <div className={`p-3 rounded-xl border ${
+                      regime.is_strong_trend
+                        ? 'bg-[rgba(229,115,115,0.08)] border-[rgba(229,115,115,0.3)] shadow-[0_0_20px_rgba(229,115,115,0.1)]'
+                        : 'bg-[rgba(62,207,142,0.04)] border-[rgba(62,207,142,0.15)]'
+                    }`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{regime.is_strong_trend ? '🛡️' : '⚡'}</span>
+                          <span className="text-sm font-medium text-secondary">Smart Grid</span>
+                        </div>
+                        <span className={`text-xs font-bold uppercase tracking-wide px-2 py-0.5 rounded ${
+                          regime.current === 'TRENDING_DOWN' ? 'bg-[rgba(229,115,115,0.2)] text-danger' :
+                          regime.current === 'TRENDING_UP' ? 'bg-[rgba(62,207,142,0.2)] text-success' :
+                          regime.current === 'RANGING' ? 'bg-[rgba(212,175,55,0.2)] text-gold' :
+                          regime.current === 'VOLATILE' ? 'bg-[rgba(100,181,246,0.2)] text-info' :
+                          'bg-[rgba(255,255,255,0.1)] text-muted'
+                        }`}>
+                          {regime.current || 'UNKNOWN'}
+                        </span>
+                      </div>
+
+                      {/* ADX Indicator */}
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs text-muted">ADX</span>
+                        <div className="flex-1 h-1.5 rounded-full bg-[rgba(255,255,255,0.06)] overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-500 ${
+                              regime.adx > 40 ? 'bg-gradient-to-r from-danger to-rose-400' :
+                              regime.adx > 25 ? 'bg-gradient-to-r from-gold to-amber-400' :
+                              'bg-gradient-to-r from-success to-emerald-400'
+                            }`}
+                            style={{ width: `${Math.min(100, (regime.adx / 60) * 100)}%` }}
+                          />
+                        </div>
+                        <span className={`text-xs font-mono ${regime.adx > 40 ? 'text-danger' : regime.adx > 25 ? 'text-gold' : 'text-success'}`}>
+                          {(regime.adx || 0).toFixed(0)}
+                        </span>
+                      </div>
+
+                      {/* Grid Status */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className={`text-xs px-2 py-1 rounded text-center font-medium ${
+                          regime.allow_buy
+                            ? 'bg-[rgba(62,207,142,0.1)] text-success'
+                            : 'bg-[rgba(229,115,115,0.15)] text-danger border border-[rgba(229,115,115,0.3)]'
+                        }`}>
+                          BUY {regime.allow_buy ? '✓' : '⛔'}
+                        </div>
+                        <div className={`text-xs px-2 py-1 rounded text-center font-medium ${
+                          regime.allow_sell
+                            ? 'bg-[rgba(62,207,142,0.1)] text-success'
+                            : 'bg-[rgba(251,191,36,0.15)] text-gold border border-[rgba(251,191,36,0.3)]'
+                        }`}>
+                          SELL {regime.allow_sell ? '✓' : '🔒'}
+                        </div>
+                      </div>
+
+                      {/* Warning when strong trend detected */}
+                      {regime.is_strong_trend && (
+                        <div className="mt-2 p-2 rounded-lg bg-[rgba(229,115,115,0.1)] border border-[rgba(229,115,115,0.2)]">
+                          <div className="flex items-center gap-2 text-xs text-danger">
+                            <span>⚠️</span>
+                            <span className="font-medium">
+                              {regime.current === 'TRENDING_DOWN'
+                                ? 'Falling knife protection active'
+                                : 'Strong uptrend - holding sells'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Per-symbol regime status */}
+                      {Object.keys(regime.all_regimes || {}).length > 0 && (
+                        <div className="mt-2 pt-2 border-t border-[rgba(255,255,255,0.06)]">
+                          <div className="grid grid-cols-2 gap-1">
+                            {Object.entries(regime.all_regimes || {}).map(([symbol, symbolRegime]) => (
+                              <div key={symbol} className="flex items-center justify-between text-xs px-1.5 py-0.5 rounded bg-[rgba(255,255,255,0.02)]">
+                                <span className="text-muted truncate">{symbol.split('/')[0]}</span>
+                                <span className={`font-mono ${
+                                  symbolRegime === 'TRENDING_DOWN' ? 'text-danger' :
+                                  symbolRegime === 'TRENDING_UP' ? 'text-success' :
+                                  symbolRegime === 'RANGING' ? 'text-gold' :
+                                  'text-muted'
+                                }`}>
+                                  {regime.all_paused?.[symbol] ? '⏸' : '▶'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Correlations */}

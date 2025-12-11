@@ -312,6 +312,45 @@ async def get_regime():
     return system_state["ultra"]
 
 
+@app.get("/api/positions")
+async def get_positions():
+    """
+    Get current positions from Alpaca.
+
+    Returns positions either from system_state (if WebSocket is broadcasting)
+    or directly from Alpaca API.
+    """
+    # If system_state has positions, use them
+    if system_state.get("positions"):
+        return {"positions": system_state["positions"], "source": "websocket"}
+
+    # Otherwise fetch directly from Alpaca
+    try:
+        from config_ultra import UltraConfig
+        from src.execution.alpaca_client import AlpacaClient
+
+        config = UltraConfig()
+        client = AlpacaClient(config)
+        positions = client.get_positions()
+
+        positions_data = []
+        for p in positions:
+            positions_data.append({
+                "symbol": p.symbol,
+                "qty": float(p.qty),
+                "avg_entry_price": float(p.avg_entry_price),
+                "current_price": float(p.current_price),
+                "unrealized_pl": float(p.unrealized_pl),
+                "unrealized_plpc": float(p.unrealized_plpc),
+                "market_value": float(p.market_value)
+            })
+
+        return {"positions": positions_data, "source": "alpaca"}
+    except Exception as e:
+        logger.error(f"Failed to fetch positions from Alpaca: {e}")
+        return {"positions": [], "source": "error", "error": str(e)}
+
+
 # === ORDER CONFIRMATION ENDPOINTS ===
 
 @app.get("/api/orders")
@@ -351,7 +390,50 @@ async def get_order_stats():
     Returns:
         Order stats including totals by symbol, side, and volume
     """
-    return system_state["orders"]["stats"]
+    # If system_state has data, use it
+    stats = system_state["orders"]["stats"]
+    if stats.get("total_confirmed", 0) > 0:
+        return stats
+
+    # Otherwise fetch directly from Alpaca
+    try:
+        from config_ultra import UltraConfig
+        from src.execution.alpaca_client import AlpacaClient
+        from datetime import datetime, timedelta
+
+        config = UltraConfig()
+        client = AlpacaClient(config)
+
+        # Get orders from last 7 days
+        orders = client.get_order_history(days=7, status='filled')
+
+        by_symbol = {}
+        by_side = {"buy": 0, "sell": 0}
+        total_volume = 0.0
+
+        for order in orders:
+            symbol = order.get('symbol', 'UNKNOWN')
+            side = order.get('side', '').lower()
+            qty = float(order.get('filled_qty', 0))
+            price = float(order.get('filled_avg_price', 0))
+            volume = qty * price
+
+            by_symbol[symbol] = by_symbol.get(symbol, 0) + 1
+            if 'buy' in side:
+                by_side['buy'] += 1
+            elif 'sell' in side:
+                by_side['sell'] += 1
+            total_volume += volume
+
+        return {
+            "total_confirmed": len(orders),
+            "by_symbol": by_symbol,
+            "by_side": by_side,
+            "total_volume": round(total_volume, 2)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching order stats: {e}")
+        return stats
 
 
 @app.get("/api/orders/reconciliation")
@@ -363,6 +445,137 @@ async def get_reconciliation_status():
         Sync status, matched count, and any discrepancies
     """
     return system_state["orders"]["reconciliation"]
+
+
+@app.get("/api/grid/status")
+async def get_grid_status():
+    """
+    Get current grid trading status using GridTradingStrategy for accurate profit calculation.
+
+    Returns accurate data even when WebSocket is not connected.
+    """
+    grid_data = {"grids": {}, "total_trades": 0, "total_profit": 0}
+
+    try:
+        # Use GridTradingStrategy to get accurate profit estimates
+        from src.strategy.grid_trading import GridTradingStrategy
+
+        gs = GridTradingStrategy()
+        if gs.load_state():
+            total_trades = 0
+            total_profit = 0.0
+            summaries = {}
+
+            for symbol in gs.grids.keys():
+                summary = gs.get_grid_summary(symbol)
+                perf = summary.get('performance', {})
+
+                completed = perf.get('completed_trades', 0)
+                profit = perf.get('total_profit', 0)
+                total_trades += completed
+                total_profit += profit
+
+                summaries[symbol] = {
+                    'is_active': summary.get('is_active', False),
+                    'completed_trades': completed,
+                    'total_profit': profit,
+                    'levels': summary.get('levels', {}),
+                    'total_buys': perf.get('total_buys', 0),
+                    'total_sells': perf.get('total_sells', 0),
+                    'range': summary.get('range', {})
+                }
+
+            grid_data = {
+                'active': any(s.get('is_active') for s in summaries.values()),
+                'total_trades': total_trades,
+                'total_profit': round(total_profit, 2),
+                'summaries': summaries
+            }
+    except Exception as e:
+        grid_data['error'] = str(e)
+        logger.error(f"Error getting grid status: {e}")
+
+    # Also include order stats from Alpaca for verification
+    alpaca_stats = system_state.get("orders", {}).get("stats", {})
+    if alpaca_stats.get("total_confirmed", 0) == 0:
+        # Fetch directly if system_state is empty
+        try:
+            from config_ultra import UltraConfig
+            from src.execution.alpaca_client import AlpacaClient
+
+            config = UltraConfig()
+            client = AlpacaClient(config)
+            orders = client.get_order_history(days=7, status='filled')
+
+            by_symbol = {}
+            by_side = {"buy": 0, "sell": 0}
+            total_volume = 0.0
+
+            for order in orders:
+                symbol = order.get('symbol', 'UNKNOWN')
+                side = order.get('side', '').lower()
+                qty = float(order.get('filled_qty', 0))
+                price = float(order.get('filled_avg_price', 0))
+                volume = qty * price
+
+                by_symbol[symbol] = by_symbol.get(symbol, 0) + 1
+                if 'buy' in side:
+                    by_side['buy'] += 1
+                elif 'sell' in side:
+                    by_side['sell'] += 1
+                total_volume += volume
+
+            alpaca_stats = {
+                "total_confirmed": len(orders),
+                "by_symbol": by_symbol,
+                "by_side": by_side,
+                "total_volume": round(total_volume, 2)
+            }
+        except Exception as e:
+            alpaca_stats = {"error": str(e)}
+
+    grid_data['alpaca_orders'] = alpaca_stats
+
+    return grid_data
+
+
+@app.get("/api/regime/smart-grid")
+async def get_smart_grid_regime():
+    """
+    Get current Smart Grid regime detection status.
+
+    Returns regime state for each symbol, including:
+    - Current regime (RANGING, TRENDING_UP, TRENDING_DOWN, etc.)
+    - ADX value
+    - Whether grid is paused for this symbol
+    - Allow buy/sell flags
+    """
+    # Get regime data from last WebSocket broadcast
+    regime_data = system_state.get("regime", {})
+
+    if not regime_data:
+        # Return from stored broadcast data if available
+        return {
+            "status": "initializing",
+            "message": "Regime detection initializing - waiting for bar data (need 50+ bars)",
+            "all_regimes": {},
+            "all_paused": {}
+        }
+
+    return {
+        "status": "active",
+        "current_symbol": regime_data.get("current", "UNKNOWN"),
+        "adx": regime_data.get("adx", 0),
+        "allow_buy": regime_data.get("allow_buy", True),
+        "allow_sell": regime_data.get("allow_sell", True),
+        "is_strong_trend": regime_data.get("is_strong_trend", False),
+        "paused": regime_data.get("paused", False),
+        "reason": regime_data.get("reason", ""),
+        "strategy_hint": regime_data.get("strategy_hint", "WAIT"),
+        "confidence": regime_data.get("confidence", 0),
+        "all_regimes": regime_data.get("all_regimes", {}),
+        "all_paused": regime_data.get("all_paused", {})
+    }
 
 
 @app.post("/api/orders/reconcile")
@@ -1365,7 +1578,9 @@ async def get_realized_pnl(days: int = 30):
         # Group orders by symbol
         by_symbol = defaultdict(list)
         for order in orders:
-            symbol = order.get('symbol', '').replace('USD', '/USD')
+            raw_symbol = order.get('symbol', '')
+            # Only add slash if not already present (BTCUSD -> BTC/USD, BTC/USD stays as is)
+            symbol = raw_symbol if '/' in raw_symbol else raw_symbol.replace('USD', '/USD')
             by_symbol[symbol].append(order)
 
         # Calculate realized P/L per symbol
@@ -1537,11 +1752,13 @@ async def get_trade_history(symbol: str = None, days: int = 7, limit: int = 100)
             side = order.get('side', '')
             pnl = order_pnl.get(order_id)
 
+            raw_sym = order.get('symbol', '')
+            symbol = raw_sym if '/' in raw_sym else raw_sym.replace('USD', '/USD')
             trades.append({
                 'timestamp': filled_at,
                 'time': filled_at[11:19] if len(filled_at) > 19 else '',
                 'date': filled_at[:10] if len(filled_at) > 10 else '',
-                'symbol': order.get('symbol', '').replace('USD', '/USD'),
+                'symbol': symbol,
                 'side': side,
                 'qty': order.get('qty', 0),
                 'price': order.get('price', 0),
