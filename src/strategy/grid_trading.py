@@ -1003,7 +1003,9 @@ class GridTradingStrategy:
             },
             "performance": {
                 "total_profit": estimated_profit,
+                # NOTE: completed_trades is backward-compat alias for total_fills
                 "completed_trades": state.completed_trades,
+                "completed_cycles": state.completed_cycles,
                 "total_buys": state.total_buys,
                 "total_sells": state.total_sells,
                 "avg_buy_price": state.avg_buy_price,

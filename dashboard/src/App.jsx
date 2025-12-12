@@ -80,6 +80,16 @@ function App() {
     summaries: {}
   });
 
+  // Derived grid metrics (from per-symbol summaries)
+  const gridTotalFills = Object.values(grid.summaries || {}).reduce(
+    (sum, s) => sum + (s?.performance?.completed_trades || 0),
+    0
+  );
+  const gridTotalCycles = Object.values(grid.summaries || {}).reduce(
+    (sum, s) => sum + (s?.performance?.completed_cycles || 0),
+    0
+  );
+
   const [risk, setRisk] = useState({
     daily_pnl: 0,
     daily_pnl_pct: 0,
@@ -1194,9 +1204,16 @@ function App() {
                   <div className="card-body">
                     <div className="grid grid-cols-2 gap-3 mb-4">
                       <div className="metric">
-                        <div className="metric-label">Total Trades</div>
-                        <div className="metric-value text-gold font-mono">{grid.total_trades || 0}</div>
+                        <div className="metric-label">Fills</div>
+                        <div className="metric-value text-gold font-mono">{gridTotalFills}</div>
                       </div>
+                      <div className="metric">
+                        <div className="metric-label">Cycles</div>
+                        <div className="metric-value text-gold font-mono">{gridTotalCycles}</div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 mb-4">
                       <div className="metric">
                         <div className="metric-label">Profit</div>
                         <div className={`metric-value font-mono ${(grid.total_profit || 0) >= 0 ? 'text-success' : 'text-danger'}`}>
@@ -1204,6 +1221,7 @@ function App() {
                         </div>
                       </div>
                     </div>
+
                     <div className={`text-center py-3 rounded-xl ${grid.active ? 'bg-[rgba(62,207,142,0.08)] border border-[rgba(62,207,142,0.2)]' : 'bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.06)]'}`}>
                       <span className={`font-display text-lg ${grid.active ? 'text-success' : 'text-muted'}`}>
                         {grid.active ? 'Active' : 'Standby'}
@@ -1389,6 +1407,10 @@ function App() {
                           <span className="text-right text-success">{summary.levels?.pending_buys || 0}</span>
                           <span className="text-muted">Sell Orders:</span>
                           <span className="text-right text-danger">{summary.levels?.pending_sells || 0}</span>
+                          <span className="text-muted">Fills:</span>
+                          <span className="text-right text-gold font-mono">{summary.performance?.completed_trades || 0}</span>
+                          <span className="text-muted">Cycles:</span>
+                          <span className="text-right text-gold font-mono">{summary.performance?.completed_cycles || 0}</span>
                         </div>
                       </div>
                     ))}
