@@ -49,9 +49,10 @@ class ServiceManager:
         self.running = False
 
     def check_port(self, port: int) -> bool:
-        """Check if a port is available."""
+        """Check if a port is available (ignores TIME_WAIT sockets)."""
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(('0.0.0.0', port))
                 return True
