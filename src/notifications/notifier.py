@@ -376,8 +376,9 @@ class NotificationService:
                 last_update_str = health.get('last_update')
 
                 if last_update_str:
-                    # Parse the timestamp (format: "2025-12-11 05:16:00+00:00")
-                    last_update = datetime.fromisoformat(last_update_str.replace('+00:00', ''))
+                    # Parse the timestamp (format: "2025-12-11 05:16:00+00:00" or "...Z")
+                    clean_ts = last_update_str.replace('+00:00', '').replace('Z', '')
+                    last_update = datetime.fromisoformat(clean_ts)
                     now = datetime.utcnow()
 
                     minutes_stale = (now - last_update).total_seconds() / 60

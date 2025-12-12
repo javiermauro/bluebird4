@@ -1676,10 +1676,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
         last_bar_time = [datetime.now()]  # Use list for mutable reference in nested function
         STALE_THRESHOLD_SECONDS = 180  # 3 minutes without a bar = stale
 
-        stream = CryptoDataStream(
-            config.API_KEY,
-            config.SECRET_KEY
-        )
+        # NOTE: Stream is created inside the reconnection loop below.
+        # We define handle_bar here so it's available for subscription.
 
         async def handle_bar(bar):
             """Handle incoming bar with grid evaluation and risk management."""
@@ -2236,9 +2234,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 "windfall": bot.get_windfall_stats()
             })
 
-        # Subscribe to all symbols
-        stream.subscribe_bars(handle_bar, *symbols)
-        await broadcast_log(f"Subscribed to: {', '.join(symbols)}")
+        await broadcast_log(f"Will subscribe to: {', '.join(symbols)}")
 
         # Stream watchdog - monitors for stale data and forces reconnect
         stream_should_restart = [False]
