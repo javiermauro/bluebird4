@@ -270,6 +270,40 @@ class UltraConfig:
     GRID_REBALANCE_PCT = 0.03   # Rebalance if price moves 3% outside grid
 
     # =========================================
+    # LIMIT ORDER SETTINGS (Maker Fee Optimization)
+    # =========================================
+    # Use limit orders for grid trades to reduce fees (~0.15% maker vs ~0.25% taker)
+    # Emergency actions (stop-loss, windfall) still use market orders for speed
+
+    # Master switch - set to False to revert to market orders
+    GRID_USE_LIMIT_ORDERS = True
+
+    # Maker buffer in basis points (1 bp = 0.01%)
+    # Used as a crossing guard: only place limit if grid price is this far from market
+    # For BUY: place only if grid_price <= current_price * (1 - buffer)
+    # For SELL: place only if grid_price >= current_price * (1 + buffer)
+    MAKER_BUFFER_BPS = 5  # 5 basis points = 0.05%
+
+    # Maximum age for limit orders before cancellation (minutes)
+    # Orders older than this are cancelled and level waits for natural re-trigger
+    MAX_ORDER_AGE_MINUTES = 60
+
+    # On startup, if Alpaca has OPEN orders for our symbols that we are not tracking locally,
+    # cancel them to avoid "surprise fills" after a crash/restart.
+    # Safer default for an automated grid bot.
+    CANCEL_UNTRACKED_OPEN_ORDERS_ON_STARTUP = True
+
+    # Symbol precision for price and quantity rounding
+    # (price_decimals, qty_decimals)
+    SYMBOL_PRECISION = {
+        "BTC/USD": (2, 6),   # $0.01 price, 0.000001 qty
+        "ETH/USD": (2, 5),   # $0.01 price, 0.00001 qty
+        "SOL/USD": (2, 4),   # $0.01 price, 0.0001 qty
+        "LTC/USD": (2, 5),   # $0.01 price, 0.00001 qty
+        "AVAX/USD": (2, 4),  # $0.01 price, 0.0001 qty
+    }
+
+    # =========================================
     # WINDFALL PROFIT-TAKING SETTINGS
     # =========================================
     # Capture profits when positions show significant unrealized gains

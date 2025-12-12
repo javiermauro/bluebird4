@@ -177,6 +177,57 @@ class PendingOrder:
 
 
 @dataclass
+class OpenLimitOrder:
+    """
+    Tracks an open limit order on the exchange.
+
+    Used to prevent duplicate orders for the same level and
+    to cancel stale orders that haven't filled.
+    """
+    order_id: str
+    symbol: str                    # Canonical: "BTC/USD"
+    side: str                      # Canonical: "buy" | "sell"
+    level_id: str                  # Grid level ID
+    level_price: float             # Grid level price (where we wanted to trade)
+    limit_price: float             # Actual limit price submitted
+    qty: float
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    source: str = "grid"           # "grid" | "windfall" | "stop_loss"
+
+    def to_dict(self) -> dict:
+        return {
+            'order_id': self.order_id,
+            'symbol': self.symbol,
+            'side': self.side,
+            'level_id': self.level_id,
+            'level_price': self.level_price,
+            'limit_price': self.limit_price,
+            'qty': self.qty,
+            'created_at': self.created_at,
+            'source': self.source
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'OpenLimitOrder':
+        return cls(
+            order_id=data['order_id'],
+            symbol=data['symbol'],
+            side=data['side'],
+            level_id=data['level_id'],
+            level_price=data['level_price'],
+            limit_price=data['limit_price'],
+            qty=data['qty'],
+            created_at=data.get('created_at', datetime.now().isoformat()),
+            source=data.get('source', 'grid')
+        )
+
+    @staticmethod
+    def make_key(symbol: str, side: str, level_id: str) -> str:
+        """Create unique key for order tracking."""
+        return f"{symbol}:{side}:{level_id}"
+
+
+@dataclass
 class GridState:
     """Tracks the current state of a grid trading setup."""
     config: GridConfig
@@ -243,6 +294,10 @@ class GridTradingStrategy:
         # NEW: Unmatched fills for diagnostics (order_id -> fill details)
         self.unmatched_fills: Dict[str, dict] = {}
 
+        # NEW: Open limit order tracking (level_key -> OpenLimitOrder)
+        # Key format: "{symbol}:{side}:{level_id}"
+        self.open_limit_orders: Dict[str, OpenLimitOrder] = {}
+
         logger.info("GridTradingStrategy initialized")
 
     def save_state(self) -> None:
@@ -255,7 +310,9 @@ class GridTradingStrategy:
                 # NEW: Persist pending/applied/unmatched
                 'pending_orders': {oid: p.to_dict() for oid, p in self.pending_orders.items()},
                 'applied_order_ids': self.applied_order_ids,
-                'unmatched_fills': self.unmatched_fills
+                'unmatched_fills': self.unmatched_fills,
+                # NEW: Persist open limit orders
+                'open_limit_orders': {key: o.to_dict() for key, o in self.open_limit_orders.items()}
             }
             with open(GRID_STATE_FILE, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -341,6 +398,12 @@ class GridTradingStrategy:
                     reverse=True
                 )
                 self.unmatched_fills = dict(sorted_fills[:500])
+
+            # NEW: Restore open limit orders
+            for key, order_data in data.get('open_limit_orders', {}).items():
+                self.open_limit_orders[key] = OpenLimitOrder.from_dict(order_data)
+            if self.open_limit_orders:
+                logger.info(f"Restored {len(self.open_limit_orders)} open limit orders")
 
             # NEW: Cleanup stale pending orders (>24h)
             self._cleanup_stale_pendings()
@@ -441,6 +504,104 @@ class GridTradingStrategy:
         logger.info(f"[GRID] Registered pending {side} order {order_id[:8]} for {symbol} @ ${intended_level_price:.2f}")
         self.save_state()  # Persist immediately for crash recovery
         return True
+
+    # =========================================================================
+    # Open Limit Order Management (for duplicate prevention & stale cancellation)
+    # =========================================================================
+
+    def register_open_limit_order(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        level_id: str,
+        level_price: float,
+        limit_price: float,
+        qty: float,
+        source: str = "grid"
+    ) -> bool:
+        """
+        Register a newly submitted limit order for tracking.
+
+        Returns False if an order already exists for this level.
+        """
+        symbol = normalize_symbol(symbol)
+        side = normalize_side(side)
+        key = OpenLimitOrder.make_key(symbol, side, level_id)
+
+        if key in self.open_limit_orders:
+            existing = self.open_limit_orders[key]
+            logger.warning(
+                f"[GRID] Duplicate limit order for {key}: "
+                f"existing={existing.order_id[:8]}, new={order_id[:8]}"
+            )
+            return False
+
+        order = OpenLimitOrder(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            level_id=level_id,
+            level_price=level_price,
+            limit_price=limit_price,
+            qty=qty,
+            source=source
+        )
+        self.open_limit_orders[key] = order
+        logger.info(f"[GRID] Registered open limit {side} @ ${limit_price:.2f} ({order_id[:8]})")
+        self.save_state()
+        return True
+
+    def has_open_order_for_level(self, symbol: str, side: str, level_id: str) -> bool:
+        """Check if there's already an open order for this level."""
+        key = OpenLimitOrder.make_key(
+            normalize_symbol(symbol),
+            normalize_side(side),
+            level_id
+        )
+        return key in self.open_limit_orders
+
+    def get_open_order_for_level(self, symbol: str, side: str, level_id: str) -> Optional[OpenLimitOrder]:
+        """Get open order for a specific level, if any."""
+        key = OpenLimitOrder.make_key(
+            normalize_symbol(symbol),
+            normalize_side(side),
+            level_id
+        )
+        return self.open_limit_orders.get(key)
+
+    def remove_open_limit_order(self, order_id: str) -> Optional[OpenLimitOrder]:
+        """Remove an open order by ID (when filled or cancelled)."""
+        for key, order in list(self.open_limit_orders.items()):
+            if order.order_id == order_id:
+                del self.open_limit_orders[key]
+                logger.info(f"[GRID] Removed open limit order {order_id[:8]}")
+                self.save_state()
+                return order
+        return None
+
+    def remove_pending_order(self, order_id: str) -> Optional[PendingOrder]:
+        """Remove a pending order by ID (cleanup on cancel/expire/reject)."""
+        if order_id in self.pending_orders:
+            removed = self.pending_orders.pop(order_id)
+            logger.info(f"[GRID] Removed pending order {order_id[:8]}")
+            self.save_state()
+            return removed
+        return None
+
+    def get_stale_orders(self, max_age_minutes: int = 60) -> List[OpenLimitOrder]:
+        """Get open limit orders older than max_age_minutes."""
+        now = datetime.now()
+        stale = []
+        for order in self.open_limit_orders.values():
+            try:
+                created = datetime.fromisoformat(order.created_at)
+                age_minutes = (now - created).total_seconds() / 60
+                if age_minutes > max_age_minutes:
+                    stale.append(order)
+            except (ValueError, TypeError):
+                pass
+        return stale
 
     def _record_unmatched(
         self,

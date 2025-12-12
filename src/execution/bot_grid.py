@@ -43,13 +43,50 @@ from src.strategy.feature_calculator import FeatureCalculator
 
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 # Database for persistent storage
 from src.database import db as database
 
 logger = logging.getLogger("GridBot")
+
+
+# =============================================================================
+# Limit Order Helper Functions
+# =============================================================================
+
+def can_place_limit_order(grid_price: float, current_price: float, side: str, buffer_bps: int = 5) -> bool:
+    """
+    Guard against crossing the spread (becoming a taker).
+    Limit price stays at grid_price - this just checks if it's safe to place.
+
+    BUY: Only place if grid_price <= current_price * (1 - buffer)
+         (grid level is sufficiently below market)
+    SELL: Only place if grid_price >= current_price * (1 + buffer)
+          (grid level is sufficiently above market)
+
+    If guard fails, skip placing and wait for next bar.
+    """
+    buffer = buffer_bps / 10000
+    if side.lower() == 'buy':
+        return grid_price <= current_price * (1 - buffer)
+    else:
+        return grid_price >= current_price * (1 + buffer)
+
+
+def round_limit_price(symbol: str, price: float, config) -> float:
+    """Round price to valid tick size for symbol."""
+    precision = getattr(config, 'SYMBOL_PRECISION', {})
+    price_decimals, _ = precision.get(symbol, (2, 6))
+    return round(price, price_decimals)
+
+
+def round_qty(symbol: str, qty: float, config) -> float:
+    """Round quantity to valid precision for symbol."""
+    precision = getattr(config, 'SYMBOL_PRECISION', {})
+    _, qty_decimals = precision.get(symbol, (2, 6))
+    return round(qty, qty_decimals)
 
 
 class GridTradingBot:
@@ -127,8 +164,16 @@ class GridTradingBot:
         self.daily_loss_limit = getattr(config, 'DAILY_LOSS_LIMIT', 0.05)
         self.max_drawdown = getattr(config, 'MAX_DRAWDOWN', 0.10)
 
+        # === LIMIT ORDER SETTINGS (Maker Fee Optimization) ===
+        self.use_limit_orders = getattr(config, 'GRID_USE_LIMIT_ORDERS', True)
+        self.maker_buffer_bps = getattr(config, 'MAKER_BUFFER_BPS', 5)
+        self.max_order_age_minutes = getattr(config, 'MAX_ORDER_AGE_MINUTES', 60)
+
         logger.info(f"GridTradingBot initialized for {len(self.symbols)} symbols")
         logger.info(f"  Risk controls: SL={self.stop_loss_pct:.0%}, Daily={self.daily_loss_limit:.0%}, DD={self.max_drawdown:.0%}")
+        logger.info(f"  Limit orders: {'ENABLED' if self.use_limit_orders else 'DISABLED'}")
+        if self.use_limit_orders:
+            logger.info(f"    Maker buffer: {self.maker_buffer_bps} bps, Max age: {self.max_order_age_minutes} min")
 
         # Time filtering settings
         self.use_time_filter = getattr(config, 'USE_TIME_FILTER', True)
@@ -233,7 +278,44 @@ class GridTradingBot:
         try:
             # Get recent orders from Alpaca
             alpaca_orders = self.client.get_order_history(days=7, status='closed')
-            filled_orders = [o for o in alpaca_orders if 'filled' in str(o.get('status', '')).lower()]
+
+            def _normalize_order_status(raw_status: str) -> str:
+                """
+                Normalize Alpaca status strings like:
+                - "filled"
+                - "OrderStatus.FILLED"
+                - "orderstatus.partially_filled"
+                """
+                s = (raw_status or "").strip().lower()
+                # Common prefixes
+                s = s.replace("orderstatus.", "")
+                s = s.replace("querystatus.", "")
+                return s
+
+            filled_orders = []
+            for o in alpaca_orders:
+                status_norm = _normalize_order_status(str(o.get('status', '')))
+                # IMPORTANT: do not treat "partially_filled" as "filled"
+                if status_norm == 'filled':
+                    filled_orders.append(o)
+
+            # NEW: Clean up open limit order tracking for ALL closed orders
+            # (filled, canceled, expired, rejected)
+            if self.use_limit_orders:
+                for order in alpaca_orders:
+                    order_id = str(order.get('id', ''))
+                    status_norm = _normalize_order_status(str(order.get('status', '')))
+                    # Only remove tracking for terminal statuses; keep partials tracked.
+                    if order_id and status_norm in {'filled', 'canceled', 'cancelled', 'expired', 'rejected'}:
+                        # Clean up BOTH tracking dicts
+                        removed_open = self.grid_strategy.remove_open_limit_order(order_id)
+                        if removed_open:
+                            logger.info(f"[RECONCILE] Removed {status_norm} order from open tracking: {order_id[:8]}")
+                        # Only remove pending for non-fills (fills will be applied below)
+                        if status_norm != 'filled':
+                            removed_pending = self.grid_strategy.remove_pending_order(order_id)
+                            if removed_pending:
+                                logger.info(f"[RECONCILE] Removed {status_norm} order from pending: {order_id[:8]}")
 
             # Run reconciliation with database
             results = database.reconcile_with_alpaca(filled_orders)
@@ -311,8 +393,86 @@ class GridTradingBot:
         """Check if it's time to run periodic reconciliation (every 5 minutes)."""
         if self.last_reconciliation is None:
             self._run_reconciliation()
+            # Also cancel stale limit orders on first reconciliation
+            if self.use_limit_orders:
+                self.cancel_stale_orders()
         elif (datetime.now() - self.last_reconciliation).seconds >= 300:  # 5 minutes
             self._run_reconciliation()
+            # Also cancel stale limit orders periodically
+            if self.use_limit_orders:
+                self.cancel_stale_orders()
+
+    def cancel_stale_orders(self) -> int:
+        """
+        Cancel orders older than MAX_ORDER_AGE_MINUTES.
+
+        Returns number of orders cancelled.
+        """
+        if not self.use_limit_orders:
+            return 0
+
+        stale_orders = self.grid_strategy.get_stale_orders(self.max_order_age_minutes)
+        cancelled = 0
+
+        for order in stale_orders:
+            # 1. Cancel on Alpaca
+            if self.client.cancel_order(order.order_id):
+                # 2. Remove from open_limit_orders
+                self.grid_strategy.remove_open_limit_order(order.order_id)
+                # 3. Remove from pending_orders (don't add to applied_order_ids - it wasn't filled)
+                self.grid_strategy.remove_pending_order(order.order_id)
+                cancelled += 1
+                logger.info(f"[STALE] Cancelled {order.side} {order.symbol} @ ${order.limit_price:.2f}")
+
+        if cancelled > 0:
+            logger.info(f"[STALE] Cancelled {cancelled} stale limit orders (>{self.max_order_age_minutes} min old)")
+
+        return cancelled
+
+    def sync_open_orders_from_alpaca(self) -> None:
+        """
+        Sync open orders from Alpaca with our tracking on startup.
+
+        Handles the case where bot crashed with open limit orders.
+        """
+        if not self.use_limit_orders:
+            return
+
+        try:
+            alpaca_open = self.client.get_open_orders(self.symbols)
+
+            our_open_ids = {o.order_id for o in self.grid_strategy.open_limit_orders.values()}
+            alpaca_open_ids = {o['id'] for o in alpaca_open}
+
+            # Orders we're tracking but Alpaca says aren't open (filled or cancelled)
+            stale_tracked = our_open_ids - alpaca_open_ids
+            for order_id in stale_tracked:
+                # These might have filled - reconciliation will pick them up
+                removed = self.grid_strategy.remove_open_limit_order(order_id)
+                if removed:
+                    logger.info(f"[SYNC] Removed tracked order not open on Alpaca: {order_id[:8]}")
+
+            # Orders open on Alpaca but we're not tracking (submitted before crash?)
+            untracked = alpaca_open_ids - our_open_ids
+            if untracked:
+                logger.warning(f"[SYNC] Found {len(untracked)} open orders on Alpaca not tracked locally")
+                cancel_untracked = getattr(self.config, 'CANCEL_UNTRACKED_OPEN_ORDERS_ON_STARTUP', True)
+                if cancel_untracked:
+                    cancelled = 0
+                    for order_id in untracked:
+                        if self.client.cancel_order(order_id):
+                            cancelled += 1
+                            logger.warning(f"[SYNC] Cancelled untracked open order on Alpaca: {order_id[:8]}")
+                    if cancelled:
+                        logger.warning(f"[SYNC] Cancelled {cancelled}/{len(untracked)} untracked open orders on startup")
+                else:
+                    logger.warning("[SYNC] Leaving untracked open orders on Alpaca (config disables auto-cancel)")
+
+            logger.info(f"[SYNC] Open order sync: {len(alpaca_open)} on Alpaca, "
+                       f"{len(self.grid_strategy.open_limit_orders)} tracked")
+
+        except Exception as e:
+            logger.warning(f"Could not sync open orders: {e}")
 
     def _load_alltime_equity(self) -> None:
         """Load all-time equity tracking (persists across all restarts)."""
@@ -1669,6 +1829,11 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
         await broadcast_log("Grid initialization complete. Starting live trading...")
 
+        # Sync open limit orders from Alpaca (crash recovery)
+        if bot.use_limit_orders:
+            bot.sync_open_orders_from_alpaca()
+            await broadcast_log("Open limit order sync complete")
+
         # Main trading loop
         from alpaca.data.live import CryptoDataStream
 
@@ -1923,6 +2088,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     else:
                         grid_price = order_details['price']
                         base_qty = order_details['quantity']
+                        level_id = order_details.get('level_id')  # May be None for old grids
 
                         # Apply time quality and correlation adjustments
                         time_quality = time_status.get('time_quality', 1.0)
@@ -1932,24 +2098,229 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         if time_quality < 1.0 or corr_adjustment < 1.0:
                             await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%})")
 
+                        # === LIMIT ORDER PATH (Maker Fee Optimization) ===
+                        if bot.use_limit_orders and level_id:
+                            # IMPORTANT: If limit-orders are enabled but we skip due to guard/duplicate,
+                            # do NOT fall back to market orders (that would negate the maker-fee intent).
+                            if bot.grid_strategy.has_open_order_for_level(symbol, "buy", level_id):
+                                logger.info(f"[GRID] Skipping BUY {symbol}: Open order exists for level {level_id[:8]}")
+                                await broadcast_log(f"[GRID] Skipping duplicate order for level")
+                            elif not can_place_limit_order(grid_price, current_price, "buy", bot.maker_buffer_bps):
+                                logger.info(f"[GRID] Skipping BUY {symbol}: Grid price ${grid_price:,.2f} too close to market ${current_price:,.2f}")
+                                await broadcast_log(f"[GRID] Skipping BUY: crossing guard (wait for next bar)")
+                            else:
+                                try:
+                                    # Limit price = grid level price (preserve grid integrity)
+                                    limit_price = round_limit_price(symbol, grid_price, bot.config)
+                                    rounded_qty = round_qty(symbol, qty, bot.config)
+                                    if rounded_qty <= 0:
+                                        logger.warning(f"[BUY] Skipping LIMIT order: rounded_qty<=0 for {symbol} (raw={qty})")
+                                        await broadcast_log(f"[GRID] BUY LIMIT skipped: qty too small after rounding")
+                                    else:
+                                        order = LimitOrderRequest(
+                                            symbol=symbol,
+                                            qty=rounded_qty,
+                                            side=OrderSide.BUY,
+                                            time_in_force=TimeInForce.GTC,
+                                            limit_price=limit_price
+                                        )
+                                        result = client.trading_client.submit_order(order)
+                                        order_id = str(result.id)
+
+                                        # Register open limit order (for duplicate prevention)
+                                        bot.grid_strategy.register_open_limit_order(
+                                            order_id=order_id,
+                                            symbol=symbol,
+                                            side="buy",
+                                            level_id=level_id,
+                                            level_price=grid_price,
+                                            limit_price=limit_price,
+                                            qty=rounded_qty,
+                                            source="grid"
+                                        )
+
+                                        # Register pending order (for reconciliation)
+                                        bot.grid_strategy.register_pending_order(
+                                            order_id=order_id,
+                                            symbol=symbol,
+                                            side="buy",
+                                            intended_level_price=grid_price,
+                                            intended_level_id=level_id,
+                                            source="grid"
+                                        )
+
+                                        logger.info(f"[BUY] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
+                                        await broadcast_log(f"[GRID] BUY LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                        await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
+
+                                        # Note: Don't verify_order_fill for limit orders - they may not fill immediately
+                                        # Fills will be detected via reconciliation
+
+                                except Exception as e:
+                                    logger.error(f"[BUY] LIMIT order failed for {symbol}: {e}")
+                                    await broadcast_log(f"[ERROR] BUY LIMIT failed: {e}")
+
+                        # === MARKET ORDER PATH (original behavior - taker fees) ===
+                        elif not (bot.use_limit_orders and level_id):
+                            try:
+                                order = MarketOrderRequest(
+                                    symbol=symbol,
+                                    qty=round(qty, 6),
+                                    side=OrderSide.BUY,
+                                    time_in_force=TimeInForce.GTC
+                                )
+                                result = client.trading_client.submit_order(order)
+                                order_id = str(result.id)
+
+                                # Register pending order BEFORE verify (for deterministic matching)
+                                level_price = order_details['price']
+                                bot.grid_strategy.register_pending_order(
+                                    order_id=order_id,
+                                    symbol=symbol,
+                                    side="buy",
+                                    intended_level_price=level_price,
+                                    intended_level_id=level_id,
+                                    source="grid"
+                                )
+
+                                # Verify order fill with Alpaca
+                                verification = client.verify_order_fill(order_id, max_wait_seconds=5)
+
+                                if verification['confirmed']:
+                                    # Use actual fill price from Alpaca
+                                    fill_price = verification['filled_avg_price']
+                                    fill_qty = verification['filled_qty']
+
+                                    # Record fill with verified data (idempotent - uses apply_filled_order)
+                                    bot.record_fill(symbol, "buy", fill_price, fill_qty, order_id)
+
+                                    # Add to confirmed orders
+                                    bot.add_confirmed_order(verification)
+
+                                    trade_executed = {
+                                        'action': 'BUY',
+                                        'symbol': symbol,
+                                        'price': fill_price,
+                                        'qty': fill_qty,
+                                        'grid_level': order_details.get('grid_level'),
+                                        'timestamp': datetime.now().isoformat(),
+                                        'order_id': order_id,
+                                        'verified': True
+                                    }
+
+                                    logger.info(f"[BUY] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
+                                    await broadcast_log(f"[GRID] BUY {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
+                                    await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
+                                else:
+                                    # Verify timed out - pending order remains for reconciliation
+                                    logger.warning(f"[BUY] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
+                                    await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
+
+                            except Exception as e:
+                                logger.error(f"[BUY ERROR] {symbol}: {e}")
+                                await broadcast_log(f"[GRID] Order failed: {e}")
+
+            elif action == 'SELL' and order_details and not skip_trading:
+                # Check regime filter first (Smart Grid - hold sells in strong uptrend)
+                if not regime_allow_sell:
+                    logger.info(f"[REGIME] Holding SELL {symbol}: {regime_status['reason']}")
+                    await broadcast_log(f"[REGIME] Holding SELL: {regime_status['reason']}")
+                # Check momentum filter (optional for sells - let profits run in uptrend)
+                elif not momentum_status['allow_sell']:
+                    await broadcast_log(f"[MOM] Delaying SELL: {momentum_status['reason']}")
+                else:
+                    grid_price = order_details['price']
+                    base_qty = order_details['quantity']
+                    level_id = order_details.get('level_id')  # May be None for old grids
+
+                    # Apply time quality and correlation adjustments
+                    time_quality = time_status.get('time_quality', 1.0)
+                    qty = base_qty * time_quality * corr_adjustment
+
+                    # Log adjustments if applied
+                    if time_quality < 1.0 or corr_adjustment < 1.0:
+                        await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%})")
+
+                    # === LIMIT ORDER PATH (Maker Fee Optimization) ===
+                    if bot.use_limit_orders and level_id:
+                        # IMPORTANT: If limit-orders are enabled but we skip due to guard/duplicate,
+                        # do NOT fall back to market orders (that would negate the maker-fee intent).
+                        if bot.grid_strategy.has_open_order_for_level(symbol, "sell", level_id):
+                            logger.info(f"[GRID] Skipping SELL {symbol}: Open order exists for level {level_id[:8]}")
+                            await broadcast_log(f"[GRID] Skipping duplicate order for level")
+                        elif not can_place_limit_order(grid_price, current_price, "sell", bot.maker_buffer_bps):
+                            logger.info(f"[GRID] Skipping SELL {symbol}: Grid price ${grid_price:,.2f} too close to market ${current_price:,.2f}")
+                            await broadcast_log(f"[GRID] Skipping SELL: crossing guard (wait for next bar)")
+                        else:
+                            try:
+                                # Limit price = grid level price (preserve grid integrity)
+                                limit_price = round_limit_price(symbol, grid_price, bot.config)
+                                rounded_qty = round_qty(symbol, qty, bot.config)
+                                if rounded_qty <= 0:
+                                    logger.warning(f"[SELL] Skipping LIMIT order: rounded_qty<=0 for {symbol} (raw={qty})")
+                                    await broadcast_log(f"[GRID] SELL LIMIT skipped: qty too small after rounding")
+                                else:
+                                    order = LimitOrderRequest(
+                                        symbol=symbol,
+                                        qty=rounded_qty,
+                                        side=OrderSide.SELL,
+                                        time_in_force=TimeInForce.GTC,
+                                        limit_price=limit_price
+                                    )
+                                    result = client.trading_client.submit_order(order)
+                                    order_id = str(result.id)
+
+                                    # Register open limit order (for duplicate prevention)
+                                    bot.grid_strategy.register_open_limit_order(
+                                        order_id=order_id,
+                                        symbol=symbol,
+                                        side="sell",
+                                        level_id=level_id,
+                                        level_price=grid_price,
+                                        limit_price=limit_price,
+                                        qty=rounded_qty,
+                                        source="grid"
+                                    )
+
+                                    # Register pending order (for reconciliation)
+                                    bot.grid_strategy.register_pending_order(
+                                        order_id=order_id,
+                                        symbol=symbol,
+                                        side="sell",
+                                        intended_level_price=grid_price,
+                                        intended_level_id=level_id,
+                                        source="grid"
+                                    )
+
+                                    logger.info(f"[SELL] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
+                                    await broadcast_log(f"[GRID] SELL LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                    await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
+
+                                    # Note: Don't verify_order_fill for limit orders - they may not fill immediately
+                                    # Fills will be detected via reconciliation
+
+                            except Exception as e:
+                                logger.error(f"[SELL] LIMIT order failed for {symbol}: {e}")
+                                await broadcast_log(f"[ERROR] SELL LIMIT failed: {e}")
+
+                    # === MARKET ORDER PATH (original behavior - taker fees) ===
+                    elif not (bot.use_limit_orders and level_id):
                         try:
                             order = MarketOrderRequest(
                                 symbol=symbol,
                                 qty=round(qty, 6),
-                                side=OrderSide.BUY,
+                                side=OrderSide.SELL,
                                 time_in_force=TimeInForce.GTC
                             )
                             result = client.trading_client.submit_order(order)
                             order_id = str(result.id)
 
-                            # NEW: Register pending order BEFORE verify (for deterministic matching)
-                            # Use order_details["price"] (NOT grid_level which is an index)
+                            # Register pending order BEFORE verify (for deterministic matching)
                             level_price = order_details['price']
-                            level_id = order_details.get('level_id')  # May be None for old grids
                             bot.grid_strategy.register_pending_order(
                                 order_id=order_id,
                                 symbol=symbol,
-                                side="buy",
+                                side="sell",
                                 intended_level_price=level_price,
                                 intended_level_id=level_id,
                                 source="grid"
@@ -1963,122 +2334,44 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 fill_price = verification['filled_avg_price']
                                 fill_qty = verification['filled_qty']
 
-                                # Record fill with verified data (idempotent - uses apply_filled_order)
-                                bot.record_fill(symbol, "buy", fill_price, fill_qty, order_id)
+                                # Record fill and get profit with verified data (idempotent)
+                                profit = bot.record_fill(symbol, "sell", fill_price, fill_qty, order_id)
 
-                                # Add to confirmed orders
+                                # Add to confirmed orders (include profit)
+                                verification['profit'] = profit
                                 bot.add_confirmed_order(verification)
 
+                                # Track performance by hour
+                                if profit:
+                                    bot.track_trade_performance(symbol, profit, current_hour)
+
                                 trade_executed = {
-                                    'action': 'BUY',
+                                    'action': 'SELL',
                                     'symbol': symbol,
                                     'price': fill_price,
                                     'qty': fill_qty,
+                                    'profit': profit,
                                     'grid_level': order_details.get('grid_level'),
                                     'timestamp': datetime.now().isoformat(),
+                                    'time_quality': time_quality,
+                                    'corr_adjustment': corr_adjustment,
                                     'order_id': order_id,
                                     'verified': True
                                 }
 
-                                logger.info(f"[BUY] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
-                                await broadcast_log(f"[GRID] BUY {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
+                                logger.info(f"[SELL] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
+                                await broadcast_log(f"[GRID] SELL {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
+                                if profit:
+                                    await broadcast_log(f"  Profit: ${profit:.2f} (Hour {current_hour}:00 UTC)")
                                 await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
                             else:
                                 # Verify timed out - pending order remains for reconciliation
-                                logger.warning(f"[BUY] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
+                                logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
                                 await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
 
                         except Exception as e:
-                            logger.error(f"[BUY ERROR] {symbol}: {e}")
+                            logger.error(f"[SELL ERROR] {symbol}: {e}")
                             await broadcast_log(f"[GRID] Order failed: {e}")
-
-            elif action == 'SELL' and order_details and not skip_trading:
-                # Check regime filter first (Smart Grid - hold sells in strong uptrend)
-                if not regime_allow_sell:
-                    logger.info(f"[REGIME] Holding SELL {symbol}: {regime_status['reason']}")
-                    await broadcast_log(f"[REGIME] Holding SELL: {regime_status['reason']}")
-                # Check momentum filter (optional for sells - let profits run in uptrend)
-                elif not momentum_status['allow_sell']:
-                    await broadcast_log(f"[MOM] Delaying SELL: {momentum_status['reason']}")
-                else:
-                    base_qty = order_details['quantity']
-
-                    # Apply time quality and correlation adjustments
-                    time_quality = time_status.get('time_quality', 1.0)
-                    qty = base_qty * time_quality * corr_adjustment
-
-                    # Log adjustments if applied
-                    if time_quality < 1.0 or corr_adjustment < 1.0:
-                        await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%})")
-
-                    try:
-                        order = MarketOrderRequest(
-                            symbol=symbol,
-                            qty=round(qty, 6),
-                            side=OrderSide.SELL,
-                            time_in_force=TimeInForce.GTC
-                        )
-                        result = client.trading_client.submit_order(order)
-                        order_id = str(result.id)
-
-                        # NEW: Register pending order BEFORE verify (for deterministic matching)
-                        level_price = order_details['price']
-                        level_id = order_details.get('level_id')  # May be None for old grids
-                        bot.grid_strategy.register_pending_order(
-                            order_id=order_id,
-                            symbol=symbol,
-                            side="sell",
-                            intended_level_price=level_price,
-                            intended_level_id=level_id,
-                            source="grid"
-                        )
-
-                        # Verify order fill with Alpaca
-                        verification = client.verify_order_fill(order_id, max_wait_seconds=5)
-
-                        if verification['confirmed']:
-                            # Use actual fill price from Alpaca
-                            fill_price = verification['filled_avg_price']
-                            fill_qty = verification['filled_qty']
-
-                            # Record fill and get profit with verified data (idempotent)
-                            profit = bot.record_fill(symbol, "sell", fill_price, fill_qty, order_id)
-
-                            # Add to confirmed orders (include profit)
-                            verification['profit'] = profit
-                            bot.add_confirmed_order(verification)
-
-                            # Track performance by hour
-                            if profit:
-                                bot.track_trade_performance(symbol, profit, current_hour)
-
-                            trade_executed = {
-                                'action': 'SELL',
-                                'symbol': symbol,
-                                'price': fill_price,
-                                'qty': fill_qty,
-                                'profit': profit,
-                                'grid_level': order_details.get('grid_level'),
-                                'timestamp': datetime.now().isoformat(),
-                                'time_quality': time_quality,
-                                'corr_adjustment': corr_adjustment,
-                                'order_id': order_id,
-                                'verified': True
-                            }
-
-                            logger.info(f"[SELL] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
-                            await broadcast_log(f"[GRID] SELL {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
-                            if profit:
-                                await broadcast_log(f"  Profit: ${profit:.2f} (Hour {current_hour}:00 UTC)")
-                            await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
-                        else:
-                            # Verify timed out - pending order remains for reconciliation
-                            logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
-                            await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
-
-                    except Exception as e:
-                        logger.error(f"[SELL ERROR] {symbol}: {e}")
-                        await broadcast_log(f"[GRID] Order failed: {e}")
 
             elif action == 'REBALANCED_UP':
                 # Grid was auto-rebalanced upward

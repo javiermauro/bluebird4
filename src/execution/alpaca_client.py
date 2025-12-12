@@ -85,6 +85,75 @@ class AlpacaClient:
             logger.error(f"Failed to submit order: {e}")
             return None
 
+    def cancel_order(self, order_id: str) -> bool:
+        """
+        Cancel an open order by ID.
+
+        Args:
+            order_id: The Alpaca order ID to cancel
+
+        Returns:
+            True if cancellation succeeded or order was already closed
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            logger.info(f"MOCK ORDER CANCELLED: {order_id}")
+            return True
+
+        try:
+            self.trading_client.cancel_order_by_id(order_id)
+            logger.info(f"Cancelled order: {order_id}")
+            return True
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Already filled/cancelled is not an error
+            if 'already' in error_msg or 'not found' in error_msg or 'filled' in error_msg:
+                logger.debug(f"Order {order_id} already closed: {e}")
+                return True
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
+
+    def get_open_orders(self, symbols: List[str] = None) -> List[Dict]:
+        """
+        Get all open orders, optionally filtered by symbols.
+
+        Args:
+            symbols: Optional list of symbols to filter (e.g., ['BTC/USD'])
+
+        Returns:
+            List of open order dicts
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return []
+
+        try:
+            request_params = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                limit=500
+            )
+
+            if symbols:
+                # Convert symbols to Alpaca format (remove /)
+                alpaca_symbols = [s.replace('/', '') for s in symbols]
+                request_params.symbols = alpaca_symbols
+
+            orders = self.trading_client.get_orders(filter=request_params)
+
+            return [{
+                'id': str(order.id),
+                'client_order_id': order.client_order_id,
+                'symbol': order.symbol,
+                'side': str(order.side),
+                'type': str(order.type),
+                'qty': float(order.qty) if order.qty else 0.0,
+                'limit_price': float(order.limit_price) if order.limit_price else None,
+                'status': str(order.status),
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+            } for order in orders]
+
+        except Exception as e:
+            logger.error(f"Failed to get open orders: {e}")
+            return []
+
     def get_order_by_id(self, order_id: str) -> Optional[Dict]:
         """
         Get order details by order ID from Alpaca.
