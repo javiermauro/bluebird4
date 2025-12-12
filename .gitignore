@@ -66,3 +66,6 @@ htmlcov/
 # OS
 Thumbs.db
 
+# Runtime data
+data/*.db
+
