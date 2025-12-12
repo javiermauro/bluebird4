@@ -34,7 +34,9 @@ from src.strategy.grid_trading import (
     GridConfig,
     GridState,
     DEFAULT_GRID_CONFIGS,
-    create_default_grids
+    create_default_grids,
+    normalize_side,
+    normalize_symbol
 )
 from src.strategy.regime_detector import RegimeDetector, MarketRegime
 from src.strategy.feature_calculator import FeatureCalculator
@@ -225,19 +227,62 @@ class GridTradingBot:
         """
         Run reconciliation between database and Alpaca.
         Called on startup and periodically (every 5 minutes).
+
+        Also applies any filled orders to grid state (for verify-timeout recovery).
         """
         try:
             # Get recent orders from Alpaca
             alpaca_orders = self.client.get_order_history(days=7, status='closed')
             filled_orders = [o for o in alpaca_orders if 'filled' in str(o.get('status', '')).lower()]
 
-            # Run reconciliation
+            # Run reconciliation with database
             results = database.reconcile_with_alpaca(filled_orders)
 
             # Auto-sync any missing orders
             if results['missing_in_db']:
                 synced = database.sync_missing_orders(results['missing_in_db'])
                 logger.info(f"[RECONCILE] Auto-synced {synced} missing orders to database")
+
+            # NEW: Apply filled orders to grid state (idempotent - safe to replay)
+            # This recovers fills that timed out during verify_order_fill()
+            grid_applied = 0
+            for order in filled_orders:
+                try:
+                    # Alpaca uses 'id' not 'order_id'
+                    order_id = str(order.get('id', ''))
+                    if not order_id:
+                        continue
+
+                    # Normalize symbol and side from Alpaca format
+                    raw_symbol = str(order.get('symbol', ''))
+                    raw_side = order.get('side', '')
+                    if not raw_symbol or not raw_side:
+                        continue
+
+                    symbol = normalize_symbol(raw_symbol)
+                    side = normalize_side(raw_side)
+                    fill_price = float(order.get('filled_avg_price', 0) or 0)
+                    fill_qty = float(order.get('filled_qty', 0) or 0)
+
+                    if fill_price > 0 and fill_qty > 0 and symbol in self.grid_strategy.grids:
+                        # Check if already applied BEFORE calling (to count correctly)
+                        was_already_applied = order_id in self.grid_strategy.applied_order_ids
+
+                        # apply_filled_order is idempotent - checks applied_order_ids
+                        self.grid_strategy.apply_filled_order(
+                            symbol, side, fill_price, fill_qty, order_id,
+                            source="reconcile"
+                        )
+
+                        # Count if newly applied (not already in applied_order_ids before)
+                        if not was_already_applied and order_id in self.grid_strategy.applied_order_ids:
+                            grid_applied += 1
+
+                except Exception as e:
+                    logger.debug(f"[RECONCILE] Could not apply order to grid: {e}")
+
+            if grid_applied > 0:
+                logger.info(f"[RECONCILE] Applied {grid_applied} fills to grid state")
 
             # Update status
             self.reconciliation_status = {
@@ -246,7 +291,8 @@ class GridTradingBot:
                 'matched': results['matched'],
                 'total_alpaca': results['total_alpaca'],
                 'total_db': results['total_db'],
-                'discrepancies': results['mismatched'][:5]  # Keep first 5
+                'discrepancies': results['mismatched'][:5],  # Keep first 5
+                'grid_fills_applied': grid_applied  # NEW
             }
 
             if results['synced']:
@@ -1323,9 +1369,13 @@ class GridTradingBot:
 
         return self.grid_strategy.evaluate_grid(symbol, current_price, position_qty)
 
-    def record_fill(self, symbol: str, side: str, price: float, qty: float, order_id: str) -> Optional[float]:
-        """Record that an order was filled and return profit if applicable."""
-        profit = self.grid_strategy.record_fill(symbol, side, price, qty, order_id)
+    def record_fill(self, symbol: str, side: str, price: float, qty: float, order_id: str, source: str = "grid") -> Optional[float]:
+        """Record that an order was filled and return profit if applicable.
+
+        Args:
+            source: "grid", "stop_loss", or "windfall" - affects cycle counting
+        """
+        profit = self.grid_strategy.record_fill(symbol, side, price, qty, order_id, source=source)
 
         if profit:
             self.total_profit += profit
@@ -1340,7 +1390,7 @@ class GridTradingBot:
                 price=price,
                 order_id=order_id,
                 profit=profit or 0,
-                source='grid'
+                source=source
             )
         except Exception as e:
             logger.warning(f"Failed to log trade to database: {e}")
@@ -1825,8 +1875,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         result = client.trading_client.submit_order(order)
                         await broadcast_log(f"[RISK] STOP-LOSS EXECUTED: Sold {position_qty:.6f} {symbol} @ ${current_price:,.2f}")
 
-                        # Record as emergency sell
-                        bot.record_fill(symbol, "sell", current_price, position_qty, str(result.id))
+                        # Record as emergency sell (source="stop_loss" prevents inflating completed_cycles)
+                        bot.record_fill(symbol, "sell", current_price, position_qty, str(result.id), source="stop_loss")
 
                         evaluation = {
                             'action': 'STOP_LOSS',
@@ -1894,6 +1944,19 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             result = client.trading_client.submit_order(order)
                             order_id = str(result.id)
 
+                            # NEW: Register pending order BEFORE verify (for deterministic matching)
+                            # Use order_details["price"] (NOT grid_level which is an index)
+                            level_price = order_details['price']
+                            level_id = order_details.get('level_id')  # May be None for old grids
+                            bot.grid_strategy.register_pending_order(
+                                order_id=order_id,
+                                symbol=symbol,
+                                side="buy",
+                                intended_level_price=level_price,
+                                intended_level_id=level_id,
+                                source="grid"
+                            )
+
                             # Verify order fill with Alpaca
                             verification = client.verify_order_fill(order_id, max_wait_seconds=5)
 
@@ -1902,7 +1965,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 fill_price = verification['filled_avg_price']
                                 fill_qty = verification['filled_qty']
 
-                                # Record fill with verified data
+                                # Record fill with verified data (idempotent - uses apply_filled_order)
                                 bot.record_fill(symbol, "buy", fill_price, fill_qty, order_id)
 
                                 # Add to confirmed orders
@@ -1923,8 +1986,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 await broadcast_log(f"[GRID] BUY {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
                                 await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
                             else:
-                                logger.warning(f"[BUY] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')}")
-                                await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')}")
+                                # Verify timed out - pending order remains for reconciliation
+                                logger.warning(f"[BUY] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
+                                await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
 
                         except Exception as e:
                             logger.error(f"[BUY ERROR] {symbol}: {e}")
@@ -1959,6 +2023,18 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         result = client.trading_client.submit_order(order)
                         order_id = str(result.id)
 
+                        # NEW: Register pending order BEFORE verify (for deterministic matching)
+                        level_price = order_details['price']
+                        level_id = order_details.get('level_id')  # May be None for old grids
+                        bot.grid_strategy.register_pending_order(
+                            order_id=order_id,
+                            symbol=symbol,
+                            side="sell",
+                            intended_level_price=level_price,
+                            intended_level_id=level_id,
+                            source="grid"
+                        )
+
                         # Verify order fill with Alpaca
                         verification = client.verify_order_fill(order_id, max_wait_seconds=5)
 
@@ -1967,7 +2043,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             fill_price = verification['filled_avg_price']
                             fill_qty = verification['filled_qty']
 
-                            # Record fill and get profit with verified data
+                            # Record fill and get profit with verified data (idempotent)
                             profit = bot.record_fill(symbol, "sell", fill_price, fill_qty, order_id)
 
                             # Add to confirmed orders (include profit)
@@ -1998,8 +2074,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 await broadcast_log(f"  Profit: ${profit:.2f} (Hour {current_hour}:00 UTC)")
                             await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
                         else:
-                            logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')}")
-                            await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')}")
+                            # Verify timed out - pending order remains for reconciliation
+                            logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
+                            await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
 
                     except Exception as e:
                         logger.error(f"[SELL ERROR] {symbol}: {e}")

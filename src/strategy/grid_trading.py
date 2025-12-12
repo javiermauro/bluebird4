@@ -21,12 +21,47 @@ Key concepts:
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 from enum import Enum
 
 logger = logging.getLogger("GridTrading")
+
+
+# =============================================================================
+# Normalization Helpers
+# =============================================================================
+
+def normalize_side(side: Any) -> str:
+    """
+    Normalize side to canonical 'buy' | 'sell'.
+
+    Accepts: 'buy', 'sell', 'OrderSide.BUY', enum values, etc.
+    """
+    if hasattr(side, 'value'):  # Enum
+        side = side.value
+    side_str = str(side).lower()
+    if 'buy' in side_str:
+        return 'buy'
+    if 'sell' in side_str:
+        return 'sell'
+    raise ValueError(f"Unknown side: {side}")
+
+
+def normalize_symbol(symbol: str) -> str:
+    """
+    Normalize symbol to canonical 'BTC/USD' format.
+
+    Handles: 'BTCUSD' <-> 'BTC/USD'
+    """
+    s = symbol.upper().replace(' ', '')
+    if '/' not in s:
+        for base in ['BTC', 'ETH', 'SOL', 'LTC', 'AVAX', 'LINK']:
+            if s.startswith(base):
+                return f"{base}/{s[len(base):]}"
+    return s
 
 # Grid state persistence file
 GRID_STATE_FILE = "/tmp/bluebird-grid-state.json"
@@ -46,6 +81,7 @@ class GridLevel:
     order_id: Optional[str] = None
     filled_at: Optional[datetime] = None
     quantity: float = 0.0
+    level_id: str = field(default_factory=lambda: uuid.uuid4().hex)  # Stable identity (full 32-char UUID)
 
     def to_dict(self) -> dict:
         """Serialize grid level for persistence."""
@@ -55,7 +91,8 @@ class GridLevel:
             'is_filled': self.is_filled,
             'order_id': self.order_id,
             'filled_at': self.filled_at.isoformat() if self.filled_at else None,
-            'quantity': self.quantity
+            'quantity': self.quantity,
+            'level_id': self.level_id
         }
 
     @classmethod
@@ -67,7 +104,8 @@ class GridLevel:
             is_filled=data['is_filled'],
             order_id=data.get('order_id'),
             filled_at=datetime.fromisoformat(data['filled_at']) if data.get('filled_at') else None,
-            quantity=data['quantity']
+            quantity=data.get('quantity', 0.0),
+            level_id=data.get('level_id', uuid.uuid4().hex)  # Generate if missing
         )
 
 
@@ -95,13 +133,57 @@ class GridConfig:
 
 
 @dataclass
+class PendingOrder:
+    """
+    Tracks an order awaiting fill confirmation.
+
+    Used for deterministic order->level matching and verify-timeout recovery.
+    """
+    order_id: str
+    symbol: str                    # Canonical: "BTC/USD"
+    side: str                      # Canonical: "buy" | "sell"
+    intended_level_price: float
+    intended_level_id: Optional[str] = None  # For stable matching
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    source: str = "grid"           # "grid" | "windfall" | "stop_loss"
+    client_order_id: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        """Serialize for persistence."""
+        return {
+            'order_id': self.order_id,
+            'symbol': self.symbol,
+            'side': self.side,
+            'intended_level_price': self.intended_level_price,
+            'intended_level_id': self.intended_level_id,
+            'created_at': self.created_at,
+            'source': self.source,
+            'client_order_id': self.client_order_id
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PendingOrder':
+        """Deserialize from persistence."""
+        return cls(
+            order_id=data['order_id'],
+            symbol=data['symbol'],
+            side=data['side'],
+            intended_level_price=data['intended_level_price'],
+            intended_level_id=data.get('intended_level_id'),
+            created_at=data.get('created_at', datetime.now().isoformat()),
+            source=data.get('source', 'grid'),
+            client_order_id=data.get('client_order_id')
+        )
+
+
+@dataclass
 class GridState:
     """Tracks the current state of a grid trading setup."""
     config: GridConfig
     levels: List[GridLevel] = field(default_factory=list)
     is_active: bool = False
     total_profit: float = 0.0
-    completed_trades: int = 0
+    completed_trades: int = 0  # KEEP for backward compat (alias to total_fills)
     created_at: datetime = field(default_factory=datetime.now)
     last_trade_at: Optional[datetime] = None
 
@@ -110,6 +192,10 @@ class GridState:
     total_sells: int = 0
     avg_buy_price: float = 0.0
     avg_sell_price: float = 0.0
+
+    # NEW: Accurate fill tracking
+    total_fills: int = 0           # Every applied fill (buy or sell)
+    completed_cycles: int = 0      # Only grid sells (not stop-loss/windfall)
 
     def to_dict(self) -> dict:
         """Serialize grid state for persistence."""
@@ -131,7 +217,9 @@ class GridState:
             'avg_buy_price': self.avg_buy_price,
             'avg_sell_price': self.avg_sell_price,
             'created_at': self.created_at.isoformat(),
-            'last_trade_at': self.last_trade_at.isoformat() if self.last_trade_at else None
+            'last_trade_at': self.last_trade_at.isoformat() if self.last_trade_at else None,
+            'total_fills': self.total_fills,
+            'completed_cycles': self.completed_cycles
         }
 
 
@@ -145,6 +233,16 @@ class GridTradingStrategy:
 
     def __init__(self):
         self.grids: Dict[str, GridState] = {}  # symbol -> GridState
+
+        # NEW: Pending order mappings (order_id -> PendingOrder)
+        self.pending_orders: Dict[str, PendingOrder] = {}
+
+        # NEW: Applied order IDs for idempotency (order_id -> applied_at ISO)
+        self.applied_order_ids: Dict[str, str] = {}
+
+        # NEW: Unmatched fills for diagnostics (order_id -> fill details)
+        self.unmatched_fills: Dict[str, dict] = {}
+
         logger.info("GridTradingStrategy initialized")
 
     def save_state(self) -> None:
@@ -153,7 +251,11 @@ class GridTradingStrategy:
             data = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
                 'saved_at': datetime.now().isoformat(),
-                'grids': {symbol: state.to_dict() for symbol, state in self.grids.items()}
+                'grids': {symbol: state.to_dict() for symbol, state in self.grids.items()},
+                # NEW: Persist pending/applied/unmatched
+                'pending_orders': {oid: p.to_dict() for oid, p in self.pending_orders.items()},
+                'applied_order_ids': self.applied_order_ids,
+                'unmatched_fills': self.unmatched_fills
             }
             with open(GRID_STATE_FILE, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -206,10 +308,42 @@ class GridTradingStrategy:
                 if grid_data.get('last_trade_at'):
                     state.last_trade_at = datetime.fromisoformat(grid_data['last_trade_at'])
 
+                # NEW: Load new fields with backward-compat defaults
+                state.total_fills = grid_data.get('total_fills', state.completed_trades)
+                state.completed_cycles = grid_data.get('completed_cycles', 0)
+
                 self.grids[symbol] = state
 
                 filled_count = sum(1 for l in levels if l.is_filled)
                 logger.info(f"Restored grid for {symbol}: {filled_count}/{len(levels)} levels filled")
+
+            # NEW: Restore pending orders
+            for oid, pending_data in data.get('pending_orders', {}).items():
+                self.pending_orders[oid] = PendingOrder.from_dict(pending_data)
+            if self.pending_orders:
+                logger.info(f"Restored {len(self.pending_orders)} pending orders")
+
+            # NEW: Restore applied order IDs (with pruning)
+            self.applied_order_ids = data.get('applied_order_ids', {})
+            # Prune to last 5000 entries
+            if len(self.applied_order_ids) > 5000:
+                sorted_ids = sorted(self.applied_order_ids.items(), key=lambda x: x[1], reverse=True)
+                self.applied_order_ids = dict(sorted_ids[:5000])
+                logger.info(f"Pruned applied_order_ids to 5000 entries")
+
+            # NEW: Restore unmatched fills (with pruning)
+            self.unmatched_fills = data.get('unmatched_fills', {})
+            # Prune to last 500 entries
+            if len(self.unmatched_fills) > 500:
+                sorted_fills = sorted(
+                    self.unmatched_fills.items(),
+                    key=lambda x: x[1].get('recorded_at', ''),
+                    reverse=True
+                )
+                self.unmatched_fills = dict(sorted_fills[:500])
+
+            # NEW: Cleanup stale pending orders (>24h)
+            self._cleanup_stale_pendings()
 
             logger.info(f"Grid state restored for {len(self.grids)} symbols")
             return True
@@ -217,6 +351,285 @@ class GridTradingStrategy:
         except Exception as e:
             logger.error(f"Failed to load grid state: {e}")
             return False
+
+    def _cleanup_stale_pendings(self, max_age_hours: int = 72) -> None:
+        """
+        Remove pending mappings older than max_age_hours.
+
+        Conservative approach: 72h default (3 days) to avoid dropping mappings
+        for orders that might still be pending on Alpaca. Market orders should
+        fill immediately, but we keep a long window for safety.
+
+        NOTE: For stricter compliance, the bot layer could verify against Alpaca
+        before calling this method and pass confirmed-dead order IDs.
+        """
+        now = datetime.now()
+        stale = []
+        for order_id, pending in self.pending_orders.items():
+            try:
+                created = datetime.fromisoformat(pending.created_at)
+                age_hours = (now - created).total_seconds() / 3600
+                if age_hours > max_age_hours:
+                    stale.append((order_id, pending, age_hours))
+            except (ValueError, TypeError):
+                pass  # Skip malformed entries
+
+        for order_id, pending, age_hours in stale:
+            logger.warning(
+                f"[GRID] Removing stale pending order {order_id[:8]} "
+                f"(age: {age_hours:.1f}h, symbol: {pending.symbol}, side: {pending.side}). "
+                f"If this order filled on Alpaca, the fill will be recovered via reconciliation."
+            )
+            # Move to unmatched_fills for audit trail before deleting
+            self.unmatched_fills[order_id] = {
+                'symbol': pending.symbol,
+                'side': pending.side,
+                'price': pending.intended_level_price,
+                'reason': f'stale_pending_removed_after_{age_hours:.1f}h',
+                'recorded_at': now.isoformat()
+            }
+            del self.pending_orders[order_id]
+
+        if stale:
+            logger.warning(f"[GRID] Cleaned up {len(stale)} stale pending orders (>72h old)")
+
+    def register_pending_order(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        intended_level_price: float,
+        intended_level_id: Optional[str] = None,
+        source: str = "grid",
+        client_order_id: Optional[str] = None
+    ) -> bool:
+        """
+        Register order->level mapping immediately after submission.
+
+        Must be called BEFORE verify_order_fill() to enable deterministic matching.
+
+        Args:
+            order_id: Alpaca order ID
+            symbol: Trading symbol
+            side: "buy" or "sell"
+            intended_level_price: The grid level price this order was for
+            intended_level_id: Optional stable level ID for best matching
+            source: "grid" | "windfall" | "stop_loss"
+            client_order_id: Optional Alpaca client order ID
+
+        Returns:
+            True if registered successfully
+        """
+        symbol = normalize_symbol(symbol)
+        side = normalize_side(side)
+
+        if order_id in self.pending_orders:
+            logger.warning(f"[GRID] Order {order_id[:8]} already registered as pending")
+            return False
+
+        pending = PendingOrder(
+            order_id=order_id,
+            symbol=symbol,
+            side=side,
+            intended_level_price=intended_level_price,
+            intended_level_id=intended_level_id,
+            created_at=datetime.now().isoformat(),
+            source=source,
+            client_order_id=client_order_id
+        )
+        self.pending_orders[order_id] = pending
+        logger.info(f"[GRID] Registered pending {side} order {order_id[:8]} for {symbol} @ ${intended_level_price:.2f}")
+        self.save_state()  # Persist immediately for crash recovery
+        return True
+
+    def _record_unmatched(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        price: float,
+        reason: str
+    ) -> None:
+        """Record unmatched fill for diagnostics."""
+        self.unmatched_fills[order_id] = {
+            'symbol': symbol,
+            'side': side,
+            'price': price,
+            'reason': reason,
+            'recorded_at': datetime.now().isoformat()
+        }
+        logger.error(f"[GRID] Unmatched fill: {order_id[:8]} {side} {symbol} @ ${price:.2f} ({reason})")
+
+    def apply_filled_order(
+        self,
+        symbol: str,
+        side: str,
+        fill_price: float,
+        fill_qty: float,
+        order_id: str,
+        source: str = "reconcile"
+    ) -> Optional[float]:
+        """
+        Single entry point for applying fills. Returns profit for sells.
+
+        This is the deterministic, idempotent fill matching algorithm.
+
+        Matching rules (strict order):
+        0. Idempotency: Skip if order_id already applied
+        1. Deterministic: Match by order_id from pending_orders (level_id first, then price)
+        2. Fallback: Match by price-proximity WITH side validation
+
+        Args:
+            symbol: Trading symbol
+            side: "buy" or "sell"
+            fill_price: Actual fill price from Alpaca
+            fill_qty: Fill quantity
+            order_id: Alpaca order ID
+            source: "grid" | "reconcile" | "stop_loss" | "windfall"
+
+        Returns:
+            Profit from this trade (if grid sell), else None
+        """
+        symbol = normalize_symbol(symbol)
+        side = normalize_side(side)
+
+        # Step 0: Idempotency guard
+        if order_id in self.applied_order_ids:
+            logger.debug(f"[GRID] Skip duplicate: order {order_id[:8]} already applied")
+            return None
+
+        if symbol not in self.grids:
+            logger.error(f"[GRID] No grid for {symbol}")
+            return None
+
+        state = self.grids[symbol]
+        matched_level = None
+        match_method = None
+        pending = self.pending_orders.get(order_id)
+
+        # Step 1: Try pending mapping (deterministic match)
+        if pending:
+            # Validate symbol matches
+            if pending.symbol != symbol:
+                self._record_unmatched(order_id, symbol, side, fill_price, "symbol_mismatch")
+                return None  # Keep pending, don't apply
+
+            # Validate side matches (HARD requirement - don't apply on mismatch)
+            if pending.side != side:
+                self._record_unmatched(order_id, symbol, side, fill_price, "side_mismatch")
+                return None  # Keep pending, don't apply
+
+            # Match by level_id first (most stable)
+            if pending.intended_level_id:
+                for level in state.levels:
+                    if level.level_id == pending.intended_level_id and not level.is_filled:
+                        matched_level = level
+                        match_method = "level_id"
+                        break
+
+            # Fallback to price within tolerance
+            if not matched_level:
+                tolerance = state.config.grid_spacing * 0.5
+                for level in state.levels:
+                    if (not level.is_filled and
+                        level.side.value == side and
+                        abs(level.price - pending.intended_level_price) < tolerance):
+                        matched_level = level
+                        match_method = "pending_price"
+                        break
+
+            # Use pending's source for cycle counting
+            source = pending.source
+
+        # Step 2: Fallback (no pending mapping) - side-gated + bounded
+        if not matched_level:
+            tolerance = state.config.grid_spacing * 0.5
+            min_diff = float('inf')
+
+            for level in state.levels:
+                if not level.is_filled and level.side.value == side:
+                    diff = abs(level.price - fill_price)
+                    if diff < tolerance and diff < min_diff:
+                        min_diff = diff
+                        matched_level = level
+                        match_method = "fallback"
+
+            if matched_level:
+                logger.warning(f"[GRID] Fallback match: {side} ${fill_price:.2f} -> level ${matched_level.price:.2f}")
+
+        # No match found - record as unmatched but do NOT mark as applied
+        if not matched_level:
+            self._record_unmatched(order_id, symbol, side, fill_price, "no_level_match")
+            return None
+
+        # === Apply the fill ===
+        matched_level.is_filled = True
+        matched_level.order_id = order_id
+        matched_level.filled_at = datetime.now()
+        matched_level.quantity = fill_qty
+
+        state.last_trade_at = datetime.now()
+
+        # Update counters
+        state.total_fills += 1
+        state.completed_trades = state.total_fills  # Backward compat alias
+
+        # Add to applied (idempotency) ONLY after successful apply
+        self.applied_order_ids[order_id] = datetime.now().isoformat()
+
+        # Remove pending mapping ONLY after successful apply
+        if pending:
+            del self.pending_orders[order_id]
+
+        logger.info(f"[GRID] Applied {side} {symbol} @ ${fill_price:.2f} (method: {match_method})")
+
+        # Handle buy/sell specific logic
+        profit = None
+        if side == "buy":
+            state.total_buys += 1
+            # Update average buy price
+            if state.avg_buy_price == 0:
+                state.avg_buy_price = fill_price
+            else:
+                state.avg_buy_price = (state.avg_buy_price + fill_price) / 2
+
+            # Create corresponding sell level
+            sell_price = fill_price + state.config.grid_spacing
+            if sell_price <= state.config.upper_price:
+                self._add_sell_level(state, sell_price, fill_qty)
+
+        else:  # sell
+            state.total_sells += 1
+            # Update average sell price
+            if state.avg_sell_price == 0:
+                state.avg_sell_price = fill_price
+            else:
+                state.avg_sell_price = (state.avg_sell_price + fill_price) / 2
+
+            # Only count grid sells as completed_cycles (not stop-loss/windfall)
+            if source == "grid":
+                state.completed_cycles += 1
+
+            # Calculate profit from this grid cycle
+            fee_pct = 0.005  # 0.5% round trip fees
+            gross_profit = state.config.grid_spacing * fill_qty
+            fees = fill_price * fill_qty * fee_pct
+            profit = gross_profit - fees
+
+            if profit > 0:
+                state.total_profit += profit
+                logger.info(f"[PROFIT] {symbol}: +${profit:.2f} (grid spacing: ${state.config.grid_spacing:.2f}, qty: {fill_qty:.4f}, fees: ${fees:.2f})")
+            else:
+                logger.warning(f"[PROFIT] {symbol}: Negative profit ${profit:.2f} - possibly forced sell")
+                profit = 0.0
+
+            # Create corresponding buy level
+            buy_price = fill_price - state.config.grid_spacing
+            if buy_price >= state.config.lower_price:
+                self._add_buy_level(state, buy_price, fill_qty)
+
+        self.save_state()
+        return profit if profit and profit > 0 else None
 
     def create_grid(self, config: GridConfig, current_price: float) -> GridState:
         """
@@ -412,7 +825,8 @@ class GridTradingStrategy:
             order_details = {
                 "price": best_buy.price,
                 "quantity": best_buy.quantity,
-                "grid_level": state.levels.index(best_buy)
+                "grid_level": state.levels.index(best_buy),  # Keep for UI/logging
+                "level_id": best_buy.level_id  # NEW: Stable identity for matching
             }
         elif triggered_sells and current_position_qty > 0:
             # Sell at the lowest triggered sell level
@@ -421,7 +835,8 @@ class GridTradingStrategy:
             order_details = {
                 "price": best_sell.price,
                 "quantity": min(best_sell.quantity, current_position_qty),
-                "grid_level": state.levels.index(best_sell)
+                "grid_level": state.levels.index(best_sell),  # Keep for UI/logging
+                "level_id": best_sell.level_id  # NEW: Stable identity for matching
             }
 
         return {
@@ -442,10 +857,13 @@ class GridTradingStrategy:
         side: str,  # "buy" or "sell"
         price: float,
         quantity: float,
-        order_id: str
+        order_id: str,
+        source: str = "grid"
     ) -> Optional[float]:
         """
         Record that a grid order was filled.
+
+        LEGACY METHOD: Delegates to apply_filled_order() for deterministic matching.
 
         Args:
             symbol: Trading symbol
@@ -453,85 +871,12 @@ class GridTradingStrategy:
             price: Fill price
             quantity: Fill quantity
             order_id: Order ID
+            source: "grid", "stop_loss", or "windfall"
 
         Returns:
             Profit from this trade (if closing a grid cycle)
         """
-        if symbol not in self.grids:
-            return None
-
-        state = self.grids[symbol]
-
-        # Find the closest grid level
-        min_diff = float('inf')
-        closest_level = None
-        for level in state.levels:
-            diff = abs(level.price - price)
-            if diff < min_diff and not level.is_filled:
-                min_diff = diff
-                closest_level = level
-
-        if closest_level:
-            closest_level.is_filled = True
-            closest_level.order_id = order_id
-            closest_level.filled_at = datetime.now()
-
-            state.last_trade_at = datetime.now()
-            state.completed_trades += 1
-
-            if side == "buy":
-                state.total_buys += 1
-                # Update average buy price
-                if state.avg_buy_price == 0:
-                    state.avg_buy_price = price
-                else:
-                    state.avg_buy_price = (state.avg_buy_price + price) / 2
-
-                # Create corresponding sell level
-                sell_price = price + state.config.grid_spacing
-                if sell_price <= state.config.upper_price:
-                    self._add_sell_level(state, sell_price, quantity)
-
-            else:  # sell
-                state.total_sells += 1
-                # Update average sell price
-                if state.avg_sell_price == 0:
-                    state.avg_sell_price = price
-                else:
-                    state.avg_sell_price = (state.avg_sell_price + price) / 2
-
-                # Calculate profit from this grid cycle
-                # Use grid spacing as the profit basis (more reliable than avg_buy tracking)
-                profit = 0.0
-                grid_spacing = state.config.grid_spacing
-
-                # Method 1: Use grid spacing (most reliable)
-                # Each completed grid cycle profits by the grid spacing * quantity
-                # Minus fees (~0.5% round trip)
-                fee_pct = 0.005  # 0.5% round trip fees
-                gross_profit = grid_spacing * quantity
-                fees = price * quantity * fee_pct
-                profit = gross_profit - fees
-
-                # Sanity check: profit shouldn't be negative for a proper grid sell
-                # (sell should be above buy by at least grid_spacing)
-                if profit > 0:
-                    state.total_profit += profit
-                    logger.info(f"[PROFIT] {symbol}: +${profit:.2f} (grid spacing: ${grid_spacing:.2f}, qty: {quantity:.4f}, fees: ${fees:.2f})")
-                else:
-                    # If profit would be negative, this might be a forced sell or stop-loss
-                    # Don't add to total_profit but log it
-                    logger.warning(f"[PROFIT] {symbol}: Negative profit ${profit:.2f} - possibly forced sell")
-                    profit = 0.0
-
-                # Create corresponding buy level
-                buy_price = price - state.config.grid_spacing
-                if buy_price >= state.config.lower_price:
-                    self._add_buy_level(state, buy_price, quantity)
-
-                return profit if profit > 0 else None
-
-        return None
+        return self.apply_filled_order(symbol, side, price, quantity, order_id, source=source)
 
     def _add_sell_level(self, state: GridState, price: float, quantity: float):
         """Add a new sell level to the grid."""
