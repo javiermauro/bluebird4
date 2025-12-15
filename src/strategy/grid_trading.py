@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 from enum import Enum
 
+import config_ultra as config
+
 logger = logging.getLogger("GridTrading")
 
 
@@ -63,6 +65,22 @@ def normalize_symbol(symbol: str) -> str:
                 return f"{base}/{s[len(base):]}"
     return s
 
+
+def normalize_fee_type(value: Any) -> str:
+    """
+    Normalize fee_type to canonical 'maker' or 'taker'.
+
+    Handles: None, 'Maker', 'TAKER', etc.
+    Returns 'taker' for unknown/None values (conservative default).
+    """
+    if value is None:
+        return "taker"
+    s = str(value).lower().strip()
+    if s == "maker":
+        return "maker"
+    return "taker"
+
+
 # Grid state persistence file
 GRID_STATE_FILE = "/tmp/bluebird-grid-state.json"
 
@@ -82,6 +100,9 @@ class GridLevel:
     filled_at: Optional[datetime] = None
     quantity: float = 0.0
     level_id: str = field(default_factory=lambda: uuid.uuid4().hex)  # Stable identity (full 32-char UUID)
+    # Fee model: origin buy info for sell levels (set when buy creates corresponding sell)
+    origin_buy_price: float = 0.0       # Price of the buy that created this sell
+    origin_buy_fee_type: str = "taker"  # Fee type of that buy ("maker" or "taker")
 
     def to_dict(self) -> dict:
         """Serialize grid level for persistence."""
@@ -92,7 +113,9 @@ class GridLevel:
             'order_id': self.order_id,
             'filled_at': self.filled_at.isoformat() if self.filled_at else None,
             'quantity': self.quantity,
-            'level_id': self.level_id
+            'level_id': self.level_id,
+            'origin_buy_price': self.origin_buy_price,
+            'origin_buy_fee_type': self.origin_buy_fee_type
         }
 
     @classmethod
@@ -105,7 +128,9 @@ class GridLevel:
             order_id=data.get('order_id'),
             filled_at=datetime.fromisoformat(data['filled_at']) if data.get('filled_at') else None,
             quantity=data.get('quantity', 0.0),
-            level_id=data.get('level_id', uuid.uuid4().hex)  # Generate if missing
+            level_id=data.get('level_id', uuid.uuid4().hex),  # Generate if missing
+            origin_buy_price=data.get('origin_buy_price', 0.0),
+            origin_buy_fee_type=normalize_fee_type(data.get('origin_buy_fee_type'))
         )
 
 
@@ -147,6 +172,7 @@ class PendingOrder:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     source: str = "grid"           # "grid" | "windfall" | "stop_loss"
     client_order_id: Optional[str] = None
+    fee_type: str = "taker"        # "maker" or "taker" - for fee attribution
 
     def to_dict(self) -> dict:
         """Serialize for persistence."""
@@ -158,7 +184,8 @@ class PendingOrder:
             'intended_level_id': self.intended_level_id,
             'created_at': self.created_at,
             'source': self.source,
-            'client_order_id': self.client_order_id
+            'client_order_id': self.client_order_id,
+            'fee_type': self.fee_type
         }
 
     @classmethod
@@ -172,7 +199,8 @@ class PendingOrder:
             intended_level_id=data.get('intended_level_id'),
             created_at=data.get('created_at', datetime.now().isoformat()),
             source=data.get('source', 'grid'),
-            client_order_id=data.get('client_order_id')
+            client_order_id=data.get('client_order_id'),
+            fee_type=normalize_fee_type(data.get('fee_type'))
         )
 
 
@@ -193,6 +221,7 @@ class OpenLimitOrder:
     qty: float
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     source: str = "grid"           # "grid" | "windfall" | "stop_loss"
+    fee_type: str = "maker"        # "maker" for limit orders (default)
 
     def to_dict(self) -> dict:
         return {
@@ -204,7 +233,8 @@ class OpenLimitOrder:
             'limit_price': self.limit_price,
             'qty': self.qty,
             'created_at': self.created_at,
-            'source': self.source
+            'source': self.source,
+            'fee_type': self.fee_type
         }
 
     @classmethod
@@ -218,7 +248,8 @@ class OpenLimitOrder:
             limit_price=data['limit_price'],
             qty=data['qty'],
             created_at=data.get('created_at', datetime.now().isoformat()),
-            source=data.get('source', 'grid')
+            source=data.get('source', 'grid'),
+            fee_type=normalize_fee_type(data.get('fee_type', 'maker'))  # Default maker for limit orders
         )
 
     @staticmethod
@@ -248,6 +279,10 @@ class GridState:
     total_fills: int = 0           # Every applied fill (buy or sell)
     completed_cycles: int = 0      # Only grid sells (not stop-loss/windfall)
 
+    # Fee model diagnostics: track how profit is calculated
+    fee_origin_paired_count: int = 0    # Sells with paired buy metadata
+    fee_origin_estimated_count: int = 0  # Sells using estimated buy price
+
     def to_dict(self) -> dict:
         """Serialize grid state for persistence."""
         return {
@@ -270,7 +305,9 @@ class GridState:
             'created_at': self.created_at.isoformat(),
             'last_trade_at': self.last_trade_at.isoformat() if self.last_trade_at else None,
             'total_fills': self.total_fills,
-            'completed_cycles': self.completed_cycles
+            'completed_cycles': self.completed_cycles,
+            'fee_origin_paired_count': self.fee_origin_paired_count,
+            'fee_origin_estimated_count': self.fee_origin_estimated_count
         }
 
 
@@ -371,6 +408,8 @@ class GridTradingStrategy:
                 # NEW: Load new fields with backward-compat defaults
                 state.total_fills = grid_data.get('total_fills', state.completed_trades)
                 state.completed_cycles = grid_data.get('completed_cycles', 0)
+                state.fee_origin_paired_count = grid_data.get('fee_origin_paired_count', 0)
+                state.fee_origin_estimated_count = grid_data.get('fee_origin_estimated_count', 0)
 
                 self.grids[symbol] = state
 
@@ -516,6 +555,8 @@ class GridTradingStrategy:
                 state.avg_sell_price = grid_data.get('avg_sell_price', 0.0)
                 state.total_fills = grid_data.get('total_fills', 0)
                 state.completed_cycles = grid_data.get('completed_cycles', 0)
+                state.fee_origin_paired_count = grid_data.get('fee_origin_paired_count', 0)
+                state.fee_origin_estimated_count = grid_data.get('fee_origin_estimated_count', 0)
 
                 # Restore timestamps
                 if grid_data.get('created_at'):
@@ -849,10 +890,18 @@ class GridTradingStrategy:
             else:
                 state.avg_buy_price = (state.avg_buy_price + fill_price) / 2
 
-            # Create corresponding sell level
+            # Create corresponding sell level with origin buy metadata
             sell_price = fill_price + state.config.grid_spacing
             if sell_price <= state.config.upper_price:
-                self._add_sell_level(state, sell_price, fill_qty)
+                # Get buy fee type from pending order (for accurate sell-side profit calc)
+                buy_fee_type = pending.fee_type if pending else "taker"
+                self._add_sell_level(
+                    state,
+                    sell_price,
+                    fill_qty,
+                    origin_buy_price=fill_price,
+                    origin_buy_fee_type=buy_fee_type
+                )
 
         else:  # sell
             state.total_sells += 1
@@ -866,23 +915,63 @@ class GridTradingStrategy:
             if source == "grid":
                 state.completed_cycles += 1
 
-            # Calculate profit from this grid cycle
-            fee_pct = 0.005  # 0.5% round trip fees
-            gross_profit = state.config.grid_spacing * fill_qty
-            fees = fill_price * fill_qty * fee_pct
+            # Calculate profit using two-notional fee model
+            # Get fee rates from config (with fallback defaults)
+            maker_fee = getattr(config, 'MAKER_FEE_PCT', 0.0015)
+            taker_fee = getattr(config, 'TAKER_FEE_PCT', 0.0025)
+
+            # Get sell fee type from pending order (local var holds ref even after dict removal)
+            sell_fee_type = pending.fee_type if pending else "taker"
+            sell_fee_rate = maker_fee if sell_fee_type == "maker" else taker_fee
+
+            # Get buy fee type/price from matched SELL level's origin fields
+            # matched_level is the sell level that triggered this fill
+            has_paired_origin = (
+                hasattr(matched_level, 'origin_buy_price') and
+                matched_level.origin_buy_price > 0
+            )
+            if has_paired_origin:
+                buy_price = matched_level.origin_buy_price
+                buy_fee_type = matched_level.origin_buy_fee_type
+                state.fee_origin_paired_count += 1
+            else:
+                # Fallback: estimate buy price from grid spacing (initial grid sells, etc.)
+                buy_price = fill_price - state.config.grid_spacing
+                buy_fee_type = "taker"  # Conservative default for untracked buys
+                state.fee_origin_estimated_count += 1
+
+            buy_fee_rate = maker_fee if buy_fee_type == "maker" else taker_fee
+
+            # Compute fees using BOTH notionals (buy leg + sell leg)
+            sell_price = fill_price
+            buy_fee_usd = buy_price * fill_qty * buy_fee_rate
+            sell_fee_usd = sell_price * fill_qty * sell_fee_rate
+            fees = buy_fee_usd + sell_fee_usd
+
+            # Gross profit is price difference * quantity
+            if has_paired_origin:
+                gross_profit = (sell_price - buy_price) * fill_qty
+            else:
+                gross_profit = state.config.grid_spacing * fill_qty
+
             profit = gross_profit - fees
+            cycle_fee_type = f"{buy_fee_type}+{sell_fee_type}"  # e.g., "maker+maker"
 
             if profit > 0:
                 state.total_profit += profit
-                logger.info(f"[PROFIT] {symbol}: +${profit:.2f} (grid spacing: ${state.config.grid_spacing:.2f}, qty: {fill_qty:.4f}, fees: ${fees:.2f})")
+                logger.info(
+                    f"[PROFIT] {symbol}: +${profit:.2f} "
+                    f"(buy=${buy_price:.2f}, sell=${sell_price:.2f}, qty={fill_qty:.4f}, "
+                    f"fees=${fees:.2f} [{cycle_fee_type}])"
+                )
             else:
                 logger.warning(f"[PROFIT] {symbol}: Negative profit ${profit:.2f} - possibly forced sell")
                 profit = 0.0
 
             # Create corresponding buy level
-            buy_price = fill_price - state.config.grid_spacing
-            if buy_price >= state.config.lower_price:
-                self._add_buy_level(state, buy_price, fill_qty)
+            new_buy_price = fill_price - state.config.grid_spacing
+            if new_buy_price >= state.config.lower_price:
+                self._add_buy_level(state, new_buy_price, fill_qty)
 
         self.save_state()
         return profit if profit and profit > 0 else None
@@ -1280,12 +1369,30 @@ class GridTradingStrategy:
         """
         return self.apply_filled_order(symbol, side, price, quantity, order_id, source=source)
 
-    def _add_sell_level(self, state: GridState, price: float, quantity: float):
-        """Add a new sell level to the grid."""
+    def _add_sell_level(
+        self,
+        state: GridState,
+        price: float,
+        quantity: float,
+        origin_buy_price: float = 0.0,
+        origin_buy_fee_type: str = "taker"
+    ):
+        """
+        Add a new sell level to the grid.
+
+        Args:
+            state: Grid state to modify
+            price: Sell level price
+            quantity: Order quantity
+            origin_buy_price: Price of the buy that created this sell (for fee calc)
+            origin_buy_fee_type: Fee type of the originating buy ("maker" or "taker")
+        """
         level = GridLevel(
             price=price,
             side=GridOrderSide.SELL,
-            quantity=quantity
+            quantity=quantity,
+            origin_buy_price=origin_buy_price,
+            origin_buy_fee_type=origin_buy_fee_type
         )
         state.levels.append(level)
         state.levels.sort(key=lambda l: l.price)
@@ -1359,7 +1466,7 @@ class GridTradingStrategy:
             return {"error": f"No grid for {symbol}"}
 
         state = self.grids[symbol]
-        config = state.config
+        grid_config = state.config
 
         filled_levels = [l for l in state.levels if l.is_filled]
         unfilled_buys = [l for l in state.levels if not l.is_filled and l.side == GridOrderSide.BUY]
@@ -1370,12 +1477,16 @@ class GridTradingStrategy:
         if state.total_profit == 0 and state.total_sells > 0:
             # Use grid spacing for more reliable profit estimation
             # Each sell should profit by approximately: grid_spacing * quantity - fees
-            grid_spacing = config.grid_spacing
-            fee_pct = 0.005  # ~0.5% round trip fees
+            grid_spacing = grid_config.grid_spacing
+            # Use config fee rates for round-trip estimate (buy + sell)
+            # Default to maker+maker assumption for limit orders
+            import config_ultra
+            maker_fee = getattr(config_ultra, 'MAKER_FEE_PCT', 0.0015)
+            fee_pct = maker_fee * 2  # Round-trip (buy maker + sell maker)
 
             # Estimate average quantity per trade
-            avg_price = state.avg_sell_price if state.avg_sell_price > 0 else config.upper_price
-            avg_qty_per_trade = config.investment_per_grid / avg_price
+            avg_price = state.avg_sell_price if state.avg_sell_price > 0 else grid_config.upper_price
+            avg_qty_per_trade = grid_config.investment_per_grid / avg_price
 
             # Gross profit from grid spacing
             gross_profit_per_sell = grid_spacing * avg_qty_per_trade
@@ -1392,10 +1503,10 @@ class GridTradingStrategy:
             "symbol": symbol,
             "is_active": state.is_active,
             "range": {
-                "lower": config.lower_price,
-                "upper": config.upper_price,
-                "spacing": config.grid_spacing,
-                "spacing_pct": config.profit_per_grid_pct
+                "lower": grid_config.lower_price,
+                "upper": grid_config.upper_price,
+                "spacing": grid_config.grid_spacing,
+                "spacing_pct": grid_config.profit_per_grid_pct
             },
             "levels": {
                 "total": len(state.levels),
@@ -1411,7 +1522,10 @@ class GridTradingStrategy:
                 "total_buys": state.total_buys,
                 "total_sells": state.total_sells,
                 "avg_buy_price": state.avg_buy_price,
-                "avg_sell_price": state.avg_sell_price
+                "avg_sell_price": state.avg_sell_price,
+                # Fee model diagnostics
+                "fee_origin_paired": state.fee_origin_paired_count,
+                "fee_origin_estimated": state.fee_origin_estimated_count
             },
             "timestamps": {
                 "created_at": state.created_at.isoformat() if state.created_at else None,

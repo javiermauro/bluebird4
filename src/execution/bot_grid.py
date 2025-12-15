@@ -28,6 +28,7 @@ import numpy as np
 
 import pandas as pd
 
+import config_ultra as config
 from config_ultra import UltraConfig
 from src.execution.alpaca_client import AlpacaClient
 from src.strategy.grid_trading import (
@@ -2549,7 +2550,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             # Calculate profit (entry to sell price, minus fees)
                             entry_price = pos_dict['avg_entry_price']
                             gross_profit = (fill_price - entry_price) * fill_qty
-                            fee = fill_price * fill_qty * 0.0025  # 0.25% taker fee
+                            # Windfall sells are market orders (taker fee)
+                            taker_fee = getattr(config, 'TAKER_FEE_PCT', 0.0025)
+                            fee = fill_price * fill_qty * taker_fee
                             net_profit = gross_profit - fee
 
                             # Log the windfall transaction

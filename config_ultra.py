@@ -25,6 +25,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# =========================================
+# MODULE-LEVEL FEE CONSTANTS
+# =========================================
+# These are also defined in UltraConfig class, but exposed here for direct access
+# via `import config_ultra; config_ultra.MAKER_FEE_PCT`
+MAKER_FEE_PCT = 0.0015   # 0.15% - limit orders (add liquidity)
+TAKER_FEE_PCT = 0.0025   # 0.25% - market orders (take liquidity)
+
 
 class UltraConfig:
     """
@@ -309,6 +317,14 @@ class UltraConfig:
     FAST_FILL_MIN_ORDER_AGE_SECONDS = 10.0  # Grace period for new orders (eventual consistency)
     FAST_FILL_HANDLE_PARTIALS = True        # Apply partial fills on canceled orders
     FAST_FILL_ERROR_BACKOFF_SECONDS = 30.0  # Skip checks for this long after an error
+
+    # =========================================
+    # FEE MODEL
+    # =========================================
+    # Accurate fee tracking for profit calculation
+    # Alpaca crypto fees: maker ~0.15%, taker ~0.25%
+    MAKER_FEE_PCT = 0.0015   # 0.15% - limit orders (add liquidity)
+    TAKER_FEE_PCT = 0.0025   # 0.25% - market orders (take liquidity)
 
     # On startup, if Alpaca has OPEN orders for our symbols that we are not tracking locally,
     # cancel them to avoid "surprise fills" after a crash/restart.
