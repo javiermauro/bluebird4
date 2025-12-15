@@ -485,7 +485,7 @@ class GridTradingBot:
         Returns:
             Dict with fills_detected, cancels_detected, orders_checked, etc.
         """
-        from src.execution.alpaca_client import run_blocking
+        # run_blocking is defined in this module (line ~2305), no import needed
 
         result = {
             'fills_detected': 0,
