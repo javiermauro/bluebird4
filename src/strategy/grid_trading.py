@@ -600,7 +600,8 @@ class GridTradingStrategy:
         intended_level_price: float,
         intended_level_id: Optional[str] = None,
         source: str = "grid",
-        client_order_id: Optional[str] = None
+        client_order_id: Optional[str] = None,
+        fee_type: str = "taker"  # "maker" for limit orders, "taker" for market orders
     ) -> bool:
         """
         Register order->level mapping immediately after submission.
@@ -615,12 +616,14 @@ class GridTradingStrategy:
             intended_level_id: Optional stable level ID for best matching
             source: "grid" | "windfall" | "stop_loss"
             client_order_id: Optional Alpaca client order ID
+            fee_type: "maker" for limit orders, "taker" for market orders
 
         Returns:
             True if registered successfully
         """
         symbol = normalize_symbol(symbol)
         side = normalize_side(side)
+        fee_type = normalize_fee_type(fee_type)
 
         if order_id in self.pending_orders:
             logger.warning(f"[GRID] Order {order_id[:8]} already registered as pending")
@@ -634,10 +637,11 @@ class GridTradingStrategy:
             intended_level_id=intended_level_id,
             created_at=datetime.now().isoformat(),
             source=source,
-            client_order_id=client_order_id
+            client_order_id=client_order_id,
+            fee_type=fee_type
         )
         self.pending_orders[order_id] = pending
-        logger.info(f"[GRID] Registered pending {side} order {order_id[:8]} for {symbol} @ ${intended_level_price:.2f}")
+        logger.info(f"[GRID] Registered pending {side} order {order_id[:8]} for {symbol} @ ${intended_level_price:.2f} [fee_type={fee_type}]")
         self.save_state()  # Persist immediately for crash recovery
         return True
 

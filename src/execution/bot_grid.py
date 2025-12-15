@@ -2705,7 +2705,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         bot.grid_strategy.register_pending_order(
                                             order_id=order_id, symbol=symbol, side="buy",
                                             intended_level_price=grid_price,
-                                            intended_level_id=level_id, source="grid"
+                                            intended_level_id=level_id, source="grid",
+                                            fee_type="maker"  # Limit orders are maker
                                         )
 
                                         logger.info(f"[BUY] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
@@ -2756,7 +2757,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         bot.grid_strategy.register_pending_order(
                                             order_id=order_id, symbol=symbol, side="sell",
                                             intended_level_price=grid_price,
-                                            intended_level_id=level_id, source="grid"
+                                            intended_level_id=level_id, source="grid",
+                                            fee_type="maker"  # Limit orders are maker
                                         )
 
                                         logger.info(f"[SELL] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
@@ -2931,7 +2933,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                             side="buy",
                                             intended_level_price=grid_price,
                                             intended_level_id=level_id,
-                                            source="grid"
+                                            source="grid",
+                                            fee_type="maker"  # Limit orders are maker
                                         )
 
                                         logger.info(f"[BUY] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
@@ -2965,7 +2968,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     side="buy",
                                     intended_level_price=level_price,
                                     intended_level_id=level_id,
-                                    source="grid"
+                                    source="grid",
+                                    fee_type="maker"  # Limit orders are maker
                                 )
 
                                 # Verify order fill (async version avoids blocking thread pool)
@@ -3074,7 +3078,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         side="sell",
                                         intended_level_price=grid_price,
                                         intended_level_id=level_id,
-                                        source="grid"
+                                        source="grid",
+                                        fee_type="maker"  # Limit orders are maker
                                     )
 
                                     logger.info(f"[SELL] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
@@ -3108,7 +3113,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 side="sell",
                                 intended_level_price=level_price,
                                 intended_level_id=level_id,
-                                source="grid"
+                                source="grid",
+                                fee_type="maker"  # Limit orders are maker
                             )
 
                             # Verify order fill (async version avoids blocking thread pool)
