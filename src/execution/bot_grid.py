@@ -2737,6 +2737,26 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     limit_price = round_limit_price(symbol, grid_price, bot.config)
                                     rounded_qty = round_qty(symbol, qty, bot.config)
 
+                                    # === INVENTORY GATING FOR SELL ORDERS ===
+                                    # Calculate reserved base tied up in existing open limit sell orders
+                                    reserved_sells = sum(
+                                        order.qty for order in bot.grid_strategy.open_limit_orders.values()
+                                        if order.symbol == symbol and order.side == "sell"
+                                    )
+                                    # Apply 1% safety buffer to prevent edge cases
+                                    safety_buffer = 0.01 * position_qty if position_qty > 0 else 0
+                                    effective_available = position_qty - reserved_sells - safety_buffer
+
+                                    # Cap order size to effective available inventory
+                                    if rounded_qty > effective_available:
+                                        capped_qty = round_qty(symbol, effective_available, bot.config)
+                                        if capped_qty > 0 and capped_qty < rounded_qty:
+                                            logger.info(f"[GRID] Capping resting SELL {symbol}: desired={rounded_qty:.6f} capped={capped_qty:.6f} available={effective_available:.6f}")
+                                            rounded_qty = capped_qty
+                                        elif effective_available <= 0:
+                                            logger.info(f"[GRID] Skipping resting SELL {symbol}: effective_available={effective_available:.6f} (pos={position_qty:.6f} reserved={reserved_sells:.6f})")
+                                            rounded_qty = 0  # Skip this order
+
                                     if rounded_qty > 0:
                                         order = LimitOrderRequest(
                                             symbol=symbol,
