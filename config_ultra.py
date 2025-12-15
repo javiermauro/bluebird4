@@ -298,6 +298,18 @@ class UltraConfig:
     OVERSHOOT_BARS_THRESHOLD = 5       # Trigger after N consecutive bars with no eligible levels
     OVERSHOOT_REBALANCE_COOLDOWN = 30  # Minutes between rebalances per symbol (prevents churn)
 
+    # =========================================
+    # FAST FILL DETECTION (Near Real-Time)
+    # =========================================
+    # Lightweight per-tick check for limit order fills
+    # Detects fills in ~10-15s vs 5-minute full reconciliation
+    ENABLE_FAST_FILL_CHECK = True
+    FAST_FILL_INTERVAL_SECONDS = 10.0       # Min seconds between checks
+    FAST_FILL_MAX_CHECKS_PER_CYCLE = 5      # Max individual order lookups per cycle
+    FAST_FILL_MIN_ORDER_AGE_SECONDS = 10.0  # Grace period for new orders (eventual consistency)
+    FAST_FILL_HANDLE_PARTIALS = True        # Apply partial fills on canceled orders
+    FAST_FILL_ERROR_BACKOFF_SECONDS = 30.0  # Skip checks for this long after an error
+
     # On startup, if Alpaca has OPEN orders for our symbols that we are not tracking locally,
     # cancel them to avoid "surprise fills" after a crash/restart.
     # Safer default for an automated grid bot.

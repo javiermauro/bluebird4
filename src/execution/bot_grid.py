@@ -228,6 +228,24 @@ class GridTradingBot:
             'checked_at': None
         }
 
+        # === FAST FILL DETECTION STATE ===
+        # Lightweight per-tick check for limit order fills (~10-15s detection)
+        self._last_fast_fill_check: Optional[datetime] = None
+        self._fast_fill_backoff_until: Optional[datetime] = None
+        self.fast_fill_stats: Dict[str, Any] = {
+            'last_check_at': None,
+            'open_tracked_count': 0,
+            'disappeared_count': 0,
+            'orders_checked_count': 0,
+            'filled_applied_count': 0,
+            'partial_applied_count': 0,
+            'terminal_removed_count': 0,
+            'unknown_status_count': 0,
+            'errors_count': 0,
+            'last_error_at': None,
+            'last_result': ''
+        }
+
         logger.info(f"  Time filter: {'ENABLED' if self.use_time_filter else 'DISABLED'}")
         logger.info(f"  Optimal hours (UTC): {self.optimal_hours}")
 
@@ -436,6 +454,288 @@ class GridTradingBot:
             logger.info(f"[STALE] Cancelled {cancelled} stale limit orders (>{self.max_order_age_minutes} min old)")
 
         return cancelled
+
+    async def check_limit_order_fills_fast(
+        self,
+        client: 'AlpacaClient',
+        max_checks_per_cycle: int = 5,
+        min_interval_seconds: float = 10.0,
+        min_order_age_seconds: float = 10.0
+    ) -> Dict[str, Any]:
+        """
+        Lightweight per-tick check for limit order fills.
+
+        Compares tracked order IDs against Alpaca's open orders to detect
+        fills/cancellations quickly without the overhead of full reconciliation.
+
+        Critical implementation notes (from review):
+        1. Call ONLY apply_filled_order(), NOT record_fill() (avoid double application)
+        2. Grace period uses tracked created_at, not wall-clock
+        3. Terminal + partial: apply partial, ALWAYS remove open tracking
+        4. Normalize symbol/side BEFORE matching
+        5. Terminal status set: filled, canceled, cancelled, expired, rejected, suspended
+
+        Args:
+            client: AlpacaClient instance for API calls
+            max_checks_per_cycle: Maximum individual orders to verify per call (rate limiting)
+            min_interval_seconds: Minimum time between checks (prevents over-polling)
+            min_order_age_seconds: Grace period for new orders (eventual consistency)
+
+        Returns:
+            Dict with fills_detected, cancels_detected, orders_checked, etc.
+        """
+        from src.execution.alpaca_client import run_blocking
+
+        result = {
+            'fills_detected': 0,
+            'partials_detected': 0,
+            'cancels_detected': 0,
+            'orders_checked': 0,
+            'api_calls': 0,
+            'skipped': False,
+            'skipped_reason': None,
+            'errors': []
+        }
+
+        # Terminal status set (normalized lowercase)
+        TERMINAL_STATUSES = {'filled', 'canceled', 'cancelled', 'expired', 'rejected', 'suspended'}
+
+        # Early exit if feature disabled
+        if not self.use_limit_orders:
+            result['skipped'] = True
+            result['skipped_reason'] = 'limit_orders_disabled'
+            return result
+
+        if not getattr(self.config, 'ENABLE_FAST_FILL_CHECK', True):
+            result['skipped'] = True
+            result['skipped_reason'] = 'feature_disabled'
+            return result
+
+        now = datetime.now()
+
+        # Check error backoff
+        if self._fast_fill_backoff_until and now < self._fast_fill_backoff_until:
+            result['skipped'] = True
+            result['skipped_reason'] = 'error_backoff'
+            return result
+
+        # Rate limiting - check interval
+        if self._last_fast_fill_check:
+            elapsed = (now - self._last_fast_fill_check).total_seconds()
+            if elapsed < min_interval_seconds:
+                result['skipped'] = True
+                result['skipped_reason'] = 'rate_limited'
+                return result
+
+        self._last_fast_fill_check = now
+
+        # Early exit if no open limit orders tracked
+        if not self.grid_strategy.open_limit_orders:
+            self.fast_fill_stats['last_check_at'] = now.isoformat()
+            self.fast_fill_stats['open_tracked_count'] = 0
+            self.fast_fill_stats['last_result'] = 'no_tracked_orders'
+            return result
+
+        try:
+            # Step 1: Get current open orders from Alpaca (single API call)
+            alpaca_open = await run_blocking(client.get_open_orders, self.symbols)
+            result['api_calls'] += 1
+
+            alpaca_open_ids = {o['id'] for o in alpaca_open}
+
+            # Step 2: Find "disappeared" orders (tracked but not in Alpaca open list)
+            tracked_orders = list(self.grid_strategy.open_limit_orders.values())
+            tracked_ids = {order.order_id for order in tracked_orders}
+            disappeared_ids = tracked_ids - alpaca_open_ids
+
+            self.fast_fill_stats['open_tracked_count'] = len(tracked_ids)
+            self.fast_fill_stats['disappeared_count'] = len(disappeared_ids)
+
+            if not disappeared_ids:
+                # All tracked orders still open - nothing to do
+                self.fast_fill_stats['last_check_at'] = now.isoformat()
+                self.fast_fill_stats['last_result'] = f'all_open tracked={len(tracked_ids)}'
+                return result
+
+            logger.info(f"[FAST-FILL] {len(disappeared_ids)} orders disappeared from Alpaca open list")
+
+            # Step 3: Filter by grace period (using tracked created_at)
+            # Build map of order_id -> OpenLimitOrder for quick lookup
+            order_map = {o.order_id: o for o in tracked_orders}
+
+            eligible_disappeared = []
+            for order_id in disappeared_ids:
+                tracked_order = order_map.get(order_id)
+                if not tracked_order:
+                    continue
+
+                # Parse created_at safely
+                try:
+                    created_at = datetime.fromisoformat(tracked_order.created_at.replace('Z', '+00:00'))
+                    # Remove timezone for comparison if needed
+                    if created_at.tzinfo:
+                        created_at = created_at.replace(tzinfo=None)
+                    age_seconds = (now - created_at).total_seconds()
+
+                    if age_seconds < min_order_age_seconds:
+                        # Too young - grace period, skip
+                        logger.debug(f"[FAST-FILL] Skipping {order_id[:8]}: age={age_seconds:.1f}s < grace={min_order_age_seconds}s")
+                        continue
+                except Exception as e:
+                    # If parse fails, default to SKIP (avoid false deletes)
+                    logger.warning(f"[FAST-FILL] Could not parse created_at for {order_id[:8]}: {e}, skipping")
+                    continue
+
+                eligible_disappeared.append((order_id, tracked_order, age_seconds))
+
+            if not eligible_disappeared:
+                self.fast_fill_stats['last_check_at'] = now.isoformat()
+                self.fast_fill_stats['last_result'] = f'all_young disappeared={len(disappeared_ids)}'
+                return result
+
+            # Step 4: Sort by age (oldest first) for better latency
+            eligible_disappeared.sort(key=lambda x: x[2], reverse=True)
+
+            # Step 5: Check each disappeared order (rate-limited)
+            orders_to_check = eligible_disappeared[:max_checks_per_cycle]
+
+            for order_id, tracked_order, age_seconds in orders_to_check:
+                result['orders_checked'] += 1
+                self.fast_fill_stats['orders_checked_count'] += 1
+
+                try:
+                    # Fetch full order details from Alpaca
+                    order = await run_blocking(client.get_order_by_id, order_id)
+                    result['api_calls'] += 1
+
+                    if order is None:
+                        logger.warning(f"[FAST-FILL] Order {order_id[:8]} not found on Alpaca")
+                        # Terminal (order doesn't exist) - remove tracking
+                        self.grid_strategy.remove_open_limit_order(order_id)
+                        self.grid_strategy.remove_pending_order(order_id)
+                        self.fast_fill_stats['terminal_removed_count'] += 1
+                        continue
+
+                    # Normalize status (handle OrderStatus.FILLED, "filled", etc.)
+                    raw_status = str(getattr(order, 'status', '') or '')
+                    status = raw_status.lower().replace('orderstatus.', '').replace('querystatus.', '').strip()
+
+                    # Normalize filled_qty and filled_avg_price (handle None, string, float)
+                    filled_qty_raw = getattr(order, 'filled_qty', None)
+                    filled_price_raw = getattr(order, 'filled_avg_price', None)
+
+                    try:
+                        filled_qty = float(filled_qty_raw) if filled_qty_raw is not None else 0.0
+                    except (ValueError, TypeError):
+                        filled_qty = 0.0
+
+                    try:
+                        filled_price = float(filled_price_raw) if filled_price_raw is not None else 0.0
+                    except (ValueError, TypeError):
+                        filled_price = 0.0
+
+                    # Normalize symbol (BTCUSD -> BTC/USD)
+                    raw_symbol = str(getattr(order, 'symbol', '') or '')
+                    symbol = normalize_symbol(raw_symbol)
+
+                    # Normalize side to canonical "buy" | "sell"
+                    raw_side = str(getattr(order, 'side', '') or '')
+                    side = normalize_side(raw_side)
+
+                    # Branch on status
+                    if status == 'filled':
+                        # Full fill - apply and remove tracking
+                        if filled_qty > 0 and filled_price > 0:
+                            source = tracked_order.source if tracked_order else "grid"
+
+                            # Apply fill (idempotent via applied_order_ids)
+                            # NOTE: Call ONLY apply_filled_order, NOT record_fill
+                            profit = self.grid_strategy.apply_filled_order(
+                                symbol=symbol,
+                                side=side,
+                                fill_price=filled_price,
+                                fill_qty=filled_qty,
+                                order_id=order_id,
+                                source=source
+                            )
+
+                            # Always remove tracking (it's terminal)
+                            self.grid_strategy.remove_open_limit_order(order_id)
+                            # Remove pending only if applied or recorded unmatched
+                            # apply_filled_order handles pending removal internally
+                            # but we ensure it here too
+                            self.grid_strategy.remove_pending_order(order_id)
+
+                            result['fills_detected'] += 1
+                            self.fast_fill_stats['filled_applied_count'] += 1
+                            logger.info(f"[FAST-FILL] Detected fill: {side} {symbol} @ ${filled_price:,.2f} qty={filled_qty:.6f}")
+
+                    elif status in TERMINAL_STATUSES:
+                        # Terminal but not 'filled' - check for partial fill
+                        if filled_qty > 0 and filled_price > 0:
+                            # Partial fill on cancel - apply the filled portion
+                            source = tracked_order.source if tracked_order else "grid"
+
+                            # Apply partial (use filled_qty, not original qty!)
+                            profit = self.grid_strategy.apply_filled_order(
+                                symbol=symbol,
+                                side=side,
+                                fill_price=filled_price,
+                                fill_qty=filled_qty,  # Use actual filled qty
+                                order_id=order_id,
+                                source=source
+                            )
+
+                            result['partials_detected'] += 1
+                            self.fast_fill_stats['partial_applied_count'] += 1
+                            logger.info(f"[FAST-FILL] Partial fill on {status}: {side} {symbol} @ ${filled_price:,.2f} qty={filled_qty:.6f}")
+
+                        # ALWAYS remove open tracking (it's terminal)
+                        self.grid_strategy.remove_open_limit_order(order_id)
+                        # Remove pending if applied OR recorded unmatched (don't spin forever)
+                        # If it was unmatched, grid_strategy._record_unmatched was called
+                        self.grid_strategy.remove_pending_order(order_id)
+
+                        result['cancels_detected'] += 1
+                        self.fast_fill_stats['terminal_removed_count'] += 1
+                        logger.info(f"[FAST-FILL] Order {order_id[:8]} {status}, removed from tracking")
+
+                    else:
+                        # Non-terminal status (new, accepted, pending_new, etc.)
+                        # Do NOT remove tracking - increment unknown and try again later
+                        self.fast_fill_stats['unknown_status_count'] += 1
+                        logger.warning(f"[FAST-FILL] Order {order_id[:8]} has non-terminal status: {status}, keeping tracked")
+
+                except Exception as e:
+                    error_msg = f"Error checking order {order_id[:8]}: {str(e)}"
+                    result['errors'].append(error_msg)
+                    self.fast_fill_stats['errors_count'] += 1
+                    logger.error(f"[FAST-FILL] {error_msg}")
+
+            # Save state if any changes
+            if result['fills_detected'] > 0 or result['partials_detected'] > 0 or result['cancels_detected'] > 0:
+                self.grid_strategy.save_state()
+
+            # Update stats
+            self.fast_fill_stats['last_check_at'] = now.isoformat()
+            self.fast_fill_stats['last_result'] = (
+                f"filled={result['fills_detected']} partial={result['partials_detected']} "
+                f"removed={result['cancels_detected']} checked={result['orders_checked']}"
+            )
+
+        except Exception as e:
+            error_msg = f"Fast fill check failed: {str(e)}"
+            result['errors'].append(error_msg)
+            self.fast_fill_stats['errors_count'] += 1
+            self.fast_fill_stats['last_error_at'] = now.isoformat()
+            logger.error(f"[FAST-FILL] {error_msg}")
+
+            # Set error backoff
+            backoff_seconds = getattr(self.config, 'FAST_FILL_ERROR_BACKOFF_SECONDS', 30.0)
+            self._fast_fill_backoff_until = now + timedelta(seconds=backoff_seconds)
+            logger.warning(f"[FAST-FILL] Backing off for {backoff_seconds}s after error")
+
+        return result
 
     def sync_open_orders_from_alpaca(self) -> None:
         """
@@ -2132,6 +2432,21 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             # Periodic reconciliation check (every 5 minutes)
             # Run in thread to avoid blocking event loop during Alpaca API calls
             await run_blocking(bot.check_periodic_reconciliation)
+
+            # === FAST FILL DETECTION (Near Real-Time) ===
+            # Check for limit order fills every ~10s (rate-limited internally)
+            # Run EARLY in tick so grid state is current before evaluating new orders
+            if bot.use_limit_orders and getattr(config, 'ENABLE_FAST_FILL_CHECK', True):
+                fill_result = await bot.check_limit_order_fills_fast(
+                    client=client,
+                    max_checks_per_cycle=getattr(config, 'FAST_FILL_MAX_CHECKS_PER_CYCLE', 5),
+                    min_interval_seconds=getattr(config, 'FAST_FILL_INTERVAL_SECONDS', 10.0),
+                    min_order_age_seconds=getattr(config, 'FAST_FILL_MIN_ORDER_AGE_SECONDS', 10.0)
+                )
+                if fill_result.get('fills_detected', 0) > 0 or fill_result.get('partials_detected', 0) > 0:
+                    fills = fill_result.get('fills_detected', 0)
+                    partials = fill_result.get('partials_detected', 0)
+                    await broadcast_log(f"[FAST-FILL] Detected {fills} fill(s), {partials} partial(s)")
 
             # Add bar to bot
             bot.add_bar(symbol, bar)
