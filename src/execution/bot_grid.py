@@ -21,6 +21,7 @@ HOW IT WORKS:
 import asyncio
 import logging
 import os
+import random
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 import numpy as np
@@ -218,15 +219,22 @@ class GridTradingBot:
             'total': 0,
             'discrepancies': []
         }
+        # Last order tracking health check result (for dashboard display)
+        self._last_health_check: Dict[str, Any] = {
+            'healthy': True,
+            'alpaca_count': 0,
+            'tracked_count': 0,
+            'mismatch': 0,
+            'checked_at': None
+        }
 
         logger.info(f"  Time filter: {'ENABLED' if self.use_time_filter else 'DISABLED'}")
         logger.info(f"  Optimal hours (UTC): {self.optimal_hours}")
 
-        # Load confirmed orders from Alpaca on startup
-        self._load_confirmed_orders_from_alpaca()
-
-        # Run initial reconciliation with database
-        self._run_reconciliation()
+        # NOTE: Alpaca API calls moved to run_grid_bot() async init
+        # to avoid blocking the event loop during constructor.
+        # - _load_confirmed_orders_from_alpaca()
+        # - _run_reconciliation()
 
     def _load_confirmed_orders_from_alpaca(self) -> None:
         """Load recent filled orders from Alpaca on startup."""
@@ -1408,6 +1416,128 @@ class GridTradingBot:
                 'error': str(e)
             }
 
+    async def reconcile_open_orders_on_startup(self, client: 'AlpacaClient') -> Dict[str, Any]:
+        """
+        Reconcile locally-tracked open limit orders with Alpaca on startup.
+
+        Handles:
+        1. Orders filled while bot was down -> apply_filled_order()
+        2. Orders cancelled/expired -> remove from tracking
+        3. Orders still open -> keep tracking
+        4. Untracked orders on Alpaca -> optionally cancel (safety)
+
+        Args:
+            client: AlpacaClient instance
+
+        Returns:
+            Reconciliation summary
+        """
+        results = {
+            'filled': [],
+            'cancelled': [],
+            'still_open': [],
+            'untracked_cancelled': [],
+            'errors': []
+        }
+
+        try:
+            # Get all open orders from Alpaca
+            alpaca_open_orders = client.get_open_orders(symbols=self.symbols)
+            alpaca_open_ids = {o.get('id') for o in alpaca_open_orders if o.get('id')}
+
+            # Get all filled orders from last 7 days (in case bot was down longer)
+            # NOTE: No symbols filter - Alpaca API has format sensitivity issues
+            # The filled_by_id lookup handles filtering by our tracked orders
+            filled_orders = client.get_order_history(
+                days=7,
+                status='closed'
+            )
+            filled_by_id = {
+                o.get('id'): o
+                for o in filled_orders
+                if o.get('id') and 'filled' in str(o.get('status', '')).lower()
+            }
+
+            # Check each locally-tracked open limit order
+            for key, tracked in list(self.grid_strategy.open_limit_orders.items()):
+                order_id = tracked.order_id
+
+                if order_id in filled_by_id:
+                    # Order filled while bot was down
+                    filled_order = filled_by_id[order_id]
+                    logger.info(f"[STARTUP] Order {order_id[:8]} filled while offline, applying...")
+
+                    filled_qty = float(filled_order.get('filled_qty') or 0)
+                    filled_price = float(filled_order.get('filled_avg_price') or 0)
+
+                    if filled_qty > 0 and filled_price > 0:
+                        self.grid_strategy.apply_filled_order(
+                            symbol=tracked.symbol,
+                            side=tracked.side,
+                            fill_price=filled_price,
+                            fill_qty=filled_qty,
+                            order_id=order_id,
+                            source=tracked.source
+                        )
+                        results['filled'].append(order_id)
+                    else:
+                        logger.warning(f"[STARTUP] Order {order_id[:8]} has invalid fill data")
+
+                elif order_id in alpaca_open_ids:
+                    # Order still open on Alpaca, keep tracking
+                    results['still_open'].append(order_id)
+                    logger.debug(f"[STARTUP] Order {order_id[:8]} still open on Alpaca")
+
+                else:
+                    # Order not found - probably cancelled or expired
+                    logger.warning(f"[STARTUP] Order {order_id[:8]} not found on Alpaca, removing tracking")
+                    self.grid_strategy.remove_open_limit_order(order_id)
+                    results['cancelled'].append(order_id)
+
+            # Handle untracked open orders (safety - cancel orphan limit orders)
+            # Only cancel LIMIT orders for our grid symbols that we don't track
+            cancel_untracked = getattr(self.config, 'CANCEL_UNTRACKED_OPEN_ORDERS_ON_STARTUP', True)
+            if cancel_untracked:
+                tracked_ids = {o.order_id for o in self.grid_strategy.open_limit_orders.values()}
+                # Normalize our symbols for comparison
+                our_symbols_normalized = {s.replace('/', '') for s in self.symbols}
+
+                for alpaca_order in alpaca_open_orders:
+                    order_id = alpaca_order.get('id')
+                    # Normalize symbol for comparison
+                    raw_symbol = alpaca_order.get('symbol', '')
+                    symbol_normalized = raw_symbol.replace('/', '')
+                    order_type = alpaca_order.get('type', '').lower()
+
+                    # Only cancel LIMIT orders for our symbols that we don't track
+                    is_our_symbol = symbol_normalized in our_symbols_normalized
+                    is_limit_order = 'limit' in order_type
+                    is_untracked = order_id not in tracked_ids
+
+                    if is_our_symbol and is_limit_order and is_untracked:
+                        logger.warning(f"[STARTUP] Orphan limit order {order_id[:8]} for {raw_symbol} not tracked, cancelling")
+                        try:
+                            client.cancel_order(order_id)
+                            results['untracked_cancelled'].append(order_id)
+                        except Exception as e:
+                            logger.error(f"Failed to cancel orphan order {order_id[:8]}: {e}")
+                            results['errors'].append(f"cancel_{order_id[:8]}: {str(e)}")
+
+            # Save state after reconciliation
+            self.grid_strategy.save_state()
+
+            logger.info(f"[STARTUP] Reconciliation complete: "
+                       f"{len(results['filled'])} filled, "
+                       f"{len(results['still_open'])} open, "
+                       f"{len(results['cancelled'])} removed, "
+                       f"{len(results['untracked_cancelled'])} untracked cancelled")
+
+        except Exception as e:
+            logger.error(f"[STARTUP] Reconciliation error: {e}")
+            results['errors'].append(str(e))
+
+        return results
+
     def get_reconciliation_status(self) -> Dict[str, Any]:
         """Get current reconciliation status for dashboard."""
         status = self.reconciliation_status.copy()
@@ -1418,64 +1548,176 @@ class GridTradingBot:
             status['minutes_ago'] = int(seconds_ago / 60)
         return status
 
+    def get_order_health_summary(self) -> Dict[str, Any]:
+        """
+        Get order tracking health summary for dashboard display.
+
+        Returns cached health check result with current tracked order count.
+        Before first health check runs, assumes Alpaca matches tracked (optimistic).
+        """
+        # Get current tracked count (always fresh)
+        current_tracked = len(self.grid_strategy.open_limit_orders)
+
+        # If no health check has run yet, assume Alpaca matches tracked (optimistic)
+        has_run_check = self._last_health_check.get('checked_at') is not None
+        alpaca_count = self._last_health_check.get('alpaca_count', current_tracked) if has_run_check else current_tracked
+
+        # Build summary from last health check
+        return {
+            'tracked_open_limits': current_tracked,
+            'alpaca_open_grid_limits': alpaca_count,
+            'mismatch': self._last_health_check.get('mismatch', 0) if has_run_check else 0,
+            'healthy': self._last_health_check.get('healthy', True),
+            'last_check_at': self._last_health_check.get('checked_at'),
+            'orphan_ids': self._last_health_check.get('orphan_ids', []),
+            'stale_ids': self._last_health_check.get('stale_ids', []),
+            'error': self._last_health_check.get('error')
+        }
+
+    async def check_order_tracking_health(self, client: 'AlpacaClient') -> Dict[str, Any]:
+        """
+        Runtime health check to detect mismatch between Alpaca open orders and local tracking.
+
+        Should be called periodically (every N minutes) to catch drift.
+
+        Args:
+            client: AlpacaClient instance
+
+        Returns:
+            Health check results with mismatch detection
+        """
+        try:
+            # Fetch all open orders from Alpaca
+            alpaca_orders = client.get_open_orders()  # Fetches all, we filter locally
+
+            # Normalize our symbols for comparison
+            our_symbols_normalized = {s.replace('/', '') for s in self.symbols}
+
+            # Filter to grid limit orders for our symbols
+            alpaca_grid_orders = [
+                o for o in alpaca_orders
+                if o.get('symbol', '').replace('/', '') in our_symbols_normalized
+                and 'limit' in o.get('type', '').lower()
+            ]
+
+            tracked_count = len(self.grid_strategy.open_limit_orders)
+            alpaca_count = len(alpaca_grid_orders)
+
+            # Build result
+            result = {
+                'healthy': True,
+                'alpaca_count': alpaca_count,
+                'tracked_count': tracked_count,
+                'mismatch': abs(alpaca_count - tracked_count),
+                'checked_at': datetime.now().isoformat()
+            }
+
+            # Flag unhealthy if mismatch exceeds threshold
+            mismatch_threshold = 2
+            if abs(alpaca_count - tracked_count) > mismatch_threshold:
+                result['healthy'] = False
+                logger.error(
+                    f"[HEALTH] Order tracking mismatch! "
+                    f"Alpaca={alpaca_count}, Tracked={tracked_count}, "
+                    f"Diff={alpaca_count - tracked_count}"
+                )
+
+                # Log details for debugging
+                tracked_ids = {o.order_id for o in self.grid_strategy.open_limit_orders.values()}
+                alpaca_ids = {o.get('id') for o in alpaca_grid_orders}
+
+                orphans = alpaca_ids - tracked_ids
+                stale = tracked_ids - alpaca_ids
+
+                if orphans:
+                    logger.warning(f"[HEALTH] Orphan orders on Alpaca (not tracked): {len(orphans)}")
+                    result['orphan_ids'] = list(orphans)[:5]  # First 5 for logging
+                if stale:
+                    logger.warning(f"[HEALTH] Stale tracking (not on Alpaca): {len(stale)}")
+                    result['stale_ids'] = list(stale)[:5]
+            else:
+                logger.debug(f"[HEALTH] Order tracking OK: Alpaca={alpaca_count}, Tracked={tracked_count}")
+
+            # Store result for dashboard display
+            self._last_health_check = result
+            return result
+
+        except Exception as e:
+            logger.error(f"[HEALTH] Health check failed: {e}")
+            error_result = {
+                'healthy': False,
+                'alpaca_count': 0,
+                'tracked_count': len(self.grid_strategy.open_limit_orders),
+                'mismatch': 0,
+                'error': str(e),
+                'checked_at': datetime.now().isoformat()
+            }
+            # Store error result for dashboard display
+            self._last_health_check = error_result
+            return error_result
+
     def initialize_grids(self, prices: Dict[str, float], equity: float) -> None:
         """
         Initialize grids for all symbols based on current prices.
 
-        First tries to restore saved grid state from file (same-day only).
-        If no valid saved state, creates fresh grids.
-
-        Uses config-defined ranges - no complex ATR calculations needed.
-        Grid trading is SIMPLE: buy low, sell high within the range.
+        Restoration priority:
+        1. Try load_from_db() - Database persistence (survives date changes/restarts)
+        2. Try load_state() - Same-day /tmp JSON (backward compatibility)
+        3. Create fresh grids for any symbols in GRID_CONFIGS that weren't restored
 
         Args:
             prices: Current price for each symbol
             equity: Total account equity
         """
-        # Try to restore saved grid state first (prevents duplicate orders on restart)
-        if self.grid_strategy.load_state():
-            self.grids_initialized = True
-            logger.info("=" * 50)
-            logger.info("GRID STATE RESTORED FROM FILE")
-            logger.info("=" * 50)
+        restored_symbols = []
+        created_symbols = []
+        skipped_symbols = []  # Configured but no price data
 
-            # Restore total_trades and total_profit from grid state
-            for symbol in self.symbols:
-                summary = self.grid_strategy.get_grid_summary(symbol)
-                if summary.get('is_active'):
-                    filled = summary['levels']['filled']
-                    total = summary['levels']['total']
-                    perf = summary.get('performance', {})
-                    self.total_trades += perf.get('completed_trades', 0)
-                    self.total_profit += perf.get('total_profit', 0.0)
-                    logger.info(f"  {symbol}: {filled}/{total} levels filled, {perf.get('completed_trades', 0)} trades, ${perf.get('total_profit', 0):.2f} profit")
+        # Try to restore from database first
+        if self.grid_strategy.load_from_db():
+            restored_symbols = list(self.grid_strategy.grids.keys())
+            logger.info(f"Restored grids from DB: {restored_symbols}")
+        # Fallback: Try to restore from /tmp JSON
+        elif self.grid_strategy.load_state():
+            restored_symbols = list(self.grid_strategy.grids.keys())
+            logger.info(f"Restored grids from file: {restored_symbols}")
 
-            logger.info(f"  TOTALS: {self.total_trades} trades, ${self.total_profit:.2f} profit")
-            return
+        # Compute totals deterministically (OVERWRITE, not increment)
+        # This prevents double-counting on restart
+        self.total_trades = 0
+        self.total_profit = 0.0
+        for symbol in restored_symbols:
+            summary = self.grid_strategy.get_grid_summary(symbol)
+            if summary.get('is_active'):
+                perf = summary.get('performance', {})
+                self.total_trades += perf.get('completed_trades', 0)
+                self.total_profit += perf.get('total_profit', 0.0)
 
-        # No valid saved state - create fresh grids
-        logger.info("Creating fresh grids for all symbols...")
+        # Build target symbol universe: union of self.symbols AND GRID_CONFIGS keys
+        # This ensures we don't miss symbols if config changes
+        grid_configs = getattr(self.config, 'GRID_CONFIGS', DEFAULT_GRID_CONFIGS)
+        target_symbols = sorted(set(self.symbols) | set(grid_configs.keys()))
 
-        for symbol in self.symbols:
+        # Create fresh grids for any missing symbols
+        for symbol in target_symbols:
+            if symbol in self.grid_strategy.grids:
+                continue  # Already restored
+
             if symbol not in prices:
+                skipped_symbols.append(symbol)
+                logger.warning(f"[GRID] Cannot create grid for {symbol}: no price data available")
                 continue
 
             current_price = prices[symbol]
-
-            # Get grid config from UltraConfig (or use defaults)
-            grid_configs = getattr(self.config, 'GRID_CONFIGS', DEFAULT_GRID_CONFIGS)
             template = grid_configs.get(symbol, {
                 "num_grids": 10,
                 "range_pct": 0.05,
                 "investment_ratio": 0.25
             })
 
-            # Create grid config using config-defined range percentage
             range_pct = template["range_pct"]
             num_grids = template["num_grids"]
             investment_ratio = template["investment_ratio"]
-
-            # Calculate capital for this symbol's grid
             capital_for_grid = equity * investment_ratio
 
             config = GridConfig(
@@ -1486,27 +1728,29 @@ class GridTradingBot:
                 investment_per_grid=capital_for_grid / num_grids
             )
 
-            # Create the grid
             self.grid_strategy.create_grid(config, current_price)
+            created_symbols.append(symbol)
 
-            logger.info(f"Grid created for {symbol}:")
-            logger.info(f"  Range: ${config.lower_price:,.2f} - ${config.upper_price:,.2f}")
-            logger.info(f"  Levels: {num_grids}, Investment/level: ${config.investment_per_grid:,.2f}")
-            logger.info(f"  Profit per cycle: {config.profit_per_grid_pct:.2f}%")
+            logger.info(f"Created grid for {symbol}: ${config.lower_price:,.2f} - ${config.upper_price:,.2f}")
 
-            # Calculate and store expected profit per trade (after fees)
-            # Fees: ~0.5% round trip (0.25% taker + spread + slippage)
-            fee_pct = 0.005  # 0.5% round trip
-            expected_profit_pct = (config.profit_per_grid_pct / 100) - fee_pct
-            expected_profit = config.investment_per_grid * expected_profit_pct
-            self.expected_profit_per_trade[symbol] = expected_profit
-            logger.info(f"  Expected profit/trade (after fees): ${expected_profit:.2f} ({expected_profit_pct*100:.2f}%)")
+        # Log summary
+        logger.info("=" * 50)
+        logger.info("GRID INITIALIZATION COMPLETE")
+        if restored_symbols:
+            logger.info(f"  Restored from DB/file: {restored_symbols}")
+        if created_symbols:
+            logger.info(f"  Created (missing): {created_symbols}")
+        if skipped_symbols:
+            logger.error(f"  SKIPPED (no price data): {skipped_symbols}")
+        logger.info(f"  Totals: {self.total_trades} trades, ${self.total_profit:.2f} profit")
+        logger.info("=" * 50)
 
         self.grids_initialized = True
 
-        # Save initial grid state for persistence across restarts
-        self.grid_strategy.save_state()
-        logger.info("Initial grid state saved to file")
+        # Save state to ensure DB has all grids (including newly created)
+        if created_symbols:
+            self.grid_strategy.save_state()
+            logger.info("Saved updated grid state with new grids to DB")
 
     def evaluate(self, symbol: str, current_price: float, position_qty: float) -> Dict:
         """
@@ -1757,6 +2001,16 @@ class GridTradingBot:
         }
 
 
+async def run_blocking(func, *args, **kwargs):
+    """
+    Run a blocking function in a thread pool to avoid blocking the event loop.
+
+    This prevents Alpaca API calls from freezing the FastAPI server when
+    the Alpaca API is slow or unresponsive.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
 async def run_grid_bot(broadcast_update, broadcast_log):
     """Run the Grid Trading bot."""
     logger.info("Starting BlueBird Grid Trading Bot...")
@@ -1773,13 +2027,19 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
         await broadcast_log(f"Trading {len(symbols)} assets: {', '.join(symbols)}")
 
-        # Initialize
-        client = AlpacaClient(config)
+        # Initialize (skip_verify=True to avoid blocking event loop)
+        client = AlpacaClient(config, skip_verify=True)
         bot = GridTradingBot(config, client)
 
-        # Get account info
+        # Async initialization (moved from constructor to avoid blocking event loop)
+        await broadcast_log("Loading order history from Alpaca...")
+        await run_blocking(bot._load_confirmed_orders_from_alpaca)
+        await run_blocking(bot._run_reconciliation)
+        await broadcast_log("Order history loaded and reconciled")
+
+        # Get account info (wrapped in run_blocking to avoid freezing event loop)
         try:
-            account = client.trading_client.get_account()
+            account = await run_blocking(client.trading_client.get_account)
             equity = float(account.equity)
             buying_power = float(account.buying_power)
             await broadcast_log(f"Account Equity: ${equity:,.2f}")
@@ -1802,7 +2062,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     start=datetime.now() - timedelta(minutes=100),
                     limit=100
                 )
-                bars = client.data_client.get_crypto_bars(req)
+                # Wrap in run_blocking to avoid freezing event loop during warmup
+                bars = await run_blocking(lambda: client.data_client.get_crypto_bars(req))
                 if symbol in bars.data:
                     for bar in bars.data[symbol]:
                         bot.add_bar(symbol, bar)
@@ -1829,10 +2090,21 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
         await broadcast_log("Grid initialization complete. Starting live trading...")
 
-        # Sync open limit orders from Alpaca (crash recovery)
+        # Reconcile open limit orders with Alpaca (crash recovery)
+        # This handles:
+        # 1. Orders filled while bot was down -> applies fills
+        # 2. Orders cancelled -> removes tracking
+        # 3. Untracked orders -> optionally cancels
         if bot.use_limit_orders:
-            bot.sync_open_orders_from_alpaca()
-            await broadcast_log("Open limit order sync complete")
+            await broadcast_log("Reconciling open orders with Alpaca...")
+            recon_results = await bot.reconcile_open_orders_on_startup(client)
+            if recon_results.get('filled'):
+                await broadcast_log(f"  Applied {len(recon_results['filled'])} fills from offline period")
+            if recon_results.get('cancelled'):
+                await broadcast_log(f"  Removed {len(recon_results['cancelled'])} stale order trackings")
+            if recon_results.get('still_open'):
+                await broadcast_log(f"  {len(recon_results['still_open'])} orders still open on Alpaca")
+            await broadcast_log("Open order reconciliation complete")
 
         # Main trading loop
         from alpaca.data.live import CryptoDataStream
@@ -1858,7 +2130,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 return
 
             # Periodic reconciliation check (every 5 minutes)
-            bot.check_periodic_reconciliation()
+            # Run in thread to avoid blocking event loop during Alpaca API calls
+            await run_blocking(bot.check_periodic_reconciliation)
 
             # Add bar to bot
             bot.add_bar(symbol, bar)
@@ -1888,18 +2161,18 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             if regime_status.get('is_strong_trend'):
                 await broadcast_log(f"[REGIME] {symbol}: {regime_status['reason']}")
 
-            # Get current positions
+            # Get current positions (run in thread to avoid blocking event loop)
             try:
-                positions = client.get_positions()
+                positions = await run_blocking(client.get_positions)
                 current_positions = {p.symbol: p for p in positions}
                 num_positions = len(positions)
             except:
                 current_positions = {}
                 num_positions = 0
 
-            # Get account
+            # Get account (run in thread to avoid blocking event loop)
             try:
-                account = client.trading_client.get_account()
+                account = await run_blocking(client.trading_client.get_account)
                 equity = float(account.equity)
             except:
                 equity = 90000
@@ -1949,10 +2222,10 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             side=OrderSide.SELL,
                             time_in_force=TimeInForce.GTC
                         )
-                        result = client.trading_client.submit_order(order)
+                        result = await run_blocking(client.trading_client.submit_order, order)
 
-                        # Verify order fill
-                        verification = client.verify_order_fill(str(result.id), max_wait_seconds=5)
+                        # Verify order fill (async version avoids blocking thread pool)
+                        verification = await client.verify_order_fill_async(str(result.id), max_wait_seconds=5)
 
                         if verification['confirmed']:
                             fill_price = verification['filled_avg_price']
@@ -2009,8 +2282,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         await broadcast_log(f"[WINDFALL] Order failed: {e}")
 
             # === RISK MANAGEMENT CHECKS ===
-            # Update risk state
-            bot.update_risk_state(equity)
+            # Update risk state (wrapped to avoid blocking - contains Alpaca API call)
+            await run_blocking(bot.update_risk_state, equity)
 
             # Check circuit breakers (daily loss, max drawdown)
             circuit_status = bot.check_circuit_breakers(equity)
@@ -2035,7 +2308,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             side=OrderSide.SELL,
                             time_in_force=TimeInForce.GTC
                         )
-                        result = client.trading_client.submit_order(order)
+                        result = await run_blocking(client.trading_client.submit_order, order)
                         await broadcast_log(f"[RISK] STOP-LOSS EXECUTED: Sold {position_qty:.6f} {symbol} @ ${current_price:,.2f}")
 
                         # Record as emergency sell (source="stop_loss" prevents inflating completed_cycles)
@@ -2050,19 +2323,213 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         await broadcast_log(f"[RISK] STOP-LOSS ORDER FAILED: {e}")
                         evaluation = {'action': 'STOP_LOSS_FAILED', 'reason': str(e)}
                 else:
-                    # Normal grid evaluation
-                    evaluation = bot.evaluate(symbol, current_price, position_qty)
+                    # === RESTING LIMIT MODE (New - proactive maker orders) ===
+                    if bot.use_limit_orders:
+                        # Use new method that finds maker-safe levels AHEAD of price
+                        desired = bot.grid_strategy.get_desired_limit_orders(
+                            symbol=symbol,
+                            current_price=current_price,
+                            position_qty=position_qty,
+                            maker_buffer_bps=bot.maker_buffer_bps
+                        )
+
+                        logger.info(f"[GRID] {symbol} @ ${current_price:,.2f} (resting limit mode) - {desired['reason']}")
+
+                        # Get target allocation for this symbol from config
+                        grid_configs = getattr(bot.config, 'GRID_CONFIGS', DEFAULT_GRID_CONFIGS)
+                        target_allocation = grid_configs.get(symbol, {}).get('investment_ratio', 0.25)
+                        max_allocation = target_allocation * 1.1  # Allow 10% buffer
+                        current_position_value = position_qty * current_price
+                        current_allocation = current_position_value / equity if equity > 0 else 0
+
+                        # Apply time quality adjustment
+                        time_quality = time_status.get('time_quality', 1.0)
+
+                        # === PLACE RESTING BUY LIMIT ORDER ===
+                        if desired['desired_buy'] and not skip_trading:
+                            buy_details = desired['desired_buy']
+                            level_id = buy_details['level_id']
+                            grid_price = buy_details['price']
+                            base_qty = buy_details['quantity']
+
+                            # Apply filters (regime, momentum, allocation)
+                            if not regime_allow_buy:
+                                logger.debug(f"[REGIME] Skipping resting BUY {symbol}: {regime_status['reason']}")
+                            elif not momentum_status['allow_buy']:
+                                logger.debug(f"[MOM] Skipping resting BUY {symbol}: {momentum_status['reason']}")
+                            elif current_allocation >= max_allocation:
+                                logger.debug(f"[ALLOC] Skipping resting BUY {symbol}: {current_allocation:.1%} >= {max_allocation:.1%}")
+                            else:
+                                # Apply adjustments
+                                qty = base_qty * time_quality * corr_adjustment
+
+                                try:
+                                    limit_price = round_limit_price(symbol, grid_price, bot.config)
+                                    rounded_qty = round_qty(symbol, qty, bot.config)
+
+                                    if rounded_qty > 0:
+                                        order = LimitOrderRequest(
+                                            symbol=symbol,
+                                            qty=rounded_qty,
+                                            side=OrderSide.BUY,
+                                            time_in_force=TimeInForce.GTC,
+                                            limit_price=limit_price
+                                        )
+                                        result = await run_blocking(client.trading_client.submit_order, order)
+                                        order_id = str(result.id)
+
+                                        # Register for tracking
+                                        bot.grid_strategy.register_open_limit_order(
+                                            order_id=order_id, symbol=symbol, side="buy",
+                                            level_id=level_id, level_price=grid_price,
+                                            limit_price=limit_price, qty=rounded_qty, source="grid"
+                                        )
+                                        bot.grid_strategy.register_pending_order(
+                                            order_id=order_id, symbol=symbol, side="buy",
+                                            intended_level_price=grid_price,
+                                            intended_level_id=level_id, source="grid"
+                                        )
+
+                                        logger.info(f"[BUY] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
+                                        await broadcast_log(f"[GRID] Resting BUY {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                        await broadcast_log(f"  Level: {level_id[:8]}...")
+
+                                except Exception as e:
+                                    logger.error(f"[BUY] Resting LIMIT failed for {symbol}: {e}")
+                                    await broadcast_log(f"[ERROR] Resting BUY failed: {e}")
+
+                        # === PLACE RESTING SELL LIMIT ORDER ===
+                        if desired['desired_sell'] and not skip_trading:
+                            sell_details = desired['desired_sell']
+                            level_id = sell_details['level_id']
+                            grid_price = sell_details['price']
+                            base_qty = sell_details['quantity']
+
+                            # Apply filters (regime, momentum)
+                            if not regime_allow_sell:
+                                logger.debug(f"[REGIME] Skipping resting SELL {symbol}: {regime_status['reason']}")
+                            elif not momentum_status['allow_sell']:
+                                logger.debug(f"[MOM] Skipping resting SELL {symbol}: {momentum_status['reason']}")
+                            else:
+                                # Apply adjustments
+                                qty = base_qty * time_quality * corr_adjustment
+
+                                try:
+                                    limit_price = round_limit_price(symbol, grid_price, bot.config)
+                                    rounded_qty = round_qty(symbol, qty, bot.config)
+
+                                    if rounded_qty > 0:
+                                        order = LimitOrderRequest(
+                                            symbol=symbol,
+                                            qty=rounded_qty,
+                                            side=OrderSide.SELL,
+                                            time_in_force=TimeInForce.GTC,
+                                            limit_price=limit_price
+                                        )
+                                        result = await run_blocking(client.trading_client.submit_order, order)
+                                        order_id = str(result.id)
+
+                                        # Register for tracking
+                                        bot.grid_strategy.register_open_limit_order(
+                                            order_id=order_id, symbol=symbol, side="sell",
+                                            level_id=level_id, level_price=grid_price,
+                                            limit_price=limit_price, qty=rounded_qty, source="grid"
+                                        )
+                                        bot.grid_strategy.register_pending_order(
+                                            order_id=order_id, symbol=symbol, side="sell",
+                                            intended_level_price=grid_price,
+                                            intended_level_id=level_id, source="grid"
+                                        )
+
+                                        logger.info(f"[SELL] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
+                                        await broadcast_log(f"[GRID] Resting SELL {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                        await broadcast_log(f"  Level: {level_id[:8]}...")
+
+                                except Exception as e:
+                                    logger.error(f"[SELL] Resting LIMIT failed for {symbol}: {e}")
+                                    await broadcast_log(f"[ERROR] Resting SELL failed: {e}")
+
+                        # === OVERSHOOT HANDLING ===
+                        if desired['no_eligible_levels']:
+                            overshoot_mode = getattr(bot.config, 'LIMIT_ORDER_OVERSHOOT_MODE', 'wait')
+
+                            # Track consecutive bars with no eligible levels
+                            if not hasattr(bot, '_no_eligible_bars'):
+                                bot._no_eligible_bars = {}
+                            bot._no_eligible_bars[symbol] = bot._no_eligible_bars.get(symbol, 0) + 1
+
+                            bars_threshold = getattr(bot.config, 'OVERSHOOT_BARS_THRESHOLD', 5)
+                            cooldown_minutes = getattr(bot.config, 'OVERSHOOT_REBALANCE_COOLDOWN', 30)
+
+                            # Check if we should rebalance
+                            if overshoot_mode == 'rebalance' and bot._no_eligible_bars[symbol] >= bars_threshold:
+                                # Check cooldown
+                                if not hasattr(bot, '_last_rebalance_at'):
+                                    bot._last_rebalance_at = {}
+                                last_rebalance = bot._last_rebalance_at.get(symbol)
+                                now = datetime.now()
+
+                                can_rebalance = (
+                                    last_rebalance is None or
+                                    (now - last_rebalance).total_seconds() / 60 >= cooldown_minutes
+                                )
+
+                                if can_rebalance:
+                                    # Cancel existing open orders for this symbol before rebalancing
+                                    cancelled = 0
+                                    for key, order in list(bot.grid_strategy.open_limit_orders.items()):
+                                        if order.symbol == symbol:
+                                            try:
+                                                await run_blocking(client.trading_client.cancel_order_by_id, order.order_id)
+                                                bot.grid_strategy.remove_open_limit_order(order.order_id)
+                                                bot.grid_strategy.remove_pending_order(order.order_id)
+                                                cancelled += 1
+                                            except Exception as e:
+                                                logger.warning(f"[REBALANCE] Failed to cancel order {order.order_id[:8]}: {e}")
+
+                                    if cancelled > 0:
+                                        logger.info(f"[REBALANCE] Cancelled {cancelled} open orders for {symbol}")
+
+                                    # Trigger rebalance
+                                    logger.info(f"[OVERSHOOT] {symbol} - No eligible levels for {bot._no_eligible_bars[symbol]} bars, rebalancing grid")
+                                    await broadcast_log(f"[OVERSHOOT] {symbol} - Rebalancing grid around ${current_price:,.2f}")
+
+                                    bot.grid_strategy.rebalance_grid(symbol, current_price, preserve_positions=True)
+                                    bot._last_rebalance_at[symbol] = now
+                                    bot._no_eligible_bars[symbol] = 0
+
+                                    # Persist immediately after rebalance to avoid crash window
+                                    bot.grid_strategy.save_state()
+                                else:
+                                    remaining = cooldown_minutes - (now - last_rebalance).total_seconds() / 60
+                                    logger.debug(f"[OVERSHOOT] {symbol} - Rebalance on cooldown ({remaining:.1f}m remaining)")
+                            elif overshoot_mode == 'wait':
+                                logger.debug(f"[OVERSHOOT] {symbol} - Waiting for price to return ({bot._no_eligible_bars[symbol]} bars)")
+                        else:
+                            # Reset counter when we have eligible levels
+                            if hasattr(bot, '_no_eligible_bars') and symbol in bot._no_eligible_bars:
+                                bot._no_eligible_bars[symbol] = 0
+
+                        # Set evaluation to HOLD for resting limit mode (no action-based handling needed)
+                        evaluation = {'action': 'HOLD', 'mode': 'resting_limit'}
+
+                    else:
+                        # === MARKET ORDER MODE (Original - trigger after crossing) ===
+                        evaluation = bot.evaluate(symbol, current_price, position_qty)
 
             action = evaluation.get('action', 'HOLD')
             order_details = evaluation.get('order_details')
 
-            # DEBUG: Log the evaluation result
-            if action != 'HOLD':
+            # DEBUG: Log the evaluation result (skip for resting limit mode)
+            if action != 'HOLD' and evaluation.get('mode') != 'resting_limit':
                 logger.info(f"[DEBUG] {symbol} action={action}, order_details={order_details is not None}, skip_trading={skip_trading}")
 
             trade_executed = None
 
-            if action == 'BUY' and order_details and not skip_trading:
+            # Skip BUY/SELL action handling in resting limit mode (already handled above)
+            if evaluation.get('mode') == 'resting_limit':
+                pass  # Orders already placed above
+            elif action == 'BUY' and order_details and not skip_trading:
                 # Check regime filter first (Smart Grid - avoid buying in strong downtrend)
                 if not regime_allow_buy:
                     logger.info(f"[REGIME] Skipping BUY {symbol}: {regime_status['reason']}")
@@ -2124,7 +2591,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                             time_in_force=TimeInForce.GTC,
                                             limit_price=limit_price
                                         )
-                                        result = client.trading_client.submit_order(order)
+                                        result = await run_blocking(client.trading_client.submit_order, order)
                                         order_id = str(result.id)
 
                                         # Register open limit order (for duplicate prevention)
@@ -2169,7 +2636,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     side=OrderSide.BUY,
                                     time_in_force=TimeInForce.GTC
                                 )
-                                result = client.trading_client.submit_order(order)
+                                result = await run_blocking(client.trading_client.submit_order, order)
                                 order_id = str(result.id)
 
                                 # Register pending order BEFORE verify (for deterministic matching)
@@ -2183,8 +2650,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     source="grid"
                                 )
 
-                                # Verify order fill with Alpaca
-                                verification = client.verify_order_fill(order_id, max_wait_seconds=5)
+                                # Verify order fill (async version avoids blocking thread pool)
+                                verification = await client.verify_order_fill_async(order_id, max_wait_seconds=5)
 
                                 if verification['confirmed']:
                                     # Use actual fill price from Alpaca
@@ -2267,7 +2734,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         time_in_force=TimeInForce.GTC,
                                         limit_price=limit_price
                                     )
-                                    result = client.trading_client.submit_order(order)
+                                    result = await run_blocking(client.trading_client.submit_order, order)
                                     order_id = str(result.id)
 
                                     # Register open limit order (for duplicate prevention)
@@ -2312,7 +2779,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 side=OrderSide.SELL,
                                 time_in_force=TimeInForce.GTC
                             )
-                            result = client.trading_client.submit_order(order)
+                            result = await run_blocking(client.trading_client.submit_order, order)
                             order_id = str(result.id)
 
                             # Register pending order BEFORE verify (for deterministic matching)
@@ -2326,8 +2793,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 source="grid"
                             )
 
-                            # Verify order fill with Alpaca
-                            verification = client.verify_order_fill(order_id, max_wait_seconds=5)
+                            # Verify order fill (async version avoids blocking thread pool)
+                            verification = await client.verify_order_fill_async(order_id, max_wait_seconds=5)
 
                             if verification['confirmed']:
                                 # Use actual fill price from Alpaca
@@ -2524,7 +2991,18 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     "stats": bot.get_order_stats(),
                     "reconciliation": bot.get_reconciliation_status()
                 },
-                "windfall": bot.get_windfall_stats()
+                "windfall": bot.get_windfall_stats(),
+                "health": {
+                    "stream": {
+                        "last_bar_at": last_bar_time[0].isoformat(),
+                        "seconds_since_bar": int((datetime.now() - last_bar_time[0]).total_seconds()),
+                        "stale_threshold_seconds": STALE_THRESHOLD_SECONDS,
+                        "status": "connected" if (datetime.now() - last_bar_time[0]).total_seconds() < 90 else (
+                            "degraded" if (datetime.now() - last_bar_time[0]).total_seconds() < STALE_THRESHOLD_SECONDS else "stale"
+                        )
+                    },
+                    "orders": bot.get_order_health_summary()
+                }
             })
 
         await broadcast_log(f"Will subscribe to: {', '.join(symbols)}")
@@ -2556,37 +3034,87 @@ async def run_grid_bot(broadcast_update, broadcast_log):
         watchdog_task = asyncio.create_task(stream_watchdog())
         await broadcast_log("[WATCHDOG] Stream health monitor started (3 min threshold)")
 
-        # Run stream with reconnection
+        # Order tracking health check task - runs every 5 minutes
+        HEALTH_CHECK_INTERVAL_SECONDS = 300  # 5 minutes
+
+        async def order_health_check():
+            """Periodic health check for order tracking mismatch detection."""
+            while True:
+                await asyncio.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
+                try:
+                    health = await bot.check_order_tracking_health(client)
+                    if not health.get('healthy', True):
+                        await broadcast_log(
+                            f"[HEALTH] Order tracking issue detected! "
+                            f"Alpaca={health.get('alpaca_count', '?')}, "
+                            f"Tracked={health.get('tracked_count', '?')}"
+                        )
+                except Exception as e:
+                    logger.error(f"[HEALTH] Health check error: {e}")
+
+        # Start health check task
+        health_task = asyncio.create_task(order_health_check())
+        await broadcast_log("[HEALTH] Order tracking monitor started (5 min interval)")
+
+        # Run stream with reconnection and proper cleanup
         backoff = 1
-        max_backoff = 60
+        stream = None  # Track current stream for cleanup
 
         while True:
             try:
                 stream_should_restart[0] = False
+
+                # Clean up any existing stream BEFORE creating new one
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        await stream.close()
+                    except Exception as cleanup_err:
+                        logger.debug(f"Stream cleanup error (ignored): {cleanup_err}")
+                    stream = None
+
                 await broadcast_log("Connecting to Alpaca stream...")
 
-                # Create fresh stream on reconnect
                 stream = CryptoDataStream(
                     config.API_KEY,
                     config.SECRET_KEY
                 )
                 stream.subscribe_bars(handle_bar, *symbols)
 
+                # Note: run() is not async, must use _run_forever() for async context
                 await stream._run_forever()
-                backoff = 1
+                backoff = 1  # Reset on clean exit
 
-                # If we exit cleanly, log it (unusual)
                 await broadcast_log("[STREAM] Connection ended cleanly - reconnecting...")
 
             except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = '429' in error_str or 'connection limit' in error_str or 'rate' in error_str
+
                 if stream_should_restart[0]:
                     await broadcast_log(f"[WATCHDOG] Reconnecting after forced restart...")
-                    backoff = 1  # Reset backoff for watchdog-triggered restarts
+                    backoff = 5  # Moderate backoff for watchdog restarts
+                elif is_rate_limit:
+                    # Aggressive backoff for rate limits: 15s -> 30s -> 60s -> 120s (cap)
+                    backoff = min(backoff * 2, 120) if backoff >= 15 else 15
+                    await broadcast_log(f"[STREAM] Rate limited - backing off {backoff}s...")
                 else:
                     await broadcast_log(f"Stream disconnected: {e}")
+                    backoff = min(backoff * 2, 60)  # Normal backoff: 1 -> 2 -> 4 -> ... -> 60
 
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                # Add jitter to prevent thundering herd
+                jitter = random.uniform(0, backoff * 0.2)
+                await asyncio.sleep(backoff + jitter)
+
+            finally:
+                # ALWAYS clean up stream on any exit path
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        await stream.close()
+                    except Exception:
+                        pass
+                    stream = None
 
     except Exception as e:
         logger.error(f"Grid Bot Error: {e}")

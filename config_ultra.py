@@ -288,6 +288,16 @@ class UltraConfig:
     # Orders older than this are cancelled and level waits for natural re-trigger
     MAX_ORDER_AGE_MINUTES = 60
 
+    # Overshoot handling - what to do when price moves beyond all maker-safe grid levels
+    # "wait"     - Do nothing, wait for price to return to grid range (safest)
+    # "rebalance" - Auto-rebalance grid after N bars with no eligible levels (recommended)
+    # "fallback_market" - Use market order as last resort (negates maker fee savings)
+    LIMIT_ORDER_OVERSHOOT_MODE = "rebalance"
+
+    # Rebalance guardrails (only apply when LIMIT_ORDER_OVERSHOOT_MODE="rebalance")
+    OVERSHOOT_BARS_THRESHOLD = 5       # Trigger after N consecutive bars with no eligible levels
+    OVERSHOOT_REBALANCE_COOLDOWN = 30  # Minutes between rebalances per symbol (prevents churn)
+
     # On startup, if Alpaca has OPEN orders for our symbols that we are not tracking locally,
     # cancel them to avoid "surprise fills" after a crash/restart.
     # Safer default for an automated grid bot.

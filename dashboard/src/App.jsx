@@ -30,6 +30,14 @@ ChartJS.register(
 // ═══════════════════════════════════════════════════════════════════════════
 
 function App() {
+  // Backend connection settings
+  // NOTE: The dashboard may be opened from another machine; avoid hardcoding localhost.
+  const API_HOST = import.meta.env.VITE_API_HOST || window.location.hostname;
+  const API_PORT = import.meta.env.VITE_API_PORT || '8000';
+  const API_BASE = `${window.location.protocol}//${API_HOST}:${API_PORT}`;
+  const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const WS_URL = `${WS_PROTOCOL}://${API_HOST}:${API_PORT}/ws`;
+
   const [currentView, setCurrentView] = useState('trading');
   const [status, setStatus] = useState('disconnected');
   const [price, setPrice] = useState(0.0);
@@ -213,6 +221,25 @@ function App() {
     secondsSinceBar: 0
   });
 
+  // Comprehensive Health state (stream + order tracking from bot)
+  const [health, setHealth] = useState({
+    stream: {
+      status: 'unknown',
+      last_bar_at: null,
+      seconds_since_bar: 0,
+      stale_threshold_seconds: 180
+    },
+    orders: {
+      tracked_open_limits: 0,
+      alpaca_open_grid_limits: 0,
+      mismatch: 0,
+      healthy: true,
+      last_check_at: null,
+      orphan_ids: [],
+      stale_ids: []
+    }
+  });
+
   // Circuit Breaker state (persists across bot restarts)
   const [circuitBreaker, setCircuitBreaker] = useState({
     from_file: {},
@@ -262,100 +289,138 @@ function App() {
   };
 
   const ws = useRef(null);
+  const wsReconnectTimer = useRef(null);
+  const wsReconnectAttempts = useRef(0);
   const logsEndRef = useRef(null);
 
   useEffect(() => {
-    ws.current = new WebSocket('ws://localhost:8000/ws');
+    const connectWebSocket = () => {
+      // Ensure we don't accumulate reconnect timers
+      if (wsReconnectTimer.current) {
+        clearTimeout(wsReconnectTimer.current);
+        wsReconnectTimer.current = null;
+      }
 
-    ws.current.onopen = () => {
-      setStatus('connected');
-      addLog('INFO', 'Connected to BlueBird Private');
-    };
-
-    ws.current.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-
-      if (message.type === 'update') {
-        const updateData = message.data;
-        setData(updateData);
-        setPrice(updateData.price);
-        if (updateData.account) setAccount(updateData.account);
-        if (updateData.positions) setPositions(updateData.positions);
-        if (updateData.market) setMarket(updateData.market);
-        if (updateData.ultra) setUltra(updateData.ultra);
-        if (updateData.ai) setAi(updateData.ai);
-        if (updateData.grid) setGrid(updateData.grid);
-        if (updateData.risk) setRisk(updateData.risk);
-        if (updateData.last_trade) setLastTrade(updateData.last_trade);
-        // New profitability data
-        if (updateData.time_filter || updateData.correlations || updateData.momentum) {
-          setSmartFilters({
-            time_filter: updateData.time_filter || smartFilters.time_filter,
-            correlations: updateData.correlations || {},
-            momentum: updateData.momentum || { allow_buy: true, allow_sell: true }
-          });
+      // Close any previous socket (prevents SYN flood / hanging CONNECTING sockets)
+      try {
+        if (ws.current && ws.current.readyState !== WebSocket.CLOSED) {
+          ws.current.close();
         }
-        if (updateData.performance) setPerformance(updateData.performance);
-        if (updateData.orders) setOrders(updateData.orders);
-        if (updateData.windfall) setWindfall(updateData.windfall);
+      } catch (_) {
+        // ignore
+      }
 
-        // Track per-symbol prices from positions and grid data
-        if (updateData.positions || updateData.grid?.summaries) {
-          setSymbolPrices(prev => {
-            const newPrices = { ...prev };
-            const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+      setStatus('connecting');
+      ws.current = new WebSocket(WS_URL);
 
-            // Get prices from positions
-            updateData.positions?.forEach(pos => {
-              const sym = pos.symbol?.replace('USD', '/USD') || pos.symbol;
-              if (newPrices[sym]) {
-                const currentPrice = parseFloat(pos.current_price) || 0;
-                const entryPrice = parseFloat(pos.avg_entry_price) || 0;
-                const oldPrice = newPrices[sym].price || entryPrice;
+      ws.current.onopen = () => {
+        wsReconnectAttempts.current = 0;
+        setStatus('connected');
+        addLog('INFO', `Connected to BlueBird Private (${API_HOST}:${API_PORT})`);
+      };
+
+      ws.current.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+
+        if (message.type === 'update') {
+          const updateData = message.data;
+          setData(updateData);
+          setPrice(updateData.price);
+          if (updateData.account) setAccount(updateData.account);
+          if (updateData.positions) setPositions(updateData.positions);
+          if (updateData.market) setMarket(updateData.market);
+          if (updateData.ultra) setUltra(updateData.ultra);
+          if (updateData.ai) setAi(updateData.ai);
+          if (updateData.grid) setGrid(updateData.grid);
+          if (updateData.risk) setRisk(updateData.risk);
+          if (updateData.last_trade) setLastTrade(updateData.last_trade);
+          // New profitability data
+          if (updateData.time_filter || updateData.correlations || updateData.momentum) {
+            setSmartFilters({
+              time_filter: updateData.time_filter || smartFilters.time_filter,
+              correlations: updateData.correlations || {},
+              momentum: updateData.momentum || { allow_buy: true, allow_sell: true }
+            });
+          }
+          if (updateData.performance) setPerformance(updateData.performance);
+          if (updateData.orders) setOrders(updateData.orders);
+          if (updateData.windfall) setWindfall(updateData.windfall);
+          if (updateData.health) setHealth(updateData.health);
+
+          // Track per-symbol prices from positions and grid data
+          if (updateData.positions || updateData.grid?.summaries) {
+            setSymbolPrices(prev => {
+              const newPrices = { ...prev };
+              const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+
+              // Get prices from positions
+              updateData.positions?.forEach(pos => {
+                const sym = pos.symbol?.replace('USD', '/USD') || pos.symbol;
+                if (newPrices[sym]) {
+                  const currentPrice = parseFloat(pos.current_price) || 0;
+                  const entryPrice = parseFloat(pos.avg_entry_price) || 0;
+                  const oldPrice = newPrices[sym].price || entryPrice;
+                  const change = currentPrice - oldPrice;
+                  const changePercent = oldPrice > 0 ? (change / oldPrice) * 100 : 0;
+
+                  const history = [...(newPrices[sym].history || []), { time: timestamp, price: currentPrice }];
+                  if (history.length > 60) history.shift();
+
+                  newPrices[sym] = { price: currentPrice, change, changePercent, history };
+                }
+              });
+
+              // Also update from active symbol price
+              const activeSymbol = updateData.symbol || updateData.multi_asset?.active_symbol;
+              if (activeSymbol && newPrices[activeSymbol] && updateData.price) {
+                const currentPrice = parseFloat(updateData.price);
+                const oldPrice = newPrices[activeSymbol].price || currentPrice;
                 const change = currentPrice - oldPrice;
                 const changePercent = oldPrice > 0 ? (change / oldPrice) * 100 : 0;
 
-                const history = [...(newPrices[sym].history || []), { time: timestamp, price: currentPrice }];
+                const history = [...(newPrices[activeSymbol].history || []), { time: timestamp, price: currentPrice }];
                 if (history.length > 60) history.shift();
 
-                newPrices[sym] = { price: currentPrice, change, changePercent, history };
+                newPrices[activeSymbol] = { price: currentPrice, change, changePercent, history };
               }
+
+              return newPrices;
             });
+          }
 
-            // Also update from active symbol price
-            const activeSymbol = updateData.symbol || updateData.multi_asset?.active_symbol;
-            if (activeSymbol && newPrices[activeSymbol] && updateData.price) {
-              const currentPrice = parseFloat(updateData.price);
-              const oldPrice = newPrices[activeSymbol].price || currentPrice;
-              const change = currentPrice - oldPrice;
-              const changePercent = oldPrice > 0 ? (change / oldPrice) * 100 : 0;
-
-              const history = [...(newPrices[activeSymbol].history || []), { time: timestamp, price: currentPrice }];
-              if (history.length > 60) history.shift();
-
-              newPrices[activeSymbol] = { price: currentPrice, change, changePercent, history };
-            }
-
-            return newPrices;
-          });
+          setLastUpdate(new Date());
+          updateChart(updateData.timestamp, updateData.price, updateData.symbol, updateData.positions || []);
+        } else if (message.type === 'log') {
+          const msg = message.data.message;
+          const type = msg.includes('BUY') ? 'BUY' : msg.includes('SELL') ? 'SELL' : 'INFO';
+          addLog(type, msg);
         }
+      };
 
-        setLastUpdate(new Date());
-        updateChart(updateData.timestamp, updateData.price, updateData.symbol, updateData.positions || []);
-      } else if (message.type === 'log') {
-        const msg = message.data.message;
-        const type = msg.includes('BUY') ? 'BUY' : msg.includes('SELL') ? 'SELL' : 'INFO';
-        addLog(type, msg);
-      }
+      const scheduleReconnect = (reason) => {
+        // exponential backoff, capped
+        wsReconnectAttempts.current += 1;
+        const base = Math.min(30000, 1000 * (2 ** Math.min(wsReconnectAttempts.current, 5)));
+        const jitter = Math.floor(Math.random() * 250);
+        const delay = base + jitter;
+        setStatus('disconnected');
+        addLog('WARN', `Connection lost (${reason}). Reconnecting in ${Math.round(delay / 1000)}s...`);
+        wsReconnectTimer.current = setTimeout(connectWebSocket, delay);
+      };
+
+      ws.current.onclose = () => scheduleReconnect('closed');
+      ws.current.onerror = () => scheduleReconnect('error');
     };
 
-    ws.current.onclose = () => {
-      setStatus('disconnected');
-      addLog('WARN', 'Connection lost');
-    };
+    connectWebSocket();
 
     return () => {
-      if (ws.current) ws.current.close();
+      if (wsReconnectTimer.current) clearTimeout(wsReconnectTimer.current);
+      try {
+        if (ws.current) ws.current.close();
+      } catch (_) {
+        // ignore
+      }
     };
   }, []);
 
@@ -363,61 +428,14 @@ function App() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // Auto-refresh countdown timer
+  // Auto-refresh countdown timer (UI only)
   useEffect(() => {
     const timer = setInterval(() => {
       if (lastUpdate) {
         const elapsed = Math.floor((Date.now() - lastUpdate.getTime()) / 1000);
         setSecondsSinceUpdate(elapsed);
-
-        // Auto-reconnect if data is stale (no update in 10+ seconds)
-        if (elapsed >= 10 && ws.current?.readyState !== WebSocket.OPEN) {
-          console.log('Reconnecting WebSocket...');
-          ws.current = new WebSocket('ws://localhost:8000/ws');
-          ws.current.onopen = () => {
-            setStatus('connected');
-            addLog('INFO', 'Reconnected to BlueBird Private');
-          };
-          ws.current.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            if (message.type === 'update') {
-              const updateData = message.data;
-              setData(updateData);
-              setPrice(updateData.price);
-              if (updateData.account) setAccount(updateData.account);
-              if (updateData.positions) setPositions(updateData.positions);
-              if (updateData.market) setMarket(updateData.market);
-              if (updateData.ultra) setUltra(updateData.ultra);
-              if (updateData.ai) setAi(updateData.ai);
-              if (updateData.grid) setGrid(updateData.grid);
-              if (updateData.risk) setRisk(updateData.risk);
-              if (updateData.last_trade) setLastTrade(updateData.last_trade);
-              if (updateData.time_filter || updateData.correlations || updateData.momentum) {
-                setSmartFilters({
-                  time_filter: updateData.time_filter || smartFilters.time_filter,
-                  correlations: updateData.correlations || {},
-                  momentum: updateData.momentum || { allow_buy: true, allow_sell: true }
-                });
-              }
-              if (updateData.performance) setPerformance(updateData.performance);
-              if (updateData.orders) setOrders(updateData.orders);
-              if (updateData.windfall) setWindfall(updateData.windfall);
-              if (updateData.regime) setRegime(updateData.regime);
-              setLastUpdate(new Date());
-              updateChart(updateData.timestamp, updateData.price, updateData.symbol, updateData.positions || []);
-            } else if (message.type === 'log') {
-              const msg = message.data.message;
-              const type = msg.includes('BUY') ? 'BUY' : msg.includes('SELL') ? 'SELL' : 'INFO';
-              addLog(type, msg);
-            }
-          };
-          ws.current.onclose = () => {
-            setStatus('disconnected');
-          };
-        }
       }
     }, 1000);
-
     return () => clearInterval(timer);
   }, [lastUpdate]);
 
@@ -504,10 +522,10 @@ function App() {
   const fetchNotifierData = async () => {
     try {
       const [statusRes, historyRes, configRes, watchdogRes] = await Promise.all([
-        fetch('http://localhost:8000/api/notifier/status'),
-        fetch('http://localhost:8000/api/notifier/history'),
-        fetch('http://localhost:8000/api/notifier/config'),
-        fetch('http://localhost:8000/api/watchdog/status')
+        fetch(`${API_BASE}/api/notifier/status`),
+        fetch(`${API_BASE}/api/notifier/history`),
+        fetch(`${API_BASE}/api/notifier/config`),
+        fetch(`${API_BASE}/api/watchdog/status`)
       ]);
 
       const updates = {};
@@ -549,7 +567,7 @@ function App() {
   // Fetch stream health from /health endpoint (independent of WebSocket)
   const fetchStreamHealth = async () => {
     try {
-      const response = await fetch('http://localhost:8000/health');
+      const response = await fetch(`${API_BASE}/health`);
       if (response.ok) {
         const data = await response.json();
         if (data.stream_health) {
@@ -564,7 +582,7 @@ function App() {
   // Toggle watchdog on/off
   const toggleWatchdog = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/watchdog/toggle', { method: 'POST' });
+      const response = await fetch(`${API_BASE}/api/watchdog/toggle`, { method: 'POST' });
       if (response.ok) {
         const result = await response.json();
         setWatchdog(prev => ({ ...prev, enabled: result.enabled }));
@@ -578,7 +596,7 @@ function App() {
   const manualRestartNotifier = async () => {
     setNotifierLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/watchdog/restart-notifier', { method: 'POST' });
+      const response = await fetch(`${API_BASE}/api/watchdog/restart-notifier`, { method: 'POST' });
       if (response.ok) {
         setTimeout(async () => {
           await fetchNotifierData();
@@ -600,7 +618,7 @@ function App() {
   // Fetch circuit breaker status from persistent file
   const fetchCircuitBreakerStatus = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/risk/status');
+      const response = await fetch(`${API_BASE}/api/risk/status`);
       if (response.ok) {
         const data = await response.json();
         const fileData = data.from_file || {};
@@ -636,7 +654,7 @@ function App() {
       }
 
       // Also fetch positions from API (fallback when WebSocket isn't connected)
-      const posResponse = await fetch('http://localhost:8000/api/positions');
+      const posResponse = await fetch(`${API_BASE}/api/positions`);
       if (posResponse.ok) {
         const posData = await posResponse.json();
         if (posData.positions && posData.positions.length > 0) {
@@ -656,7 +674,7 @@ function App() {
 
     setCircuitBreakerResetting(true);
     try {
-      const response = await fetch(`http://localhost:8000/api/risk/reset?reset_type=${resetType}`, {
+      const response = await fetch(`${API_BASE}/api/risk/reset?reset_type=${resetType}`, {
         method: 'POST'
       });
       if (response.ok) {
@@ -702,7 +720,7 @@ function App() {
     setNotifierLoading(true);
     try {
       const endpoint = notifier.running ? '/api/notifier/stop' : '/api/notifier/start';
-      const response = await fetch(`http://localhost:8000${endpoint}`, { method: 'POST' });
+      const response = await fetch(`${API_BASE}${endpoint}`, { method: 'POST' });
       if (response.ok) {
         // Refetch all data after toggle
         setTimeout(async () => {
@@ -722,7 +740,7 @@ function App() {
   const sendTestSms = async () => {
     setNotifierLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/notifier/test', { method: 'POST' });
+      const response = await fetch(`${API_BASE}/api/notifier/test`, { method: 'POST' });
       const result = await response.json();
       if (result.status === 'sent') {
         addLog('INFO', 'Test SMS sent successfully');
@@ -740,7 +758,7 @@ function App() {
   // Update notifier config setting
   const updateNotifierSetting = async (key, value) => {
     try {
-      const response = await fetch('http://localhost:8000/api/notifier/config', {
+      const response = await fetch(`${API_BASE}/api/notifier/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, value })
@@ -1186,6 +1204,132 @@ function App() {
           <HistoryDashboard />
         ) : (
           <>
+            {/* ═══════════════════════════════════════════════════════════════════
+                HEALTH STATUS PANEL
+            ═══════════════════════════════════════════════════════════════════ */}
+            <div className="card mb-5" style={{
+              background: 'linear-gradient(135deg, rgba(21, 29, 46, 0.95), rgba(8, 12, 20, 0.98))',
+              borderColor: 'rgba(212, 175, 55, 0.12)'
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '1rem 1.5rem',
+                flexWrap: 'wrap',
+                gap: '1rem'
+              }}>
+                {/* Panel Label */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span style={{
+                    fontSize: '0.65rem',
+                    color: 'var(--gold-primary)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.15em',
+                    fontWeight: '600'
+                  }}>System Health</span>
+                </div>
+
+                {/* Health Indicators */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', flexWrap: 'wrap' }}>
+
+                  {/* Stream Health */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <span style={{
+                      fontSize: '0.65rem',
+                      color: 'var(--text-muted)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.1em'
+                    }}>Stream</span>
+                    <span className={`badge ${
+                      (health.stream?.seconds_since_bar || 0) < 90 ? 'badge-success' :
+                      (health.stream?.seconds_since_bar || 0) < (health.stream?.stale_threshold_seconds || 180) ? 'badge-gold' : 'badge-danger'
+                    }`} style={{ fontSize: '0.7rem' }}>
+                      <span className={`status-dot ${
+                        (health.stream?.seconds_since_bar || 0) < 90 ? 'success pulse' :
+                        (health.stream?.seconds_since_bar || 0) < (health.stream?.stale_threshold_seconds || 180) ? '' : 'danger'
+                      }`} style={{ width: '6px', height: '6px' }}></span>
+                      {(health.stream?.seconds_since_bar || 0) < 90 ? 'Connected' :
+                       (health.stream?.seconds_since_bar || 0) < (health.stream?.stale_threshold_seconds || 180) ?
+                         `Degraded (${health.stream?.seconds_since_bar || 0}s)` : 'Stale'}
+                    </span>
+                    {health.stream?.last_bar_at && (
+                      <span style={{
+                        fontSize: '0.65rem',
+                        color: 'var(--text-muted)',
+                        fontFamily: 'var(--font-mono)'
+                      }}>
+                        Last: {new Date(health.stream.last_bar_at).toLocaleTimeString()}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Divider */}
+                  <div style={{
+                    width: '1px',
+                    height: '24px',
+                    background: 'rgba(212, 175, 55, 0.15)'
+                  }}></div>
+
+                  {/* Order Tracking Health */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <span style={{
+                      fontSize: '0.65rem',
+                      color: 'var(--text-muted)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.1em'
+                    }}>Orders</span>
+                    <span className={`badge ${
+                      (health.orders?.mismatch || 0) === 0 ? 'badge-success' :
+                      (health.orders?.mismatch || 0) <= 2 ? 'badge-gold' : 'badge-danger'
+                    }`} style={{ fontSize: '0.7rem' }}>
+                      <span className={`status-dot ${
+                        (health.orders?.mismatch || 0) === 0 ? 'success' :
+                        (health.orders?.mismatch || 0) <= 2 ? '' : 'danger'
+                      }`} style={{ width: '6px', height: '6px' }}></span>
+                      {(health.orders?.mismatch || 0) === 0 ? 'Synced' : `Mismatch: ${health.orders?.mismatch}`}
+                    </span>
+                    <span style={{
+                      fontSize: '0.65rem',
+                      color: 'var(--text-secondary)',
+                      fontFamily: 'var(--font-mono)'
+                    }}>
+                      {health.orders?.tracked_open_limits || 0} tracked / {health.orders?.alpaca_open_grid_limits || 0} Alpaca
+                    </span>
+                    {health.orders?.last_check_at && (
+                      <span style={{
+                        fontSize: '0.6rem',
+                        color: 'var(--text-muted)'
+                      }}>
+                        ({Math.round((Date.now() - new Date(health.orders.last_check_at).getTime()) / 60000)}m ago)
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Show error if present */}
+                  {health.orders?.error && (
+                    <>
+                      <div style={{
+                        width: '1px',
+                        height: '24px',
+                        background: 'rgba(229, 115, 115, 0.3)'
+                      }}></div>
+                      <span style={{
+                        fontSize: '0.65rem',
+                        color: 'var(--danger)',
+                        maxWidth: '200px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }} title={health.orders.error}>
+                        {health.orders.error}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
             {/* ═══════════════════════════════════════════════════════════════════
                 MAIN GRID
             ═══════════════════════════════════════════════════════════════════ */}

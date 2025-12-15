@@ -5,19 +5,23 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOr
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import asyncio
 import time
 import logging
 
 logger = logging.getLogger(__name__)
 
 class AlpacaClient:
-    def __init__(self, config):
+    def __init__(self, config, skip_verify: bool = False):
         self.config = config
         self.trading_client = TradingClient(config.API_KEY, config.SECRET_KEY, paper=True) # Default to paper
         self.data_client = CryptoHistoricalDataClient(config.API_KEY, config.SECRET_KEY)
         # self.stream_client = CryptoDataStream(config.API_KEY, config.SECRET_KEY) # REMOVED: Redundant connection causing 429s
-        
-        self._verify_connection()
+
+        # Skip verification in async context to avoid blocking event loop
+        # Verification will happen on first get_account() call
+        if not skip_verify:
+            self._verify_connection()
 
     def _verify_connection(self):
         if getattr(self.config, 'USE_MOCK', False):
@@ -116,6 +120,9 @@ class AlpacaClient:
         """
         Get all open orders, optionally filtered by symbols.
 
+        IMPORTANT: Always fetches ALL orders from Alpaca, then filters locally.
+        This avoids Alpaca's format-sensitive symbol filtering (BTC/USD vs BTCUSD).
+
         Args:
             symbols: Optional list of symbols to filter (e.g., ['BTC/USD'])
 
@@ -126,19 +133,17 @@ class AlpacaClient:
             return []
 
         try:
+            # Always fetch ALL open orders - no symbols filter in API request
+            # This avoids format sensitivity issues with Alpaca's symbol matching
             request_params = GetOrdersRequest(
                 status=QueryOrderStatus.OPEN,
                 limit=500
             )
 
-            if symbols:
-                # Convert symbols to Alpaca format (remove /)
-                alpaca_symbols = [s.replace('/', '') for s in symbols]
-                request_params.symbols = alpaca_symbols
-
             orders = self.trading_client.get_orders(filter=request_params)
 
-            return [{
+            # Convert to list of dicts
+            order_list = [{
                 'id': str(order.id),
                 'client_order_id': order.client_order_id,
                 'symbol': order.symbol,
@@ -149,6 +154,16 @@ class AlpacaClient:
                 'status': str(order.status),
                 'created_at': order.created_at.isoformat() if order.created_at else None,
             } for order in orders]
+
+            # Filter locally by normalized symbol if requested
+            if symbols:
+                normalized_targets = {s.replace('/', '') for s in symbols}
+                order_list = [
+                    o for o in order_list
+                    if o.get('symbol', '').replace('/', '') in normalized_targets
+                ]
+
+            return order_list
 
         except Exception as e:
             logger.error(f"Failed to get open orders: {e}")
@@ -253,6 +268,93 @@ class AlpacaClient:
             except Exception as e:
                 logger.error(f"[VERIFY] Error checking order {order_id}: {e}")
                 time.sleep(poll_interval)
+
+        # Timeout
+        logger.warning(f"[VERIFY] Timeout waiting for order {order_id}, last status: {last_status}")
+        return {
+            'confirmed': False,
+            'status': last_status or 'unknown',
+            'filled_qty': 0.0,
+            'filled_avg_price': 0.0,
+            'filled_at': None,
+            'order_id': order_id,
+            'reason': 'Verification timeout'
+        }
+
+    async def verify_order_fill_async(self, order_id: str, max_wait_seconds: int = 10, poll_interval: float = 0.5) -> Dict:
+        """
+        Async version of verify_order_fill - uses asyncio.sleep() instead of time.sleep()
+        to avoid blocking the thread pool and causing bot freezes.
+
+        Args:
+            order_id: The Alpaca order ID to verify
+            max_wait_seconds: Maximum time to wait for fill confirmation
+            poll_interval: Time between status checks
+
+        Returns:
+            Same dict structure as verify_order_fill()
+        """
+        if getattr(self.config, 'USE_MOCK', False):
+            return {
+                'confirmed': True,
+                'status': 'filled',
+                'filled_qty': 1.0,
+                'filled_avg_price': 100.0,
+                'filled_at': datetime.now().isoformat(),
+                'slippage_pct': 0.0,
+                'order_id': order_id
+            }
+
+        start_time = time.time()
+        last_status = None
+        loop = asyncio.get_event_loop()
+
+        while (time.time() - start_time) < max_wait_seconds:
+            try:
+                # Run the blocking API call in executor to avoid blocking event loop
+                order = await loop.run_in_executor(
+                    None, lambda: self.trading_client.get_order_by_id(order_id)
+                )
+                status = str(order.status).lower()
+                last_status = status
+
+                if 'filled' in status:
+                    filled_qty = float(order.filled_qty) if order.filled_qty else 0.0
+                    filled_price = float(order.filled_avg_price) if order.filled_avg_price else 0.0
+                    filled_at = order.filled_at.isoformat() if order.filled_at else None
+
+                    logger.info(f"[VERIFIED] Order {order_id} FILLED: {filled_qty} @ ${filled_price:,.2f}")
+
+                    return {
+                        'confirmed': True,
+                        'status': 'filled',
+                        'filled_qty': filled_qty,
+                        'filled_avg_price': filled_price,
+                        'filled_at': filled_at,
+                        'symbol': order.symbol,
+                        'side': str(order.side),
+                        'order_id': str(order.id),
+                        'client_order_id': order.client_order_id
+                    }
+
+                elif any(s in status for s in ['canceled', 'expired', 'rejected', 'suspended']):
+                    logger.warning(f"[VERIFY] Order {order_id} not filled: {status}")
+                    return {
+                        'confirmed': False,
+                        'status': status,
+                        'filled_qty': 0.0,
+                        'filled_avg_price': 0.0,
+                        'filled_at': None,
+                        'order_id': str(order.id),
+                        'reason': f"Order {status}"
+                    }
+
+                # Still pending - use async sleep to avoid blocking thread pool
+                await asyncio.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"[VERIFY] Error checking order {order_id}: {e}")
+                await asyncio.sleep(poll_interval)
 
         # Timeout
         logger.warning(f"[VERIFY] Timeout waiting for order {order_id}, last status: {last_status}")

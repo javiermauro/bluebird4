@@ -13,10 +13,34 @@ import logging
 import json
 import asyncio
 import os
+import numpy as np
 from datetime import datetime
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+
+def convert_numpy_types(obj):
+    """
+    Recursively convert numpy types to native Python types for JSON serialization.
+    Handles numpy.float64, numpy.int64, numpy.bool_, numpy.ndarray, etc.
+    """
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
+
+
 logger = logging.getLogger("API")
 
 app = FastAPI(title="BlueBird ULTRA API", version="4.0")
@@ -57,11 +81,15 @@ class ConnectionManager:
         disconnected = []
         for connection in self.active_connections:
             try:
-                await connection.send_json(message)
+                # Add timeout to prevent slow clients from freezing all broadcasts
+                await asyncio.wait_for(connection.send_json(message), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Broadcast timeout, disconnecting slow client")
+                disconnected.append(connection)
             except Exception as e:
                 logger.error(f"Error broadcasting: {e}")
                 disconnected.append(connection)
-        
+
         # Clean up disconnected clients
         for conn in disconnected:
             self.disconnect(conn)
@@ -207,7 +235,8 @@ async def root():
 @app.get("/stats")
 async def get_stats():
     """Get current system state."""
-    return system_state
+    # Convert numpy types to native Python types for JSON serialization
+    return convert_numpy_types(system_state)
 
 
 @app.get("/health")
@@ -333,7 +362,7 @@ async def get_settings():
 @app.get("/api/regime")
 async def get_regime():
     """Get current market regime analysis."""
-    return system_state["ultra"]
+    return convert_numpy_types(system_state["ultra"])
 
 
 @app.get("/api/positions")
@@ -468,7 +497,7 @@ async def get_reconciliation_status():
     Returns:
         Sync status, matched count, and any discrepancies
     """
-    return system_state["orders"]["reconciliation"]
+    return convert_numpy_types(system_state["orders"]["reconciliation"])
 
 
 @app.get("/api/grid/status")
@@ -1816,9 +1845,16 @@ async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive
-            data = await websocket.receive_text()
-            # Could handle commands here in the future
+            try:
+                # Add timeout to prevent indefinite blocking that can exhaust thread pool
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+                # Could handle commands here in the future
+            except asyncio.TimeoutError:
+                # Send ping to keep connection alive and verify client is still there
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break  # Client disconnected
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
@@ -1923,13 +1959,16 @@ async def broadcast_update(data: dict):
         }
     }
     """
+    # Convert numpy types to native Python types for JSON serialization
+    clean_data = convert_numpy_types(data)
+
     # Update local state
-    system_state.update(data)
-    
+    system_state.update(clean_data)
+
     # Broadcast to all WebSocket clients
     await manager.broadcast({
         "type": "update",
-        "data": data
+        "data": clean_data
     })
 
 

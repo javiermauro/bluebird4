@@ -804,6 +804,85 @@ def get_reconciliation_status() -> Dict:
         }
 
 
+# ============ GRID STATE PERSISTENCE ============
+
+def save_grid_state(state_dict: Dict) -> int:
+    """
+    Save full grid strategy state to database.
+
+    Args:
+        state_dict: Output from GridTradingStrategy serialization containing:
+            - grids: Dict[symbol, GridState.to_dict()]
+            - pending_orders: Dict[order_id, PendingOrder.to_dict()]
+            - applied_order_ids: Dict[order_id, applied_at]
+            - open_limit_orders: Dict[key, OpenLimitOrder.to_dict()]
+
+    Returns:
+        Snapshot ID
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Store as single row with full JSON
+        state_json = json.dumps(state_dict)
+        timestamp = datetime.now().isoformat()
+
+        cursor.execute("""
+            INSERT INTO grid_snapshots
+            (timestamp, symbol, state_json)
+            VALUES (?, 'ALL', ?)
+        """, (timestamp, state_json))
+
+        conn.commit()
+        snapshot_id = cursor.lastrowid
+        logger.debug(f"Saved grid state snapshot #{snapshot_id}")
+        return snapshot_id
+
+
+def get_latest_grid_state() -> Optional[Dict]:
+    """
+    Load most recent grid state from database.
+
+    Returns:
+        State dict or None if no state exists
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT state_json, timestamp
+            FROM grid_snapshots
+            WHERE symbol = 'ALL' AND state_json IS NOT NULL
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+
+        row = cursor.fetchone()
+        if row and row['state_json']:
+            logger.info(f"Loaded grid state from {row['timestamp']}")
+            return json.loads(row['state_json'])
+
+        return None
+
+
+def cleanup_old_grid_snapshots(keep_days: int = 7) -> int:
+    """Delete grid snapshots older than N days."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+
+        cursor.execute("""
+            DELETE FROM grid_snapshots
+            WHERE timestamp < ? AND symbol = 'ALL'
+        """, (cutoff,))
+
+        conn.commit()
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(f"Cleaned up {deleted} old grid snapshots")
+        return deleted
+
+
 # ============ UTILITY FUNCTIONS ============
 
 def get_database_stats() -> Dict:

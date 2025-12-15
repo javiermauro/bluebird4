@@ -301,7 +301,7 @@ class GridTradingStrategy:
         logger.info("GridTradingStrategy initialized")
 
     def save_state(self) -> None:
-        """Save all grid states to file for persistence across restarts."""
+        """Save all grid states to file AND database for persistence across restarts."""
         try:
             data = {
                 'date': datetime.now().strftime('%Y-%m-%d'),
@@ -317,6 +317,9 @@ class GridTradingStrategy:
             with open(GRID_STATE_FILE, 'w') as f:
                 json.dump(data, f, indent=2)
             logger.debug(f"Grid state saved for {len(self.grids)} symbols")
+
+            # Also save to DB for long-term persistence (survives date changes)
+            self.save_to_db()
         except Exception as e:
             logger.error(f"Failed to save grid state: {e}")
 
@@ -455,6 +458,98 @@ class GridTradingStrategy:
 
         if stale:
             logger.warning(f"[GRID] Cleaned up {len(stale)} stale pending orders (>72h old)")
+
+    def save_to_db(self) -> None:
+        """Save grid state to database for persistence across restarts."""
+        try:
+            from src.database.db import save_grid_state
+
+            state_dict = {
+                'saved_at': datetime.now().isoformat(),
+                'grids': {symbol: state.to_dict() for symbol, state in self.grids.items()},
+                'pending_orders': {oid: p.to_dict() for oid, p in self.pending_orders.items()},
+                'applied_order_ids': self.applied_order_ids,
+                'unmatched_fills': self.unmatched_fills,
+                'open_limit_orders': {key: o.to_dict() for key, o in self.open_limit_orders.items()}
+            }
+            save_grid_state(state_dict)
+            logger.debug(f"Grid state saved to DB for {len(self.grids)} symbols")
+        except Exception as e:
+            logger.error(f"Failed to save grid state to DB: {e}")
+
+    def load_from_db(self) -> bool:
+        """
+        Load grid state from database.
+
+        Unlike load_state() which only loads same-day state from /tmp,
+        this loads from DB regardless of date (grids persist across restarts).
+
+        Returns:
+            True if state was loaded successfully
+        """
+        try:
+            from src.database.db import get_latest_grid_state
+
+            data = get_latest_grid_state()
+            if not data:
+                logger.info("No grid state in database, will create fresh grids")
+                return False
+
+            # Restore grids
+            for symbol, grid_data in data.get('grids', {}).items():
+                config = GridConfig(
+                    symbol=grid_data['config']['symbol'],
+                    upper_price=grid_data['config']['upper_price'],
+                    lower_price=grid_data['config']['lower_price'],
+                    num_grids=grid_data['config']['num_grids'],
+                    investment_per_grid=grid_data['config']['investment_per_grid']
+                )
+
+                levels = [GridLevel.from_dict(l) for l in grid_data['levels']]
+                state = GridState(config=config, levels=levels)
+                state.is_active = grid_data.get('is_active', True)
+                state.total_profit = grid_data.get('total_profit', 0.0)
+                state.completed_trades = grid_data.get('completed_trades', 0)
+                state.total_buys = grid_data.get('total_buys', 0)
+                state.total_sells = grid_data.get('total_sells', 0)
+                state.avg_buy_price = grid_data.get('avg_buy_price', 0.0)
+                state.avg_sell_price = grid_data.get('avg_sell_price', 0.0)
+                state.total_fills = grid_data.get('total_fills', 0)
+                state.completed_cycles = grid_data.get('completed_cycles', 0)
+
+                # Restore timestamps
+                if grid_data.get('created_at'):
+                    state.created_at = datetime.fromisoformat(grid_data['created_at'])
+                if grid_data.get('last_trade_at'):
+                    state.last_trade_at = datetime.fromisoformat(grid_data['last_trade_at'])
+
+                self.grids[symbol] = state
+                logger.info(f"Restored grid for {symbol}: {len(levels)} levels, profit=${state.total_profit:.2f}")
+
+            # Restore pending orders
+            for oid, pending_data in data.get('pending_orders', {}).items():
+                self.pending_orders[oid] = PendingOrder.from_dict(pending_data)
+
+            # Restore applied order IDs
+            self.applied_order_ids = data.get('applied_order_ids', {})
+
+            # Restore unmatched fills
+            self.unmatched_fills = data.get('unmatched_fills', {})
+
+            # Restore open limit orders
+            for key, order_data in data.get('open_limit_orders', {}).items():
+                self.open_limit_orders[key] = OpenLimitOrder.from_dict(order_data)
+
+            # Cleanup stale pending orders
+            self._cleanup_stale_pendings()
+
+            logger.info(f"Loaded grid state from DB: {len(self.grids)} grids, "
+                       f"{len(self.pending_orders)} pending, {len(self.open_limit_orders)} open limits")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load grid state from DB: {e}")
+            return False
 
     def register_pending_order(
         self,
@@ -1011,6 +1106,152 @@ class GridTradingStrategy:
             "completed_trades": state.completed_trades,
             "total_profit": state.total_profit
         }
+
+    def get_desired_limit_orders(
+        self,
+        symbol: str,
+        current_price: float,
+        position_qty: float,
+        maker_buffer_bps: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Identify maker-safe grid levels for resting limit orders.
+
+        This is the PRIMARY method for limit order mode. Unlike evaluate_grid()
+        which triggers AFTER price crosses a level (suitable for market orders),
+        this method identifies levels where resting limit orders should be placed
+        AHEAD of price movement.
+
+        The key difference:
+        - evaluate_grid(): "Price crossed $95,000, trigger BUY at $95,000"
+          → But placing limit at $95,000 when market is below would be taker!
+        - get_desired_limit_orders(): "Market is $94,000, place resting BUY at $93,950"
+          → Order rests on book, fills when price drops to it (maker)
+
+        Args:
+            symbol: Trading symbol (e.g., "BTC/USD")
+            current_price: Current market price
+            position_qty: Current position quantity (needed for sell eligibility)
+            maker_buffer_bps: Buffer in basis points to ensure maker execution (default 5 = 0.05%)
+
+        Returns:
+            Dict with:
+                - 'desired_buy': Dict with {price, quantity, level_id, grid_level} or None
+                - 'desired_sell': Dict with {price, quantity, level_id, grid_level} or None
+                - 'buy_candidates': int - count of eligible buy levels
+                - 'sell_candidates': int - count of eligible sell levels
+                - 'no_eligible_levels': bool - True if no maker-safe levels exist (overshoot)
+                - 'reason': str - explanation of selection
+        """
+        symbol = normalize_symbol(symbol)
+
+        result = {
+            'desired_buy': None,
+            'desired_sell': None,
+            'buy_candidates': 0,
+            'sell_candidates': 0,
+            'no_eligible_levels': False,
+            'reason': ''
+        }
+
+        if symbol not in self.grids:
+            result['reason'] = f"No grid configured for {symbol}"
+            result['no_eligible_levels'] = True
+            return result
+
+        state = self.grids[symbol]
+        config = state.config
+        buffer = maker_buffer_bps / 10000
+
+        # Calculate price thresholds for maker safety
+        # BUY must be below this price to stay on maker side of book
+        max_buy_price = current_price * (1 - buffer)
+        # SELL must be above this price to stay on maker side of book
+        min_sell_price = current_price * (1 + buffer)
+
+        # === FIND BUY CANDIDATES ===
+        # Unfilled BUY levels that are sufficiently below market
+        buy_candidates = []
+        for level in state.levels:
+            if (level.side == GridOrderSide.BUY
+                and not level.is_filled
+                and level.price <= max_buy_price
+                and not self.has_open_order_for_level(symbol, 'buy', level.level_id)):
+                buy_candidates.append(level)
+
+        result['buy_candidates'] = len(buy_candidates)
+
+        # Pick the HIGHEST buy candidate (closest to market = fills first when price drops)
+        if buy_candidates:
+            best_buy = max(buy_candidates, key=lambda l: l.price)
+            result['desired_buy'] = {
+                'price': best_buy.price,
+                'quantity': best_buy.quantity,
+                'level_id': best_buy.level_id,
+                'grid_level': state.levels.index(best_buy)
+            }
+
+        # === FIND SELL CANDIDATES ===
+        # Unfilled SELL levels that are sufficiently above market
+        # AND we have position to sell
+        sell_candidates = []
+        if position_qty > 0:
+            for level in state.levels:
+                if (level.side == GridOrderSide.SELL
+                    and not level.is_filled
+                    and level.price >= min_sell_price
+                    and not self.has_open_order_for_level(symbol, 'sell', level.level_id)):
+                    sell_candidates.append(level)
+
+        result['sell_candidates'] = len(sell_candidates)
+
+        # Pick the LOWEST sell candidate (closest to market = fills first when price rises)
+        if sell_candidates:
+            best_sell = min(sell_candidates, key=lambda l: l.price)
+            # Cap quantity to available position
+            sell_qty = min(best_sell.quantity, position_qty)
+            result['desired_sell'] = {
+                'price': best_sell.price,
+                'quantity': sell_qty,
+                'level_id': best_sell.level_id,
+                'grid_level': state.levels.index(best_sell)
+            }
+
+        # Determine if we're in an overshoot situation (no eligible levels)
+        unfilled_buys = [l for l in state.levels if l.side == GridOrderSide.BUY and not l.is_filled]
+        unfilled_sells = [l for l in state.levels if l.side == GridOrderSide.SELL and not l.is_filled]
+
+        # Overshoot = have unfilled levels but none are maker-safe
+        if unfilled_buys and result['buy_candidates'] == 0:
+            result['no_eligible_levels'] = True
+        if position_qty > 0 and unfilled_sells and result['sell_candidates'] == 0:
+            result['no_eligible_levels'] = True
+
+        # Build reason string for logging
+        reasons = []
+        if result['desired_buy']:
+            reasons.append(f"BUY @ ${result['desired_buy']['price']:,.2f}")
+        elif result['buy_candidates'] == 0 and unfilled_buys:
+            reasons.append(f"No eligible BUY ({len(unfilled_buys)} levels above max ${max_buy_price:,.2f})")
+        elif not unfilled_buys:
+            reasons.append("No unfilled BUY levels")
+        else:
+            reasons.append(f"BUY: {result['buy_candidates']} candidates")
+
+        if result['desired_sell']:
+            reasons.append(f"SELL @ ${result['desired_sell']['price']:,.2f}")
+        elif position_qty <= 0:
+            reasons.append("No SELL (no position)")
+        elif result['sell_candidates'] == 0 and unfilled_sells:
+            reasons.append(f"No eligible SELL ({len(unfilled_sells)} levels below min ${min_sell_price:,.2f})")
+        elif not unfilled_sells:
+            reasons.append("No unfilled SELL levels")
+        else:
+            reasons.append(f"SELL: {result['sell_candidates']} candidates")
+
+        result['reason'] = "; ".join(reasons)
+
+        return result
 
     def record_fill(
         self,
