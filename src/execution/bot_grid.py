@@ -2724,11 +2724,13 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             grid_price = sell_details['price']
                             base_qty = sell_details['quantity']
 
-                            # Apply filters (regime, momentum)
+                            # Apply filters (regime, momentum, duplicate)
                             if not regime_allow_sell:
                                 logger.debug(f"[REGIME] Skipping resting SELL {symbol}: {regime_status['reason']}")
                             elif not momentum_status['allow_sell']:
                                 logger.debug(f"[MOM] Skipping resting SELL {symbol}: {momentum_status['reason']}")
+                            elif bot.grid_strategy.has_open_order_for_level(symbol, "sell", level_id):
+                                logger.info(f"[GRID] Skipping resting SELL {symbol}: open order exists for level {level_id[:8]}")
                             else:
                                 # Apply adjustments
                                 qty = base_qty * time_quality * corr_adjustment
