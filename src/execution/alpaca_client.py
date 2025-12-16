@@ -150,6 +150,7 @@ class AlpacaClient:
                 'side': str(order.side),
                 'type': str(order.type),
                 'qty': float(order.qty) if order.qty else 0.0,
+                'filled_qty': float(order.filled_qty) if order.filled_qty else 0.0,
                 'limit_price': float(order.limit_price) if order.limit_price else None,
                 'status': str(order.status),
                 'created_at': order.created_at.isoformat() if order.created_at else None,
