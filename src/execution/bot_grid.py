@@ -2749,12 +2749,13 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     # Calculate reserved base from Alpaca open SELL limit orders
                                     # This is more accurate than internal tracking due to race conditions
                                     alpaca_symbol_normalized = symbol.replace('/', '')
+
+                                    # Calculate reserved from Alpaca open SELL orders (source of truth)
                                     reserved_sells_alpaca = sum(
                                         (o.get('qty', 0) - o.get('filled_qty', 0))
                                         for o in alpaca_open_orders
                                         if o.get('symbol', '').replace('/', '') == alpaca_symbol_normalized
                                         and 'sell' in o.get('side', '').lower()
-                                        and 'limit' in o.get('type', '').lower()
                                     )
                                     # Apply 1% safety buffer to prevent edge cases
                                     safety_buffer = 0.01 * position_qty if position_qty > 0 else 0
@@ -2766,8 +2767,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         if capped_qty > 0 and capped_qty < rounded_qty:
                                             logger.info(f"[GRID] Capping resting SELL {symbol}: pos={position_qty:.6f} reserved_alpaca={reserved_sells_alpaca:.6f} available={effective_available:.6f} desired={rounded_qty:.6f} capped={capped_qty:.6f}")
                                             rounded_qty = capped_qty
-                                        elif effective_available <= 0:
-                                            logger.info(f"[GRID] Skipping resting SELL {symbol}: pos={position_qty:.6f} reserved_alpaca={reserved_sells_alpaca:.6f} available={effective_available:.6f}")
+                                        else:
+                                            # effective_available <= 0 OR capped_qty rounds to 0 - skip entirely
+                                            logger.info(f"[GRID] Skipping resting SELL {symbol}: pos={position_qty:.6f} reserved_alpaca={reserved_sells_alpaca:.6f} available={effective_available:.6f} capped_to={capped_qty:.6f}")
                                             rounded_qty = 0  # Skip this order
 
                                     if rounded_qty > 0:
