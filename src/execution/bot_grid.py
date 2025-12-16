@@ -23,6 +23,7 @@ import logging
 import os
 import random
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, Optional, List
 import numpy as np
 
@@ -89,6 +90,22 @@ def round_qty(symbol: str, qty: float, config) -> float:
     precision = getattr(config, 'SYMBOL_PRECISION', {})
     _, qty_decimals = precision.get(symbol, (2, 6))
     return round(qty, qty_decimals)
+
+
+def floor_qty(symbol: str, qty: float, config) -> float:
+    """Floor quantity to valid precision for symbol (never rounds up).
+
+    Uses Decimal + ROUND_DOWN to avoid float precision artifacts.
+    Used when capping to available inventory to ensure we never exceed it.
+    """
+    precision = getattr(config, 'SYMBOL_PRECISION', {})
+    _, qty_decimals = precision.get(symbol, (2, 6))
+
+    # Use Decimal to avoid float precision artifacts
+    step = Decimal(f'1e-{qty_decimals}')
+    floored = Decimal(str(qty)).quantize(step, rounding=ROUND_DOWN)
+    # Ensure non-negative (edge case protection)
+    return max(float(floored), 0.0)
 
 
 class GridTradingBot:
@@ -2691,6 +2708,13 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     limit_price = round_limit_price(symbol, grid_price, bot.config)
                                     rounded_qty = round_qty(symbol, qty, bot.config)
 
+                                    # Check minimum notional ($10 for Alpaca crypto)
+                                    MIN_NOTIONAL = 10.0
+                                    notional = rounded_qty * limit_price
+                                    if rounded_qty > 0 and notional < MIN_NOTIONAL:
+                                        logger.info(f"[GRID] Skipping resting BUY {symbol}: notional ${notional:.2f} < ${MIN_NOTIONAL}")
+                                        rounded_qty = 0  # Skip by zeroing qty
+
                                     if rounded_qty > 0:
                                         order = LimitOrderRequest(
                                             symbol=symbol,
@@ -2763,7 +2787,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
                                     # Cap order size to effective available inventory
                                     if rounded_qty > effective_available:
-                                        capped_qty = round_qty(symbol, effective_available, bot.config)
+                                        capped_qty = floor_qty(symbol, effective_available, bot.config)
                                         if capped_qty > 0 and capped_qty < rounded_qty:
                                             logger.info(f"[GRID] Capping resting SELL {symbol}: pos={position_qty:.6f} reserved_alpaca={reserved_sells_alpaca:.6f} available={effective_available:.6f} desired={rounded_qty:.6f} capped={capped_qty:.6f}")
                                             rounded_qty = capped_qty
