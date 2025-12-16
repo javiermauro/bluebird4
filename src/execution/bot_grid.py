@@ -108,6 +108,22 @@ def floor_qty(symbol: str, qty: float, config) -> float:
     return max(float(floored), 0.0)
 
 
+# =============================================================================
+# Grid Sizing Validation Constants
+# =============================================================================
+
+# Alpaca minimum notional for crypto orders
+MIN_NOTIONAL = 10.0
+
+# Minimum investment per grid level (with buffer for rounding/fees)
+# Must exceed MIN_NOTIONAL to avoid "notional < $10" rejections
+MIN_INVESTMENT_PER_GRID = 12.0  # $12 floor ensures ~$10+ after rounding
+
+# If current investment_per_grid is below this fraction of expected,
+# consider the grid "stale" and trigger rebuild
+STALE_GRID_THRESHOLD = 0.25  # Rebuild if current < 25% of expected
+
+
 class GridTradingBot:
     """
     Grid Trading Bot Implementation.
@@ -2063,12 +2079,190 @@ class GridTradingBot:
         logger.info(f"  Totals: {self.total_trades} trades, ${self.total_profit:.2f} profit")
         logger.info("=" * 50)
 
-        self.grids_initialized = True
-
         # Save state to ensure DB has all grids (including newly created)
         if created_symbols:
             self.grid_strategy.save_state()
             logger.info("Saved updated grid state with new grids to DB")
+
+        # Validate and rebuild any undersized grids (prevents $10 min notional skips)
+        # This must run BEFORE grids_initialized=True so grids are final before trading
+        rebuilt_symbols = self._validate_and_rebuild_undersized_grids(prices, equity)
+        if rebuilt_symbols:
+            logger.info(f"  Rebuilt undersized grids: {rebuilt_symbols}")
+
+        # Mark initialized only after all validation/rebuilds complete
+        self.grids_initialized = True
+
+    def _validate_and_rebuild_undersized_grids(
+        self,
+        prices: Dict[str, float],
+        equity: float
+    ) -> List[str]:
+        """
+        Validate grid sizing and rebuild grids with investment_per_grid too small.
+
+        This prevents the "notional < $10" skip issue where restored grids have
+        stale/tiny investment_per_grid values that cause all orders to be skipped.
+
+        Rebuild triggers:
+        1. current_investment_per_grid < MIN_INVESTMENT_PER_GRID ($12)
+        2. current_investment_per_grid < 25% of expected (stale grid detection)
+
+        Args:
+            prices: Current price for each symbol
+            equity: Total account equity
+
+        Returns:
+            List of symbols that were rebuilt
+        """
+        rebuilt_symbols = []
+        grid_configs = getattr(self.config, 'GRID_CONFIGS', DEFAULT_GRID_CONFIGS)
+
+        for symbol, state in list(self.grid_strategy.grids.items()):
+            if symbol not in prices:
+                logger.warning(f"[GRID-VALIDATE] Cannot validate {symbol}: no price data")
+                continue
+
+            current_price = prices[symbol]
+            current_investment = state.config.investment_per_grid
+
+            # Calculate expected investment_per_grid from current equity
+            template = grid_configs.get(symbol, {
+                "num_grids": 10,
+                "range_pct": 0.05,
+                "investment_ratio": 0.25
+            })
+            num_grids = template.get("num_grids", 10)
+            investment_ratio = template.get("investment_ratio", 0.25)
+            expected_investment = (equity * investment_ratio) / num_grids
+
+            # Check trigger conditions
+            below_minimum = current_investment < MIN_INVESTMENT_PER_GRID
+            below_expected = current_investment < (expected_investment * STALE_GRID_THRESHOLD)
+
+            if not below_minimum and not below_expected:
+                # Grid sizing is OK - log verification
+                example_qty = current_investment / current_price
+                example_notional = example_qty * current_price
+                logger.debug(
+                    f"[GRID-VALIDATE] {symbol} OK: investment=${current_investment:.2f}, "
+                    f"expected=${expected_investment:.2f}, notional=${example_notional:.2f}"
+                )
+                continue
+
+            # Rebuild needed
+            reason = "below_minimum" if below_minimum else "stale_grid"
+            logger.warning(
+                f"[GRID] Rebuilding {symbol}: investment_per_grid too small "
+                f"(current=${current_investment:.2f}, expected=${expected_investment:.2f}, "
+                f"min=${MIN_INVESTMENT_PER_GRID:.2f}, reason={reason})"
+            )
+
+            # Step 1: Cancel open orders for this symbol on Alpaca
+            self._cancel_symbol_orders(symbol)
+
+            # Step 2: Clear local tracking for this symbol
+            self._clear_symbol_tracking(symbol)
+
+            # Step 3: Preserve performance stats before rebuild
+            old_profit = state.total_profit
+            old_trades = state.completed_trades
+            old_cycles = state.completed_cycles
+            old_buys = state.total_buys
+            old_sells = state.total_sells
+
+            # Step 4: Create fresh grid with proper sizing
+            range_pct = template.get("range_pct", 0.05)
+            new_config = GridConfig(
+                symbol=symbol,
+                upper_price=current_price * (1 + range_pct / 2),
+                lower_price=current_price * (1 - range_pct / 2),
+                num_grids=num_grids,
+                investment_per_grid=expected_investment
+            )
+
+            new_state = self.grid_strategy.create_grid(new_config, current_price)
+
+            # Step 5: Restore preserved stats
+            new_state.total_profit = old_profit
+            new_state.completed_trades = old_trades
+            new_state.completed_cycles = old_cycles
+            new_state.total_buys = old_buys
+            new_state.total_sells = old_sells
+
+            # Step 6: Log verification
+            example_qty = expected_investment / current_price
+            example_notional = example_qty * current_price
+            logger.info(
+                f"[GRID-REBUILD] {symbol} rebuilt: "
+                f"num_grids={num_grids}, investment=${expected_investment:.2f}, "
+                f"example_qty={example_qty:.6f}, example_notional=${example_notional:.2f}"
+            )
+
+            rebuilt_symbols.append(symbol)
+
+        # Save state if any grids were rebuilt
+        if rebuilt_symbols:
+            self.grid_strategy.save_state()
+            logger.info(f"[GRID-REBUILD] Saved state after rebuilding {len(rebuilt_symbols)} grids")
+
+        return rebuilt_symbols
+
+    def _cancel_symbol_orders(self, symbol: str) -> int:
+        """
+        Cancel all open orders for a symbol on Alpaca.
+
+        Returns number of orders cancelled.
+        """
+        cancelled = 0
+        try:
+            # Get all open orders for this symbol from Alpaca
+            open_orders = self.client.get_open_orders(symbols=[symbol])
+
+            for order in open_orders:
+                order_id = order.get('id')
+                if order_id:
+                    if self.client.cancel_order(order_id):
+                        cancelled += 1
+                        logger.info(f"[GRID-REBUILD] Cancelled order {order_id[:8]} for {symbol}")
+
+            if cancelled > 0:
+                logger.info(f"[GRID-REBUILD] Cancelled {cancelled} open orders for {symbol}")
+
+        except Exception as e:
+            logger.error(f"[GRID-REBUILD] Error cancelling orders for {symbol}: {e}")
+
+        return cancelled
+
+    def _clear_symbol_tracking(self, symbol: str) -> None:
+        """
+        Clear local order tracking for a symbol.
+
+        Removes entries from:
+        - grid_strategy.open_limit_orders
+        - grid_strategy.pending_orders
+        """
+        symbol_normalized = normalize_symbol(symbol)
+
+        # Clear open limit orders for this symbol
+        keys_to_remove = [
+            key for key, order in self.grid_strategy.open_limit_orders.items()
+            if normalize_symbol(order.symbol) == symbol_normalized
+        ]
+        for key in keys_to_remove:
+            del self.grid_strategy.open_limit_orders[key]
+        if keys_to_remove:
+            logger.info(f"[GRID-REBUILD] Cleared {len(keys_to_remove)} open limit order entries for {symbol}")
+
+        # Clear pending orders for this symbol
+        pending_to_remove = [
+            oid for oid, pending in self.grid_strategy.pending_orders.items()
+            if normalize_symbol(pending.symbol) == symbol_normalized
+        ]
+        for oid in pending_to_remove:
+            del self.grid_strategy.pending_orders[oid]
+        if pending_to_remove:
+            logger.info(f"[GRID-REBUILD] Cleared {len(pending_to_remove)} pending order entries for {symbol}")
 
     def evaluate(self, symbol: str, current_price: float, position_qty: float) -> Dict:
         """
