@@ -728,5 +728,157 @@ class TestDBPersistence:
             "Should return False for empty DB or load existing state"
 
 
+class TestUnmatchedFillIdempotency:
+    """Tests for unmatched fill handling with grace window quarantine."""
+
+    def test_no_level_match_from_reconcile_marks_applied(self):
+        """source='reconcile' + no match -> quarantined immediately."""
+        strategy = make_test_strategy()
+
+        # Use a price far outside any grid level (no match possible)
+        result = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-reconcile-001",
+            source="reconcile"
+        )
+
+        # Should be in unmatched_fills
+        assert "order-reconcile-001" in strategy.unmatched_fills
+        assert strategy.unmatched_fills["order-reconcile-001"]['reason'] == "no_level_match"
+
+        # Should also be in applied_order_ids (quarantined)
+        assert "order-reconcile-001" in strategy.applied_order_ids
+
+    def test_no_level_match_first_live_not_marked(self):
+        """source='grid' + first occurrence + fresh order -> NOT quarantined (grace)."""
+        strategy = make_test_strategy()
+
+        # Register a fresh pending order (created_at = now)
+        from datetime import datetime
+        strategy.register_pending_order(
+            order_id="order-live-001",
+            symbol="BTC/USD",
+            side="buy",
+            intended_level_price=50000,  # No level at this price
+            source="grid"
+        )
+
+        # Apply fill with no matching level
+        result = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-live-001",
+            source="grid"
+        )
+
+        # Should be in unmatched_fills
+        assert "order-live-001" in strategy.unmatched_fills
+
+        # Should NOT be in applied_order_ids (grace period - first occurrence)
+        assert "order-live-001" not in strategy.applied_order_ids
+
+    def test_no_level_match_second_live_marks_applied(self):
+        """source='grid' + second occurrence -> quarantined."""
+        strategy = make_test_strategy()
+
+        # First call: record unmatched but don't quarantine
+        result1 = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-second-001",
+            source="grid"
+        )
+
+        assert "order-second-001" in strategy.unmatched_fills
+        assert "order-second-001" not in strategy.applied_order_ids
+
+        # Second call: same order_id, should now quarantine
+        result2 = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-second-001",
+            source="grid"
+        )
+
+        # Now should be in applied_order_ids (quarantined on second occurrence)
+        assert "order-second-001" in strategy.applied_order_ids
+
+    def test_no_level_match_old_order_marks_applied(self):
+        """source='grid' + pending.created_at > 2 min old -> quarantined immediately."""
+        strategy = make_test_strategy()
+
+        from datetime import datetime, timedelta
+
+        # Register a pending order that's 3 minutes old
+        old_created_at = (datetime.now() - timedelta(minutes=3)).isoformat()
+        pending = PendingOrder(
+            order_id="order-old-001",
+            symbol="BTC/USD",
+            side="buy",
+            intended_level_price=50000,  # No level at this price
+            created_at=old_created_at,
+            source="grid"
+        )
+        strategy.pending_orders["order-old-001"] = pending
+
+        # Apply fill with no matching level
+        result = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-old-001",
+            source="grid"
+        )
+
+        # Should be in unmatched_fills
+        assert "order-old-001" in strategy.unmatched_fills
+
+        # Should be in applied_order_ids (old order -> immediate quarantine)
+        assert "order-old-001" in strategy.applied_order_ids
+
+    def test_idempotency_after_quarantine(self):
+        """Once quarantined, subsequent calls return early via idempotency."""
+        strategy = make_test_strategy()
+
+        # First call: quarantine via reconcile
+        result1 = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-idem-001",
+            source="reconcile"
+        )
+
+        assert "order-idem-001" in strategy.applied_order_ids
+        count_after_first = strategy.unmatched_fills["order-idem-001"].get('count', 1)
+
+        # Second call: should return early (idempotency check)
+        result2 = strategy.apply_filled_order(
+            "BTC/USD", "buy", 50000, 0.01, "order-idem-001",
+            source="reconcile"
+        )
+
+        # Count should not have increased (early return before _record_unmatched)
+        count_after_second = strategy.unmatched_fills["order-idem-001"].get('count', 1)
+        assert count_after_second == count_after_first
+
+    def test_symbol_mismatch_not_marked_applied(self):
+        """symbol_mismatch should NOT add to applied_order_ids (keep retrying)."""
+        strategy = make_test_strategy()
+
+        # Register pending for BTC but fill comes for SOL (mismatch)
+        strategy.register_pending_order(
+            order_id="order-mismatch-001",
+            symbol="BTC/USD",
+            side="buy",
+            intended_level_price=94000,
+            source="grid"
+        )
+
+        # Create a grid for SOL so the symbol exists
+        sol_config = make_test_config(symbol="SOL/USD", upper=200, lower=100, num_grids=10)
+        strategy.create_grid(sol_config, 150)
+
+        # Apply fill with DIFFERENT symbol than pending
+        result = strategy.apply_filled_order(
+            "SOL/USD", "buy", 150, 0.01, "order-mismatch-001",
+            source="grid"
+        )
+
+        # Should be in unmatched_fills with symbol_mismatch
+        assert "order-mismatch-001" in strategy.unmatched_fills
+        assert strategy.unmatched_fills["order-mismatch-001"]['reason'] == "symbol_mismatch"
+
+        # Should NOT be in applied_order_ids (keep retrying)
+        assert "order-mismatch-001" not in strategy.applied_order_ids
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

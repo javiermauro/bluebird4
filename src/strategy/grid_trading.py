@@ -751,15 +751,34 @@ class GridTradingStrategy:
         price: float,
         reason: str
     ) -> None:
-        """Record unmatched fill for diagnostics."""
-        self.unmatched_fills[order_id] = {
-            'symbol': symbol,
-            'side': side,
-            'price': price,
-            'reason': reason,
-            'recorded_at': datetime.now().isoformat()
-        }
-        logger.error(f"[GRID] Unmatched fill: {order_id[:8]} {side} {symbol} @ ${price:.2f} ({reason})")
+        """
+        Record unmatched fill for diagnostics.
+
+        Deduplicates logging: ERROR on first occurrence, DEBUG on repeats.
+        Stores first_seen_at, last_seen_at, count for diagnostics.
+        """
+        # Check if already recorded BEFORE modifying dict (critical for grace window logic)
+        already_recorded = order_id in self.unmatched_fills
+        now = datetime.now().isoformat()
+
+        if already_recorded:
+            # Update existing entry: increment count, update last_seen
+            existing = self.unmatched_fills[order_id]
+            existing['last_seen_at'] = now
+            existing['count'] = existing.get('count', 1) + 1
+            logger.debug(f"[GRID] Unmatched fill (repeat #{existing['count']}): {order_id[:8]} {side} {symbol} @ ${price:.2f} ({reason})")
+        else:
+            # First occurrence: create entry with diagnostics
+            self.unmatched_fills[order_id] = {
+                'symbol': symbol,
+                'side': side,
+                'price': price,
+                'reason': reason,
+                'first_seen_at': now,
+                'last_seen_at': now,
+                'count': 1
+            }
+            logger.error(f"[GRID] Unmatched fill: {order_id[:8]} {side} {symbol} @ ${price:.2f} ({reason})")
 
     def apply_filled_order(
         self,
@@ -858,9 +877,35 @@ class GridTradingStrategy:
             if matched_level:
                 logger.warning(f"[GRID] Fallback match: {side} ${fill_price:.2f} -> level ${matched_level.price:.2f}")
 
-        # No match found - record as unmatched but do NOT mark as applied
+        # No match found - record as unmatched with grace window quarantine
         if not matched_level:
+            # Check if we should quarantine (mark as applied) or keep retrying
+            should_quarantine = False
+
+            # Grace window: only quarantine if from reconcile OR seen before OR old order
+            if source == "reconcile":
+                # Reconciliation = historical/startup, safe to quarantine immediately
+                should_quarantine = True
+            elif order_id in self.unmatched_fills:
+                # Second occurrence = already tried once, quarantine now
+                should_quarantine = True
+            elif pending and pending.created_at:
+                # Old order fallback: quarantine if pending is >2 min old
+                try:
+                    created = datetime.fromisoformat(pending.created_at)
+                    age_seconds = (datetime.now() - created).total_seconds()
+                    if age_seconds > 120:  # 2 minutes
+                        should_quarantine = True
+                except (ValueError, TypeError):
+                    pass  # Can't parse, skip this check
+
             self._record_unmatched(order_id, symbol, side, fill_price, "no_level_match")
+
+            if should_quarantine:
+                # Mark as applied to prevent reprocessing (quarantine)
+                self.applied_order_ids[order_id] = datetime.now().isoformat()
+                logger.info(f"[GRID] Quarantined unmatched fill: {order_id[:8]} (won't retry)")
+
             return None
 
         # === Apply the fill ===
