@@ -99,6 +99,26 @@ Old prediction-based bots are in `archive/old_bots/`. The system now ONLY uses g
 ### Alpaca Fees
 Round-trip cost is ~0.60% (0.25% taker + spread). Grid spacing must exceed this to be profitable.
 
+### Grid Sizing Validation
+On startup, `initialize_grids()` validates each grid's `investment_per_grid`:
+- **MIN_INVESTMENT_PER_GRID = $12** (above Alpaca's $10 minimum notional)
+- **STALE_GRID_THRESHOLD = 25%** (rebuild if < 25% of expected from equity)
+
+If a restored grid has stale/tiny sizing, it's automatically rebuilt:
+1. Cancel open Alpaca orders for that symbol
+2. Clear local order tracking
+3. Preserve performance stats (profit, trades, cycles)
+4. Create fresh grid with proper sizing from current equity
+
+### Unmatched Fill Handling
+When a fill can't match any grid level (`no_level_match`), grace window quarantine prevents log spam:
+- `source="reconcile"` → quarantine immediately
+- Already seen before → quarantine on 2nd occurrence
+- `pending.created_at > 2 min old` → quarantine immediately
+- First fresh live occurrence → grace period (one more retry)
+
+Quarantined fills are stored in `unmatched_fills` for audit but won't be reprocessed.
+
 ## API Endpoints
 
 Key endpoints on `http://localhost:8000`:
