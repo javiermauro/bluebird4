@@ -1244,6 +1244,233 @@ async def reset_circuit_breakers(reset_type: str = "all"):
     }
 
 
+# =========================================
+# RISK OVERLAY API ENDPOINTS (Crash Protection)
+# =========================================
+
+RISK_OVERLAY_STATE_FILE = "/tmp/bluebird-risk-overlay.json"
+RISK_OVERLAY_COMMAND_FILE = "/tmp/bluebird-risk-overlay-command.json"
+
+
+class RiskOverlayOverride(BaseModel):
+    """Request model for manual risk overlay override."""
+    mode: str  # "NORMAL", "RISK_OFF", or "clear" to remove override
+    reason: str = None
+
+
+@app.get("/api/risk/overlay")
+async def get_risk_overlay_status():
+    """
+    Get current risk overlay status including mode, triggers, and telemetry.
+
+    Returns:
+        Risk overlay state with mode, trigger reasons, blocked actions, and telemetry in dollars
+    """
+    # First try system_state (updated during bar processing)
+    overlay_data = system_state.get("risk_overlay", None)
+
+    if overlay_data and overlay_data.get("mode") is not None:
+        return overlay_data
+
+    # Fall back to reading from state file
+    try:
+        if os.path.exists(RISK_OVERLAY_STATE_FILE):
+            with open(RISK_OVERLAY_STATE_FILE, 'r') as f:
+                state = json.load(f)
+
+            # Get thresholds from config
+            from config_ultra import config
+            thresholds = {
+                "momentum": getattr(config, "RISK_OFF_MOMENTUM_THRESHOLD", -0.015),
+                "correlation": getattr(config, "RISK_OFF_CORRELATION_THRESHOLD", 0.90),
+                "adx": getattr(config, "RISK_OFF_ADX_THRESHOLD", 35),
+            }
+
+            return {
+                "mode": state.get("mode", "NORMAL"),
+                "mode_entered_at": state.get("mode_entered_at"),
+                "trigger_reasons": state.get("trigger_reasons", []),
+                "blocked_actions": state.get("blocked_actions", {}),
+                "telemetry": state.get("telemetry", {}),
+                "recovery_state": state.get("recovery_state"),
+                "manual_override": state.get("manual_override"),
+                "enabled": state.get("enabled", True),
+                "source": "state_file",
+                # Include signals and thresholds for visual gauges
+                "current_signals": state.get("current_signals", {
+                    "momentum": 0,
+                    "correlation": 0,
+                    "adx": 0,
+                    "adx_direction": "neutral"
+                }),
+                "thresholds": thresholds,
+            }
+        else:
+            # No state file yet - overlay not initialized
+            from config_ultra import config
+            return {
+                "mode": "NORMAL",
+                "mode_entered_at": None,
+                "trigger_reasons": [],
+                "blocked_actions": {
+                    "buys_blocked": 0,
+                    "rebalances_blocked": 0,
+                    "limits_cancelled": 0,
+                    "untracked_buys": 0
+                },
+                "telemetry": {
+                    "avoided_buys_notional": 0.0,
+                    "cancelled_limits_notional": 0.0
+                },
+                "recovery_state": None,
+                "manual_override": None,
+                "enabled": True,
+                "source": "default",
+                "note": "Risk overlay not yet initialized - waiting for bot startup",
+                "current_signals": {
+                    "momentum": 0,
+                    "correlation": 0,
+                    "adx": 0,
+                    "adx_direction": "neutral"
+                },
+                "thresholds": {
+                    "momentum": getattr(config, "RISK_OFF_MOMENTUM_THRESHOLD", -0.015),
+                    "correlation": getattr(config, "RISK_OFF_CORRELATION_THRESHOLD", 0.90),
+                    "adx": getattr(config, "RISK_OFF_ADX_THRESHOLD", 35),
+                },
+            }
+    except Exception as e:
+        logger.error(f"Error reading risk overlay state: {e}")
+        return {
+            "error": str(e),
+            "mode": "UNKNOWN",
+            "source": "error"
+        }
+
+
+@app.post("/api/risk/overlay")
+async def set_risk_overlay_override(override: RiskOverlayOverride):
+    """
+    Manually override risk overlay mode.
+
+    Args:
+        mode: "NORMAL" to force normal trading, "RISK_OFF" to force protection mode,
+              or "clear" to remove manual override and return to automatic mode
+        reason: Optional reason for the override
+
+    Returns:
+        Status of the override request
+    """
+    # NOTE: We normalize input via .upper(), so the allow-list must also be uppercase.
+    valid_modes = ["NORMAL", "RISK_OFF", "CLEAR"]
+
+    if override.mode.upper() not in valid_modes:
+        return {
+            "success": False,
+            "error": f"Invalid mode: {override.mode}. Valid modes: {valid_modes}"
+        }
+
+    mode = override.mode.upper()
+
+    try:
+        # Write command file that the bot will pick up
+        command = {
+            "action": "clear_override" if mode == "CLEAR" else "set_override",
+            "mode": mode if mode != "CLEAR" else None,
+            "reason": override.reason or f"Manual override via API",
+            "requested_at": datetime.now().isoformat(),
+            "requested_by": "API"
+        }
+
+        with open(RISK_OVERLAY_COMMAND_FILE, 'w') as f:
+            json.dump(command, f, indent=2)
+
+        logger.warning(f"RISK OVERLAY: Manual override requested - mode={mode}, reason={override.reason}")
+
+        # Also update system_state for immediate visibility
+        if "risk_overlay" not in system_state:
+            system_state["risk_overlay"] = {}
+
+        system_state["risk_overlay"]["pending_override"] = command
+
+        return {
+            "success": True,
+            "action": command["action"],
+            "mode": mode if mode != "CLEAR" else "automatic",
+            "message": f"Override request submitted. Bot will apply on next bar.",
+            "note": "Check GET /api/risk/overlay to verify mode change"
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to set risk overlay override: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/api/risk/overlay/telemetry")
+async def get_risk_overlay_telemetry():
+    """
+    Get detailed telemetry for risk overlay effectiveness.
+
+    Returns:
+        Dollar amounts of avoided losses, cancelled orders, and protection events
+    """
+    try:
+        # Try system_state first
+        overlay_data = system_state.get("risk_overlay", {})
+        telemetry = overlay_data.get("telemetry", {})
+
+        if telemetry:
+            return {
+                "avoided_buys_count": telemetry.get("avoided_buys_count", 0),
+                "avoided_buys_notional": round(telemetry.get("avoided_buys_notional", 0), 2),
+                "cancelled_limits_count": telemetry.get("cancelled_limits_count", 0),
+                "cancelled_limits_notional": round(telemetry.get("cancelled_limits_notional", 0), 2),
+                "rebalances_blocked": telemetry.get("rebalances_blocked", 0),
+                "risk_off_entries": telemetry.get("risk_off_entries", 0),
+                "total_time_in_risk_off_minutes": telemetry.get("total_time_in_risk_off_minutes", 0),
+                "current_mode": overlay_data.get("mode", "NORMAL"),
+                "source": "live"
+            }
+
+        # Fall back to state file
+        if os.path.exists(RISK_OVERLAY_STATE_FILE):
+            with open(RISK_OVERLAY_STATE_FILE, 'r') as f:
+                state = json.load(f)
+
+            telemetry = state.get("telemetry", {})
+            return {
+                "avoided_buys_count": telemetry.get("avoided_buys_count", 0),
+                "avoided_buys_notional": round(telemetry.get("avoided_buys_notional", 0), 2),
+                "cancelled_limits_count": telemetry.get("cancelled_limits_count", 0),
+                "cancelled_limits_notional": round(telemetry.get("cancelled_limits_notional", 0), 2),
+                "rebalances_blocked": telemetry.get("rebalances_blocked", 0),
+                "risk_off_entries": telemetry.get("risk_off_entries", 0),
+                "total_time_in_risk_off_minutes": telemetry.get("total_time_in_risk_off_minutes", 0),
+                "current_mode": state.get("mode", "NORMAL"),
+                "source": "state_file"
+            }
+
+        return {
+            "avoided_buys_count": 0,
+            "avoided_buys_notional": 0.0,
+            "cancelled_limits_count": 0,
+            "cancelled_limits_notional": 0.0,
+            "rebalances_blocked": 0,
+            "risk_off_entries": 0,
+            "total_time_in_risk_off_minutes": 0,
+            "current_mode": "NORMAL",
+            "source": "default",
+            "note": "No telemetry data yet"
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting risk overlay telemetry: {e}")
+        return {"error": str(e)}
+
+
 @app.get("/api/orders/history")
 async def get_alpaca_history(days: int = 7):
     """

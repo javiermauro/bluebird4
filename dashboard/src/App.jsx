@@ -29,6 +29,65 @@ ChartJS.register(
 // BLUEBIRD PRIVATE - Midnight Luxury Trading Suite
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Visual threshold gauge for risk triggers
+const TriggerGauge = ({ label, value, threshold, max, format, invert = false, direction = null }) => {
+  // For momentum: value and threshold are negative, we want to show how "bad" the value is
+  // For correlation/ADX: value approaches threshold from below
+
+  let fillPercent, thresholdPercent, status;
+
+  if (invert) {
+    // Momentum: threshold is negative (e.g., -0.015), value is negative (e.g., -0.018)
+    // More negative = worse. Scale from 0 to threshold*2 for visual range
+    const absThreshold = Math.abs(threshold);
+    const absValue = Math.abs(value || 0);
+    const visualMax = absThreshold * 3; // Show up to 3x threshold
+    fillPercent = Math.min((absValue / visualMax) * 100, 100);
+    thresholdPercent = (absThreshold / visualMax) * 100;
+    status = absValue >= absThreshold ? 'danger' : absValue >= absThreshold * 0.7 ? 'warning' : 'safe';
+  } else {
+    // Correlation/ADX: threshold is positive, value approaches from below
+    const visualMax = max || (threshold * 1.2);
+    fillPercent = Math.min(((value || 0) / visualMax) * 100, 100);
+    thresholdPercent = (threshold / visualMax) * 100;
+    status = (value || 0) >= threshold ? 'danger' : (value || 0) >= threshold * 0.85 ? 'warning' : 'safe';
+  }
+
+  const displayValue = format ? format(value || 0) : (value || 0).toFixed(2);
+  const displayThreshold = format ? format(threshold) : threshold.toFixed(2);
+
+  return (
+    <div className="trigger-gauge">
+      <div className="trigger-gauge-header">
+        <span className="trigger-gauge-label">
+          {label}
+          {direction && direction !== 'neutral' && (
+            <span className={`trigger-gauge-direction ${direction}`}>
+              {direction === 'down' ? ' ↓' : direction === 'up' ? ' ↑' : ''}
+            </span>
+          )}
+        </span>
+        <span className={`trigger-gauge-value ${status}`}>{displayValue}</span>
+      </div>
+      <div className="trigger-gauge-bar">
+        <div
+          className="trigger-gauge-threshold"
+          style={{ left: `${thresholdPercent}%` }}
+          title={`Threshold: ${displayThreshold}`}
+        />
+        <div
+          className={`trigger-gauge-fill ${status}`}
+          style={{ width: `${fillPercent}%` }}
+        />
+      </div>
+      <div className="trigger-gauge-scale">
+        <span className="trigger-gauge-min">{invert ? '0%' : '0'}</span>
+        <span className="trigger-gauge-threshold-label">{displayThreshold}</span>
+      </div>
+    </div>
+  );
+};
+
 function App() {
   // Backend connection settings
   // NOTE: The dashboard may be opened from another machine; avoid hardcoding localhost.
@@ -265,6 +324,33 @@ function App() {
     active_cooldowns: {}
   });
 
+  // Risk Overlay state (protects capital during adverse market conditions)
+  const [riskOverlay, setRiskOverlay] = useState({
+    enabled: true,
+    mode: 'NORMAL',
+    mode_since: null,
+    mode_duration_minutes: 0,
+    trigger_reasons: [],
+    position_multiplier: 1.0,
+    recovery: null,
+    telemetry: {
+      avoided_buys_count: 0,
+      avoided_buys_notional: 0,
+      cancelled_limits_count: 0,
+      cancelled_limits_notional: 0,
+      untracked_buys_count: 0,
+      rebalances_blocked_count: 0
+    },
+    manual_override: null,
+    caps: { normal_exposure: 0.70, risk_off_exposure: 0.40 }
+  });
+  const [riskOverlayExpanded, setRiskOverlayExpanded] = useState(false);
+  const [riskOverlayFetch, setRiskOverlayFetch] = useState({
+    status: 'init', // init | ok | error
+    lastFetchedAt: null,
+    error: null
+  });
+
   // Per-symbol chart data storage
   const [symbolChartData, setSymbolChartData] = useState({
     'BTC/USD': { labels: [], data: [] },
@@ -291,7 +377,7 @@ function App() {
   const ws = useRef(null);
   const wsReconnectTimer = useRef(null);
   const wsReconnectAttempts = useRef(0);
-  const logsEndRef = useRef(null);
+  const logsContainerRef = useRef(null);
 
   useEffect(() => {
     const connectWebSocket = () => {
@@ -346,6 +432,10 @@ function App() {
           if (updateData.orders) setOrders(updateData.orders);
           if (updateData.windfall) setWindfall(updateData.windfall);
           if (updateData.health) setHealth(updateData.health);
+          if (updateData.risk_overlay) {
+            setRiskOverlay(updateData.risk_overlay);
+            setRiskOverlayFetch({ status: 'ok', lastFetchedAt: Date.now(), error: null });
+          }
 
           // Track per-symbol prices from positions and grid data
           if (updateData.positions || updateData.grid?.summaries) {
@@ -425,7 +515,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    // Scroll within the logs container only, not the whole page
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
   }, [logs]);
 
   // Auto-refresh countdown timer (UI only)
@@ -579,6 +672,51 @@ function App() {
     }
   };
 
+  // Fetch risk overlay status
+  const fetchRiskOverlay = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/risk/overlay`);
+      if (response.ok) {
+        const data = await response.json();
+        setRiskOverlay(data);
+        setRiskOverlayFetch({ status: 'ok', lastFetchedAt: Date.now(), error: null });
+      } else {
+        setRiskOverlayFetch(prev => ({
+          status: 'error',
+          lastFetchedAt: prev.lastFetchedAt,
+          error: `HTTP ${response.status}`
+        }));
+      }
+    } catch (error) {
+      // Silent fail - overlay shows "unavailable" state
+      console.log('Could not fetch risk overlay status');
+      setRiskOverlayFetch(prev => ({
+        status: 'error',
+        lastFetchedAt: prev.lastFetchedAt,
+        error: error?.message || 'fetch_failed'
+      }));
+    }
+  };
+
+  // Set risk overlay mode (manual override)
+  const setRiskMode = async (mode, reason) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/risk/overlay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, reason })
+      });
+      if (response.ok) {
+        addLog('INFO', `Risk override: ${mode}`);
+        await fetchRiskOverlay();
+      } else {
+        addLog('WARN', 'Failed to set risk mode');
+      }
+    } catch (error) {
+      addLog('WARN', `Override failed: ${error.message}`);
+    }
+  };
+
   // Toggle watchdog on/off
   const toggleWatchdog = async () => {
     try {
@@ -712,6 +850,13 @@ function App() {
   useEffect(() => {
     fetchStreamHealth();
     const interval = setInterval(fetchStreamHealth, 10000); // Every 10 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch risk overlay status periodically
+  useEffect(() => {
+    fetchRiskOverlay();
+    const interval = setInterval(fetchRiskOverlay, 15000); // Every 15 seconds
     return () => clearInterval(interval);
   }, []);
 
@@ -1204,6 +1349,322 @@ function App() {
           <HistoryDashboard />
         ) : (
           <>
+            {/* ═══════════════════════════════════════════════════════════════════
+                RISK OVERLAY BANNER - Command Center Alert System
+            ═══════════════════════════════════════════════════════════════════ */}
+            {(() => {
+              const staleMs = Math.max(15000, (autoRefreshInterval || 5) * 1000 * 3);
+              const isStale = riskOverlayFetch.lastFetchedAt != null
+                ? (Date.now() - riskOverlayFetch.lastFetchedAt) > staleMs
+                : true;
+              const overlayOk = riskOverlayFetch.status === 'ok' && !isStale;
+              const displayMode = overlayOk ? (riskOverlay.mode || 'NORMAL') : 'UNKNOWN';
+              const stageIdx0 = Number.isFinite(riskOverlay?.recovery?.stage) ? riskOverlay.recovery.stage : null; // 0-indexed from backend
+              const displayStage = (overlayOk && displayMode === 'RECOVERY' && stageIdx0 != null) ? (stageIdx0 + 1) : null; // human-friendly 1..4
+
+              return (
+            <div
+              className={`risk-banner ${overlayOk ? `risk-banner-${(displayMode || 'NORMAL').toLowerCase()}` : 'risk-banner-unavailable'}`}
+              onClick={() => setRiskOverlayExpanded(!riskOverlayExpanded)}
+            >
+              <div className="risk-banner-content">
+                {/* Mode Badge */}
+                <div className="risk-mode-badge">
+                  <span className="risk-mode-icon">
+                    {displayMode === 'RISK_OFF' ? '⚠️' : displayMode === 'RECOVERY' ? '🔄' : displayMode === 'NORMAL' ? '🛡️' : '❓'}
+                  </span>
+                  <span className="risk-mode-text">{displayMode}</span>
+                </div>
+
+                {/* Duration */}
+                <div className="risk-duration">
+                  <span className="risk-duration-label">Since</span>
+                  <span className="risk-duration-value">
+                    {overlayOk && riskOverlay.mode_duration_minutes != null
+                      ? riskOverlay.mode_duration_minutes < 60
+                        ? `${Math.round(riskOverlay.mode_duration_minutes)}m`
+                        : `${(riskOverlay.mode_duration_minutes / 60).toFixed(1)}h`
+                      : '--'}
+                  </span>
+                </div>
+
+                {/* Status Text */}
+                <div className="risk-status-text">
+                  {!overlayOk && <span className="risk-unavailable-text">API disconnected</span>}
+                  {overlayOk && displayMode === 'RISK_OFF' && 'Buys BLOCKED'}
+                  {overlayOk && displayMode === 'RECOVERY' && `Size: ${(riskOverlay.position_multiplier || 1).toFixed(2)}x`}
+                  {overlayOk && displayMode === 'NORMAL' && 'Full trading enabled'}
+                </div>
+
+                {/* Telemetry Summary (shown when not NORMAL) */}
+                {overlayOk && displayMode !== 'NORMAL' && riskOverlay.telemetry?.avoided_buys_notional > 0 && (
+                  <div className="risk-protected-badge">
+                    <span className="risk-protected-icon">💰</span>
+                    <span className="risk-protected-value">
+                      ${(riskOverlay.telemetry.avoided_buys_notional + (riskOverlay.telemetry.cancelled_limits_notional || 0)).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                    </span>
+                    <span className="risk-protected-label">protected</span>
+                  </div>
+                )}
+
+                {/* Manual Override Indicator */}
+                {riskOverlay.manual_override && (
+                  <div className="risk-override-badge">
+                    <span className="risk-override-icon">👤</span>
+                    <span className="risk-override-text">Manual</span>
+                  </div>
+                )}
+
+                {/* Expand/Collapse Chevron */}
+                <div className="risk-expand-chevron">
+                  <svg
+                    className={`risk-chevron-icon ${riskOverlayExpanded ? 'expanded' : ''}`}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                  </svg>
+                </div>
+              </div>
+
+              {/* Trigger Reasons (shown inline when RISK_OFF) */}
+              {overlayOk && displayMode === 'RISK_OFF' && riskOverlay.trigger_reasons?.length > 0 && (
+                <div className="risk-triggers-inline">
+                  <span className="risk-triggers-label">Triggers:</span>
+                  {riskOverlay.trigger_reasons.slice(0, 3).map((reason, idx) => (
+                    <span key={idx} className="risk-trigger-chip">{reason}</span>
+                  ))}
+                </div>
+              )}
+
+              {/* Recovery Progress (shown inline when RECOVERY) */}
+              {overlayOk && displayMode === 'RECOVERY' && riskOverlay.recovery && displayStage != null && (
+                <div className="risk-recovery-inline">
+                  <span className="risk-recovery-stage">
+                    Stage {displayStage}/4
+                  </span>
+                  <div className="risk-recovery-bar-mini">
+                    <div
+                      className="risk-recovery-fill-mini"
+                      style={{ width: `${Math.min((riskOverlay.recovery.bars_in_stage / 10) * 100, 100)}%` }}
+                    />
+                  </div>
+                  <span className="risk-recovery-bars">
+                    {riskOverlay.recovery.bars_in_stage}/10 bars
+                  </span>
+                </div>
+              )}
+            </div>
+              );
+            })()}
+
+            {/* ═══════════════════════════════════════════════════════════════════
+                RISK OVERLAY EXPANDED PANEL
+            ═══════════════════════════════════════════════════════════════════ */}
+            {riskOverlayExpanded && (
+              <div className="risk-expanded-panel">
+                <div className="risk-panel-grid">
+                  {/* Triggers Section - Visual Threshold Gauges */}
+                  <div className="risk-panel-section risk-triggers">
+                    <div className="risk-section-header">
+                      <span className="risk-section-icon">⚡</span>
+                      <span className="risk-section-title">Trigger Levels</span>
+                    </div>
+                    <div className="risk-triggers-gauges">
+                      {/* Momentum Gauge - negative values, threshold at -1.5% */}
+                      <TriggerGauge
+                        label="Momentum"
+                        value={riskOverlay.current_signals?.momentum || 0}
+                        threshold={riskOverlay.thresholds?.momentum || -0.015}
+                        format={(v) => `${(v * 100).toFixed(2)}%`}
+                        invert={true}
+                      />
+
+                      {/* Correlation Gauge - 0 to 1, threshold at 0.90 */}
+                      <TriggerGauge
+                        label="Correlation"
+                        value={riskOverlay.current_signals?.correlation || 0}
+                        threshold={riskOverlay.thresholds?.correlation || 0.90}
+                        max={1.0}
+                        format={(v) => v.toFixed(2)}
+                      />
+
+                      {/* ADX Gauge - 0 to 100, threshold at 35 */}
+                      <TriggerGauge
+                        label="ADX"
+                        value={riskOverlay.current_signals?.adx || 0}
+                        threshold={riskOverlay.thresholds?.adx || 35}
+                        max={60}
+                        format={(v) => v.toFixed(0)}
+                        direction={riskOverlay.current_signals?.adx_direction}
+                      />
+
+                      {/* Active trigger reasons as chips below gauges */}
+                      {riskOverlay.trigger_reasons?.length > 0 && (
+                        <div className="risk-active-triggers">
+                          <span className="risk-active-label">Active:</span>
+                          {riskOverlay.trigger_reasons.map((reason, idx) => (
+                            <span key={idx} className="risk-trigger-chip-small">{reason}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Telemetry Section */}
+                  <div className="risk-panel-section risk-telemetry">
+                    <div className="risk-section-header">
+                      <span className="risk-section-icon">📊</span>
+                      <span className="risk-section-title">Protection Stats</span>
+                    </div>
+                    <div className="risk-telemetry-grid">
+                      <div className="risk-telemetry-item">
+                        <span className="risk-telemetry-value">
+                          ${(riskOverlay.telemetry?.avoided_buys_notional || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                        <span className="risk-telemetry-label">Buys Avoided</span>
+                        <span className="risk-telemetry-count">{riskOverlay.telemetry?.avoided_buys_count || 0} orders</span>
+                      </div>
+                      <div className="risk-telemetry-item">
+                        <span className="risk-telemetry-value">
+                          ${(riskOverlay.telemetry?.cancelled_limits_notional || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                        <span className="risk-telemetry-label">Limits Cancelled</span>
+                        <span className="risk-telemetry-count">{riskOverlay.telemetry?.cancelled_limits_count || 0} orders</span>
+                      </div>
+                      <div className="risk-telemetry-item">
+                        <span className="risk-telemetry-value">{riskOverlay.telemetry?.rebalances_blocked_count || 0}</span>
+                        <span className="risk-telemetry-label">Rebalances Blocked</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Recovery Progress Section (only in RECOVERY mode) */}
+                  {riskOverlay.mode === 'RECOVERY' && riskOverlay.recovery && (
+                    <div className="risk-panel-section risk-recovery-section">
+                      <div className="risk-section-header">
+                        <span className="risk-section-icon">🔄</span>
+                        <span className="risk-section-title">Recovery Progress</span>
+                      </div>
+                      <div className="risk-recovery-content">
+                        <div className="risk-recovery-stages">
+                          {[1, 2, 3, 4].map((stage) => (
+                            <div
+                              key={stage}
+                              className={`risk-stage ${
+                                stage < (riskOverlay.recovery.stage + 1) ? 'completed'
+                                : stage === (riskOverlay.recovery.stage + 1) ? 'active'
+                                : 'pending'
+                              }`}
+                            >
+                              <span className="risk-stage-number">{stage}</span>
+                              <span className="risk-stage-mult">
+                                {stage === 1 ? '0.25x' : stage === 2 ? '0.50x' : stage === 3 ? '0.75x' : '1.0x'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="risk-recovery-bar">
+                          <div
+                            className="risk-recovery-fill"
+                            style={{ width: `${Math.min((riskOverlay.recovery.bars_in_stage / 10) * 100, 100)}%` }}
+                          />
+                        </div>
+                        <div className="risk-recovery-info">
+                          <span>{riskOverlay.recovery.bars_in_stage}/10 bars in current stage</span>
+                          <span>Total: {riskOverlay.recovery.total_bars_in_recovery} bars</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Exposure Section */}
+                  <div className="risk-panel-section risk-exposure-section">
+                    <div className="risk-section-header">
+                      <span className="risk-section-icon">📈</span>
+                      <span className="risk-section-title">Exposure Caps</span>
+                    </div>
+                    <div className="risk-exposure-content">
+                      <div className="risk-exposure-row">
+                        <span className="risk-exposure-label">Normal Cap</span>
+                        <div className="risk-exposure-bar-container">
+                          <div
+                            className="risk-exposure-bar normal"
+                            style={{ width: `${(riskOverlay.caps?.normal_exposure || 0.70) * 100}%` }}
+                          />
+                        </div>
+                        <span className="risk-exposure-value">{((riskOverlay.caps?.normal_exposure || 0.70) * 100).toFixed(0)}%</span>
+                      </div>
+                      <div className="risk-exposure-row">
+                        <span className="risk-exposure-label">Risk-Off Cap</span>
+                        <div className="risk-exposure-bar-container">
+                          <div
+                            className="risk-exposure-bar risk-off"
+                            style={{ width: `${(riskOverlay.caps?.risk_off_exposure || 0.40) * 100}%` }}
+                          />
+                        </div>
+                        <span className="risk-exposure-value">{((riskOverlay.caps?.risk_off_exposure || 0.40) * 100).toFixed(0)}%</span>
+                      </div>
+                      {riskOverlay.mode !== 'NORMAL' && (
+                        <div className="risk-exposure-row active">
+                          <span className="risk-exposure-label">Position Mult</span>
+                          <div className="risk-exposure-bar-container">
+                            <div
+                              className="risk-exposure-bar current"
+                              style={{ width: `${(riskOverlay.position_multiplier || 1) * 100}%` }}
+                            />
+                          </div>
+                          <span className="risk-exposure-value">{((riskOverlay.position_multiplier || 1) * 100).toFixed(0)}%</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Manual Override Controls */}
+                  <div className="risk-panel-section risk-controls">
+                    <div className="risk-section-header">
+                      <span className="risk-section-icon">🎛️</span>
+                      <span className="risk-section-title">Manual Override</span>
+                    </div>
+                    <div className="risk-control-buttons">
+                      <button
+                        className={`risk-control-btn normal ${riskOverlay.mode === 'NORMAL' && !riskOverlay.manual_override ? 'active' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); setRiskMode('NORMAL', 'Dashboard manual override'); }}
+                      >
+                        <span className="risk-btn-icon">🛡️</span>
+                        <span className="risk-btn-text">Force NORMAL</span>
+                      </button>
+                      <button
+                        className={`risk-control-btn risk-off ${riskOverlay.mode === 'RISK_OFF' && riskOverlay.manual_override ? 'active' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); setRiskMode('RISK_OFF', 'Dashboard manual override'); }}
+                      >
+                        <span className="risk-btn-icon">⚠️</span>
+                        <span className="risk-btn-text">Force RISK_OFF</span>
+                      </button>
+                      {riskOverlay.manual_override && (
+                        <button
+                          className="risk-control-btn clear"
+                          onClick={(e) => { e.stopPropagation(); setRiskMode('CLEAR', 'Dashboard clear override'); }}
+                        >
+                          <span className="risk-btn-icon">↩️</span>
+                          <span className="risk-btn-text">Clear Override</span>
+                        </button>
+                      )}
+                    </div>
+                    {riskOverlay.manual_override && (
+                      <div className="risk-override-info">
+                        <span className="risk-override-detail">
+                          Override: {riskOverlay.manual_override.mode} by {riskOverlay.manual_override.reason}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* ═══════════════════════════════════════════════════════════════════
                 HEALTH STATUS PANEL
             ═══════════════════════════════════════════════════════════════════ */}
@@ -2486,14 +2947,13 @@ function App() {
                     <span className="card-title">Activity</span>
                   </div>
                   <div className="card-body h-full overflow-hidden">
-                    <div className="log-panel h-full overflow-y-auto">
+                    <div ref={logsContainerRef} className="log-panel h-full overflow-y-auto">
                       {logs.map((log, i) => (
                         <div key={i} className={`log-entry ${log.type.toLowerCase()}`}>
                           <span className="log-timestamp">{log.timestamp}</span>
                           <span>{log.message}</span>
                         </div>
                       ))}
-                      <div ref={logsEndRef} />
                     </div>
                   </div>
                 </div>

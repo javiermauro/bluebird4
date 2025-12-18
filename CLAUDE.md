@@ -51,6 +51,7 @@ ls /tmp/bluebird/*.pid                     # Running services
 - **`src/api/server.py`** - FastAPI server with WebSocket for real-time dashboard updates. Runs the grid bot via `run_grid_bot()`.
 - **`src/execution/bot_grid.py`** - Grid trading bot implementation. Handles order execution, risk controls, and state management.
 - **`src/strategy/grid_trading.py`** - Grid trading strategy logic. Creates grid levels, tracks fills, calculates profits.
+- **`src/strategy/risk_overlay.py`** - Risk overlay state machine (NORMAL/RISK_OFF/RECOVERY). Provides crash protection.
 - **`src/database/db.py`** - SQLite database for persistent trade/equity/order storage at `data/bluebird.db`.
 - **`src/utils/process_lock.py`** - Single-instance protection using file locks in `/tmp/bluebird/`.
 - **`config_ultra.py`** - All trading configuration (symbols, risk limits, grid settings).
@@ -66,6 +67,7 @@ ls /tmp/bluebird/*.pid                     # Running services
 ### State Persistence
 - **Grid state**: `/tmp/bluebird-grid-state.json`
 - **Risk state**: `/tmp/bluebird-risk-state.json`
+- **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
 - **Daily equity**: `/tmp/bluebird-daily-equity.json`
 - **Database**: `data/bluebird.db`
 - **Lock files**: `/tmp/bluebird/*.lock`, `/tmp/bluebird/*.pid`
@@ -80,6 +82,91 @@ All settings in `config_ultra.py`:
 Environment variables in `.env`:
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` - Trading credentials
 - `TWILIO_*` - SMS notification credentials
+
+## Risk Overlay (Crash Protection)
+
+The Risk Overlay is a state machine that provides crash protection by blocking risky actions during market crashes and gradually re-entering after stability returns.
+
+### State Machine Modes
+
+| Mode | Description | Buy Orders | Rebalance-Down | Position Size |
+|------|-------------|------------|----------------|---------------|
+| **NORMAL** | Full trading | Allowed | Allowed | 100% |
+| **RISK_OFF** | Crash protection | BLOCKED | BLOCKED | 0% |
+| **RECOVERY** | Gradual re-entry | Allowed (reduced) | BLOCKED | 25-100% (ramping) |
+
+### Trigger Signals (2-of-3 required)
+
+RISK_OFF activates when **2 or more** of these signals fire:
+
+1. **Momentum Shock**: Returns < -1.5% (`RISK_OFF_MOMENTUM_THRESHOLD`)
+2. **ADX Downtrend**: ADX > 35 AND direction == "down" (`RISK_OFF_ADX_THRESHOLD`)
+3. **Correlation Spike**: Max correlation > 0.90 (`RISK_OFF_CORRELATION_THRESHOLD`)
+
+Optional (disabled by default):
+- **Drawdown Velocity**: Equity declining > 2%/hour (`RISK_OFF_DRAWDOWN_VELOCITY_ENABLED`)
+
+### RISK_OFF Behavior
+
+When RISK_OFF activates:
+1. All new BUY orders are blocked
+2. Grid-owned BUY limit orders are cancelled (safety: won't cancel untracked orders)
+3. Rebalance-down is blocked
+4. All SELL orders are ALLOWED (override other filters)
+5. SMS alert is sent
+
+### RECOVERY Ramp
+
+After RISK_OFF holds for 20 minutes and stability gate passes:
+1. **Stage 0**: 25% position size (10 bars to advance)
+2. **Stage 1**: 50% position size (10 bars to advance)
+3. **Stage 2**: 75% position size (10 bars to advance)
+4. **Stage 3**: 100% position size → NORMAL
+
+Stability gate requires:
+- Momentum > -0.5%
+- Correlation < 0.85
+- No new price lows
+
+**Relapse**: If triggers fire during RECOVERY → snap back to RISK_OFF immediately.
+
+### API Endpoints
+
+```bash
+# Get current overlay status
+curl http://localhost:8000/api/risk/overlay
+
+# Get telemetry ($ amounts protected)
+curl http://localhost:8000/api/risk/overlay/telemetry
+
+# Manual override to RISK_OFF
+curl -X POST http://localhost:8000/api/risk/overlay \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "RISK_OFF", "reason": "Manual protection"}'
+
+# Clear manual override (return to automatic)
+curl -X POST http://localhost:8000/api/risk/overlay \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "clear"}'
+```
+
+### Config Settings
+
+In `config_ultra.py`:
+```python
+RISK_OVERLAY_ENABLED = True
+RISK_OFF_TRIGGERS_REQUIRED = 2
+RISK_OFF_MIN_HOLD_MINUTES = 20
+RISK_OFF_MOMENTUM_THRESHOLD = -0.015
+RISK_OFF_ADX_THRESHOLD = 35
+RISK_OFF_CORRELATION_THRESHOLD = 0.90
+RECOVERY_POSITION_RAMP = [0.25, 0.5, 0.75, 1.0]
+```
+
+### State Persistence
+
+- **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
+- Telemetry tracks $ amounts: `avoided_buys_notional`, `cancelled_limits_notional`
 
 ## Important Constraints
 
@@ -124,6 +211,9 @@ Quarantined fills are stored in `unmatched_fills` for audit but won't be reproce
 Key endpoints on `http://localhost:8000`:
 - `GET /health` - Service health and regime
 - `GET /api/risk/status` - Current equity, daily P/L, drawdown
+- `GET /api/risk/overlay` - Risk overlay mode, triggers, telemetry
+- `GET /api/risk/overlay/telemetry` - $ amounts of buys avoided/cancelled
+- `POST /api/risk/overlay` - Manual override (NORMAL, RISK_OFF, or clear)
 - `GET /api/grid/status` - Grid levels and fill status
 - `GET /api/db/stats` - Database statistics
 - `GET /api/db/reconcile` - Sync database with Alpaca

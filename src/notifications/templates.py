@@ -165,3 +165,88 @@ def format_startup_message(config_summary: str) -> str:
 def format_shutdown_message(reason: str = "Manual shutdown") -> str:
     """Format shutdown notification."""
     return f"BLUEBIRD Notifier Stopped\n{reason}"
+
+
+def format_risk_off_entry(overlay_status: Dict[str, Any]) -> str:
+    """
+    Format RISK_OFF entry alert.
+
+    Sent when the system enters crash protection mode.
+    """
+    reasons = overlay_status.get('trigger_reasons', [])
+    reasons_str = ', '.join(reasons) if reasons else 'Multi-signal trigger'
+
+    telemetry = overlay_status.get('telemetry', {})
+    avoided = telemetry.get('avoided_buys_notional', 0)
+
+    msg = "BLUEBIRD RISK_OFF\n"
+    msg += "Crash protection ACTIVE\n\n"
+    msg += f"Triggers: {reasons_str}\n"
+    msg += "Actions:\n"
+    msg += "- All buys BLOCKED\n"
+    msg += "- Buy limits CANCELLED\n"
+    msg += "- Rebalance-down BLOCKED\n"
+    msg += "- Sells still allowed\n\n"
+
+    if avoided > 0:
+        msg += f"(${avoided:,.0f} in buys avoided so far)"
+
+    return msg
+
+
+def format_risk_off_exit(overlay_status: Dict[str, Any], to_mode: str) -> str:
+    """
+    Format RISK_OFF exit alert.
+
+    Sent when exiting crash protection (to RECOVERY or NORMAL).
+    """
+    telemetry = overlay_status.get('telemetry', {})
+    avoided = telemetry.get('avoided_buys_notional', 0)
+    cancelled = telemetry.get('cancelled_limits_notional', 0)
+    duration = overlay_status.get('mode_duration_minutes', 0)
+
+    if to_mode == "RECOVERY":
+        msg = "BLUEBIRD RECOVERY\n"
+        msg += "Entering recovery mode\n\n"
+
+        recovery = overlay_status.get('recovery', {})
+        if recovery:
+            mult = recovery.get('stage_multiplier', 0.25)
+            msg += f"Position size: {mult:.0%} (ramping up)\n"
+
+        msg += "Buys allowed (reduced size)\n"
+        msg += "Rebalance-down still blocked\n\n"
+    else:  # NORMAL
+        msg = "BLUEBIRD NORMAL\n"
+        msg += "Full trading resumed\n\n"
+        msg += "All restrictions lifted\n\n"
+
+    msg += f"RISK_OFF duration: {duration:.0f} min\n"
+
+    total_protected = avoided + cancelled
+    if total_protected > 0:
+        msg += f"Protected ${total_protected:,.0f} from crash exposure"
+
+    return msg
+
+
+def format_recovery_to_normal(overlay_status: Dict[str, Any]) -> str:
+    """
+    Format RECOVERY -> NORMAL transition alert.
+
+    Sent when fully exiting recovery and returning to normal trading.
+    """
+    telemetry = overlay_status.get('telemetry', {})
+    avoided = telemetry.get('avoided_buys_notional', 0)
+    cancelled = telemetry.get('cancelled_limits_notional', 0)
+
+    msg = "BLUEBIRD NORMAL\n"
+    msg += "Full trading resumed\n\n"
+    msg += "Recovery complete\n"
+    msg += "All restrictions lifted\n\n"
+
+    total_protected = avoided + cancelled
+    if total_protected > 0:
+        msg += f"Total protected: ${total_protected:,.0f}"
+
+    return msg

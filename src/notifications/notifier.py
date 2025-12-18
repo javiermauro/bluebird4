@@ -84,6 +84,10 @@ class NotificationService:
         self.last_daily_summary_date: Optional[datetime] = None
         self.starting_equity: Optional[float] = None
 
+        # Risk overlay state tracking
+        self.last_risk_overlay_mode: Optional[str] = None
+        self.risk_overlay_alert_sent = False
+
         # Watchdog state - detect stale data (bot stream disconnected)
         self.last_bot_update: Optional[datetime] = None
         self.stale_alert_sent = False
@@ -410,6 +414,76 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Failed to check bot health: {e}")
 
+    def check_risk_overlay(self, stats: Dict[str, Any]) -> None:
+        """
+        Check for risk overlay mode transitions and send alerts.
+
+        Monitors RISK_OFF entry/exit to notify user of crash protection status.
+        """
+        # Try to get risk overlay status from stats (broadcast data)
+        overlay = stats.get('risk_overlay')
+
+        if not overlay:
+            # Fall back to API endpoint
+            try:
+                response = requests.get(
+                    f"{self.config.bot_api_url}/api/risk/overlay",
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    overlay = response.json()
+            except Exception as e:
+                logger.debug(f"Could not fetch risk overlay status: {e}")
+                return
+
+        if not overlay:
+            return
+
+        current_mode = overlay.get('mode', 'NORMAL')
+
+        # First run - just initialize state
+        if self.last_risk_overlay_mode is None:
+            self.last_risk_overlay_mode = current_mode
+            logger.info(f"Risk overlay initialized: {current_mode}")
+            return
+
+        # Check for mode transitions
+        if current_mode != self.last_risk_overlay_mode:
+            logger.warning(f"Risk overlay mode changed: {self.last_risk_overlay_mode} -> {current_mode}")
+
+            # Entering RISK_OFF - crash protection activated
+            if current_mode == "RISK_OFF":
+                message = templates.format_risk_off_entry(overlay)
+                logger.warning("RISK_OFF entered - sending alert")
+                self.send_sms(message, force=True, sms_type="alert")  # Force send even in quiet hours
+
+            # Exiting RISK_OFF -> RECOVERY
+            elif self.last_risk_overlay_mode == "RISK_OFF" and current_mode == "RECOVERY":
+                message = templates.format_risk_off_exit(overlay, "RECOVERY")
+                logger.info("Entering RECOVERY from RISK_OFF")
+                self.send_sms(message, force=True, sms_type="alert")
+
+            # Exiting RISK_OFF -> NORMAL (direct, skipped recovery)
+            elif self.last_risk_overlay_mode == "RISK_OFF" and current_mode == "NORMAL":
+                message = templates.format_risk_off_exit(overlay, "NORMAL")
+                logger.info("Returning to NORMAL from RISK_OFF")
+                self.send_sms(message, force=True, sms_type="alert")
+
+            # Exiting RECOVERY -> NORMAL
+            elif self.last_risk_overlay_mode == "RECOVERY" and current_mode == "NORMAL":
+                message = templates.format_recovery_to_normal(overlay)
+                logger.info("Recovery complete - returning to NORMAL")
+                self.send_sms(message, sms_type="alert")
+
+            # Relapse: RECOVERY -> RISK_OFF
+            elif self.last_risk_overlay_mode == "RECOVERY" and current_mode == "RISK_OFF":
+                message = templates.format_risk_off_entry(overlay)
+                message = message.replace("Crash protection ACTIVE", "RELAPSE - back to RISK_OFF")
+                logger.warning("Relapse during RECOVERY - back to RISK_OFF")
+                self.send_sms(message, force=True, sms_type="alert")
+
+            self.last_risk_overlay_mode = current_mode
+
     def initialize_starting_equity(self, stats: Dict[str, Any]) -> None:
         """Initialize starting equity from stats or risk data."""
         if self.starting_equity is None:
@@ -467,6 +541,7 @@ class NotificationService:
                     # Run all checks
                     self.check_for_new_trades(stats)
                     self.check_risk_alerts(stats)
+                    self.check_risk_overlay(stats)  # Risk overlay mode transitions
                     self.check_daily_summary(stats)
                     self.check_stale_data(stats)
 

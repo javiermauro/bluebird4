@@ -46,6 +46,17 @@
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
   --shadow-gold: 0 4px 20px rgba(212, 175, 55, 0.15);
+
+  /* Risk Overlay Colors */
+  --risk-normal: #3ecf8e;
+  --risk-normal-bg: rgba(62, 207, 142, 0.08);
+  --risk-normal-glow: rgba(62, 207, 142, 0.25);
+  --risk-recovery: #f0b429;
+  --risk-recovery-bg: rgba(240, 180, 41, 0.1);
+  --risk-recovery-glow: rgba(240, 180, 41, 0.3);
+  --risk-off: #ff6b6b;
+  --risk-off-bg: rgba(255, 107, 107, 0.12);
+  --risk-off-glow: rgba(255, 107, 107, 0.35);
 }
 
 * {
@@ -2575,6 +2586,1159 @@ input:focus {
   color: var(--text-muted);
   font-style: italic;
   padding: 1.5rem;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RISK OVERLAY - Command Center Alert System
+═══════════════════════════════════════════════════════════════════════════ */
+
+.risk-banner {
+  background: var(--midnight-surface);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.risk-banner::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 12px 12px 0 0;
+}
+
+/* NORMAL Mode */
+.risk-banner-normal {
+  border-color: rgba(62, 207, 142, 0.15);
+}
+
+.risk-banner-normal::before {
+  background: linear-gradient(90deg, transparent, var(--risk-normal), transparent);
+}
+
+/* RECOVERY Mode */
+.risk-banner-recovery {
+  border-color: rgba(240, 180, 41, 0.2);
+  background: linear-gradient(135deg, var(--midnight-surface), var(--risk-recovery-bg));
+  animation: recovery-pulse 3s ease-in-out infinite;
+}
+
+.risk-banner-recovery::before {
+  background: linear-gradient(90deg, var(--risk-recovery), var(--gold-primary), var(--risk-recovery));
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes recovery-pulse {
+  0%, 100% { box-shadow: 0 0 20px var(--risk-recovery-glow); }
+  50% { box-shadow: 0 0 35px var(--risk-recovery-glow), 0 0 60px rgba(240, 180, 41, 0.15); }
+}
+
+/* RISK_OFF Mode */
+.risk-banner-risk-off {
+  border-color: rgba(255, 107, 107, 0.25);
+  background: linear-gradient(135deg, var(--midnight-surface), var(--risk-off-bg));
+  animation: risk-off-pulse 2s ease-in-out infinite;
+}
+
+.risk-banner-risk-off::before {
+  background: linear-gradient(90deg, var(--risk-off), #ff8a8a, var(--risk-off));
+  height: 4px;
+}
+
+@keyframes risk-off-pulse {
+  0%, 100% { box-shadow: 0 0 25px var(--risk-off-glow); }
+  50% { box-shadow: 0 0 45px var(--risk-off-glow), 0 0 80px rgba(255, 107, 107, 0.2); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+/* Banner Header */
+.risk-banner-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.risk-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.risk-mode-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.risk-mode-badge .mode-icon {
+  font-size: 1.25rem;
+}
+
+.risk-mode-badge.normal { color: var(--risk-normal); }
+.risk-mode-badge.recovery { color: var(--risk-recovery); }
+.risk-mode-badge.risk-off { color: var(--risk-off); }
+
+.risk-mode-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-right: 0.5rem;
+}
+
+.risk-duration {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.risk-status-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.risk-status-text.blocked {
+  color: var(--risk-off);
+  font-weight: 500;
+}
+
+.risk-status-text.ramping {
+  color: var(--risk-recovery);
+  font-weight: 500;
+}
+
+.risk-banner-chevron {
+  color: var(--text-muted);
+  transition: transform 0.3s ease;
+}
+
+.risk-banner-chevron.expanded {
+  transform: rotate(180deg);
+}
+
+/* Banner Content Layout */
+.risk-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+/* Mode Badge - Enhanced */
+.risk-mode-icon {
+  font-size: 1.1rem;
+}
+
+.risk-mode-text {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.risk-banner-normal .risk-mode-text { color: var(--risk-normal); }
+.risk-banner-recovery .risk-mode-text { color: var(--risk-recovery); }
+.risk-banner-risk_off .risk-mode-text,
+.risk-banner-risk-off .risk-mode-text { color: var(--risk-off); }
+
+/* Duration - Enhanced */
+.risk-duration-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  display: block;
+  text-align: center;
+}
+
+.risk-duration-value {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* Protected Badge */
+.risk-protected-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  background: rgba(62, 207, 142, 0.1);
+  border: 1px solid rgba(62, 207, 142, 0.2);
+}
+
+.risk-protected-icon { font-size: 0.9rem; }
+
+.risk-protected-value {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--risk-normal);
+  font-weight: 600;
+}
+
+.risk-protected-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* Override Badge */
+.risk-override-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(212, 175, 55, 0.15);
+  border: 1px solid rgba(212, 175, 55, 0.25);
+}
+
+.risk-override-icon { font-size: 0.75rem; }
+
+.risk-override-text {
+  font-size: 0.65rem;
+  color: var(--gold-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+/* Expand Chevron */
+.risk-expand-chevron {
+  margin-left: auto;
+  padding: 0.25rem;
+  color: var(--text-muted);
+  transition: color 0.2s ease;
+}
+
+.risk-banner:hover .risk-expand-chevron {
+  color: var(--text-secondary);
+}
+
+.risk-chevron-icon {
+  width: 18px;
+  height: 18px;
+  transition: transform 0.3s ease;
+}
+
+.risk-chevron-icon.expanded {
+  transform: rotate(180deg);
+}
+
+/* Inline Triggers (RISK_OFF mode) */
+.risk-triggers-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.risk-triggers-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.risk-trigger-chip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--risk-off);
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(255, 107, 107, 0.1);
+  border: 1px solid rgba(255, 107, 107, 0.2);
+}
+
+/* Inline Recovery Progress */
+.risk-recovery-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  width: 100%;
+}
+
+.risk-recovery-stage {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--risk-recovery);
+  font-weight: 500;
+}
+
+.risk-recovery-bar-mini {
+  flex: 1;
+  max-width: 120px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.risk-recovery-fill-mini {
+  height: 100%;
+  background: linear-gradient(90deg, var(--risk-recovery), var(--gold-primary));
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.risk-recovery-bars {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* Expanded Panel */
+.risk-expanded-panel {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  animation: slideDown 0.3s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.risk-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+/* Panel Sections */
+.risk-panel-section {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 10px;
+  padding: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.risk-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.risk-section-icon {
+  font-size: 0.9rem;
+}
+
+.risk-section-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+/* Triggers List */
+.risk-triggers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.risk-trigger-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 0.25rem 0;
+}
+
+.risk-trigger-item.muted {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.risk-trigger-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--risk-off);
+  flex-shrink: 0;
+}
+
+.risk-trigger-text {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TRIGGER THRESHOLD GAUGES - Visual bars showing proximity to risk thresholds
+═══════════════════════════════════════════════════════════════════════════ */
+
+.risk-triggers-gauges {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.trigger-gauge {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trigger-gauge-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.trigger-gauge-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+.trigger-gauge-direction {
+  font-weight: 700;
+}
+
+.trigger-gauge-direction.down {
+  color: var(--danger);
+}
+
+.trigger-gauge-direction.up {
+  color: var(--success);
+}
+
+.trigger-gauge-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: color 0.3s ease;
+}
+
+.trigger-gauge-value.safe {
+  color: var(--success);
+}
+
+.trigger-gauge-value.warning {
+  color: var(--risk-recovery);
+}
+
+.trigger-gauge-value.danger {
+  color: var(--danger);
+  text-shadow: 0 0 8px var(--danger-glow);
+}
+
+.trigger-gauge-bar {
+  height: 10px;
+  background: var(--midnight-elevated);
+  border-radius: 5px;
+  overflow: visible;
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Threshold marker line */
+.trigger-gauge-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 3px;
+  background: var(--danger);
+  border-radius: 2px;
+  box-shadow: 0 0 8px var(--danger), 0 0 4px var(--danger);
+  z-index: 2;
+  transform: translateX(-50%);
+}
+
+/* Threshold marker glow pulse when value is near */
+.trigger-gauge-bar:has(.trigger-gauge-fill.warning) .trigger-gauge-threshold,
+.trigger-gauge-bar:has(.trigger-gauge-fill.danger) .trigger-gauge-threshold {
+  animation: threshold-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes threshold-pulse {
+  0%, 100% { box-shadow: 0 0 8px var(--danger), 0 0 4px var(--danger); }
+  50% { box-shadow: 0 0 16px var(--danger), 0 0 8px var(--danger); }
+}
+
+/* Current value fill */
+.trigger-gauge-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease, background 0.3s ease;
+  position: relative;
+}
+
+/* Safe zone (green) */
+.trigger-gauge-fill.safe {
+  background: linear-gradient(90deg, var(--success), var(--success-muted));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Warning zone (yellow) - approaching threshold */
+.trigger-gauge-fill.warning {
+  background: linear-gradient(90deg, var(--risk-recovery), #e09500);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 0 8px var(--risk-recovery-glow);
+}
+
+/* Danger zone (red) - past threshold */
+.trigger-gauge-fill.danger {
+  background: linear-gradient(90deg, var(--danger-muted), var(--danger));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 12px var(--danger-glow);
+  animation: danger-glow 2s ease-in-out infinite;
+}
+
+@keyframes danger-glow {
+  0%, 100% { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 8px var(--danger-glow); }
+  50% { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 16px var(--danger-glow); }
+}
+
+/* Scale labels below bar */
+.trigger-gauge-scale {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  margin-top: 2px;
+}
+
+.trigger-gauge-min {
+  opacity: 0.6;
+}
+
+.trigger-gauge-threshold-label {
+  color: var(--danger);
+  font-weight: 500;
+}
+
+/* Active triggers chips below gauges */
+.risk-active-triggers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.risk-active-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.risk-trigger-chip-small {
+  padding: 0.15rem 0.4rem;
+  background: var(--risk-off-bg);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--danger);
+}
+
+/* Telemetry Grid */
+.risk-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 0.75rem;
+}
+
+.risk-telemetry-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+
+.risk-telemetry-value {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--risk-normal);
+}
+
+.risk-telemetry-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.risk-telemetry-count {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+/* Recovery Section */
+.risk-recovery-section {
+  grid-column: span 2;
+}
+
+.risk-recovery-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.risk-recovery-stages {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.risk-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  flex: 1;
+  transition: all 0.3s ease;
+}
+
+.risk-stage.completed {
+  background: rgba(62, 207, 142, 0.15);
+  border: 1px solid rgba(62, 207, 142, 0.3);
+}
+
+.risk-stage.active {
+  background: rgba(240, 180, 41, 0.15);
+  border: 1px solid rgba(240, 180, 41, 0.3);
+}
+
+.risk-stage.pending {
+  opacity: 0.5;
+}
+
+.risk-stage-number {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.risk-stage.completed .risk-stage-number { color: var(--risk-normal); }
+.risk-stage.active .risk-stage-number { color: var(--risk-recovery); }
+
+.risk-stage-mult {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.risk-recovery-bar {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.risk-recovery-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--risk-recovery), var(--gold-primary));
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.risk-recovery-info {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* Exposure Section */
+.risk-exposure-section {
+  grid-column: span 2;
+}
+
+.risk-exposure-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.risk-exposure-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.risk-exposure-row.active {
+  padding: 0.4rem;
+  background: rgba(240, 180, 41, 0.1);
+  border-radius: 6px;
+  margin-top: 0.25rem;
+}
+
+.risk-exposure-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  min-width: 80px;
+}
+
+.risk-exposure-bar-container {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.risk-exposure-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.risk-exposure-bar.normal {
+  background: linear-gradient(90deg, var(--risk-normal), rgba(62, 207, 142, 0.6));
+}
+
+.risk-exposure-bar.risk-off {
+  background: linear-gradient(90deg, var(--risk-off), rgba(255, 107, 107, 0.6));
+}
+
+.risk-exposure-bar.current {
+  background: linear-gradient(90deg, var(--risk-recovery), var(--gold-primary));
+}
+
+.risk-exposure-value {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  min-width: 35px;
+  text-align: right;
+}
+
+/* Controls Section */
+.risk-controls {
+  grid-column: span 2;
+}
+
+.risk-control-buttons {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.risk-control-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.risk-control-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.risk-control-btn.normal:hover,
+.risk-control-btn.normal.active {
+  background: rgba(62, 207, 142, 0.15);
+  border-color: rgba(62, 207, 142, 0.3);
+  color: var(--risk-normal);
+}
+
+.risk-control-btn.risk-off:hover,
+.risk-control-btn.risk-off.active {
+  background: rgba(255, 107, 107, 0.15);
+  border-color: rgba(255, 107, 107, 0.3);
+  color: var(--risk-off);
+}
+
+.risk-control-btn.clear:hover {
+  background: rgba(212, 175, 55, 0.15);
+  border-color: rgba(212, 175, 55, 0.3);
+  color: var(--gold-primary);
+}
+
+.risk-btn-icon {
+  font-size: 0.9rem;
+}
+
+.risk-btn-text {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.risk-override-info {
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  background: rgba(212, 175, 55, 0.1);
+  border-radius: 6px;
+  border: 1px solid rgba(212, 175, 55, 0.2);
+}
+
+.risk-override-detail {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--gold-primary);
+}
+
+/* Legacy Triggers Section */
+.risk-triggers {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.risk-triggers-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.5rem;
+}
+
+.risk-trigger-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 0.25rem 0;
+}
+
+.risk-trigger-item::before {
+  content: '•';
+  color: var(--risk-off);
+}
+
+.risk-trigger-value {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--risk-off);
+}
+
+/* Telemetry Section */
+.risk-telemetry {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.risk-telemetry-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.risk-telemetry-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.35rem 0;
+  font-size: 0.8rem;
+}
+
+.risk-telemetry-label {
+  color: var(--text-secondary);
+}
+
+.risk-telemetry-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: var(--risk-normal);
+}
+
+.risk-telemetry-value.protected {
+  color: var(--success);
+}
+
+.risk-telemetry-count {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: 0.25rem;
+}
+
+/* Recovery Progress */
+.risk-recovery-section {
+  background: rgba(240, 180, 41, 0.05);
+  border: 1px solid rgba(240, 180, 41, 0.15);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.risk-recovery-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.risk-recovery-title {
+  font-size: 0.7rem;
+  color: var(--risk-recovery);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.risk-recovery-stage {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  color: var(--risk-recovery);
+  font-weight: 600;
+}
+
+.risk-recovery-progress {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 0.5rem 0;
+}
+
+.risk-recovery-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--risk-recovery), var(--gold-primary));
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.risk-recovery-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.risk-recovery-multiplier {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--risk-recovery);
+  font-weight: 600;
+}
+
+.risk-rebalance-blocked {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+  font-size: 0.75rem;
+  color: var(--risk-off);
+}
+
+/* Manual Override Controls */
+.risk-controls {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.risk-control-btn {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid;
+}
+
+.risk-control-btn.normal {
+  background: rgba(62, 207, 142, 0.1);
+  border-color: rgba(62, 207, 142, 0.3);
+  color: var(--risk-normal);
+}
+
+.risk-control-btn.normal:hover {
+  background: rgba(62, 207, 142, 0.2);
+  box-shadow: 0 0 15px rgba(62, 207, 142, 0.2);
+}
+
+.risk-control-btn.risk-off {
+  background: rgba(255, 107, 107, 0.1);
+  border-color: rgba(255, 107, 107, 0.3);
+  color: var(--risk-off);
+}
+
+.risk-control-btn.risk-off:hover {
+  background: rgba(255, 107, 107, 0.2);
+  box-shadow: 0 0 15px rgba(255, 107, 107, 0.2);
+}
+
+.risk-control-btn.clear {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--text-secondary);
+}
+
+.risk-control-btn.clear:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.risk-override-active {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(212, 175, 55, 0.1);
+  border: 1px solid rgba(212, 175, 55, 0.2);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  color: var(--gold-primary);
+}
+
+/* Exposure Bars */
+.risk-exposure-section {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.risk-exposure-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.75rem;
+}
+
+.exposure-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.exposure-bar-symbol {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.exposure-bar-container {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: visible;
+  position: relative;
+}
+
+.exposure-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.exposure-bar-fill.normal {
+  background: linear-gradient(90deg, var(--risk-normal), #5dd9a3);
+}
+
+.exposure-bar-fill.warning {
+  background: linear-gradient(90deg, var(--risk-recovery), var(--gold-primary));
+}
+
+.exposure-bar-fill.danger {
+  background: linear-gradient(90deg, var(--risk-off), #ff8a8a);
+}
+
+.exposure-bar-cap {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.4);
+  border-radius: 1px;
+}
+
+.exposure-bar-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  width: 85px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.exposure-bar-value.over-cap {
+  color: var(--risk-off);
+  font-weight: 600;
+}
+
+.exposure-total-row {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+}
+
+/* Unavailable State */
+.risk-banner-unavailable {
+  opacity: 0.6;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.risk-banner-unavailable::before {
+  background: linear-gradient(90deg, transparent, var(--text-muted), transparent);
+}
+
+.risk-unavailable-text {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* Responsive */

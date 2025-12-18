@@ -43,6 +43,7 @@ from src.strategy.grid_trading import (
 )
 from src.strategy.regime_detector import RegimeDetector, MarketRegime
 from src.strategy.feature_calculator import FeatureCalculator
+from src.strategy.risk_overlay import RiskOverlay, RiskMode
 
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -198,6 +199,11 @@ class GridTradingBot:
         self.stop_loss_pct = getattr(config, 'GRID_STOP_LOSS_PCT', 0.10)
         self.daily_loss_limit = getattr(config, 'DAILY_LOSS_LIMIT', 0.05)
         self.max_drawdown = getattr(config, 'MAX_DRAWDOWN', 0.10)
+
+        # === RISK OVERLAY (Crash Protection State Machine) ===
+        # Blocks buys and rebalance-down during crashes, gradual re-entry on recovery
+        self.risk_overlay = RiskOverlay(config)
+        logger.info(f"  Risk Overlay: {'ENABLED' if getattr(config, 'RISK_OVERLAY_ENABLED', True) else 'DISABLED'}")
 
         # === LIMIT ORDER SETTINGS (Maker Fee Optimization) ===
         self.use_limit_orders = getattr(config, 'GRID_USE_LIMIT_ORDERS', True)
@@ -1309,9 +1315,12 @@ class GridTradingBot:
         recent = np.mean(prices[-5:])
         previous = np.mean(prices[-10:-5])
 
-        if previous > 0:
+        MIN_PRICE_FOR_MOMENTUM = 0.01  # Avoid division by tiny values
+        if previous > MIN_PRICE_FOR_MOMENTUM:
+            # Result is in PERCENT units: -2.5 means -2.5% (converted to decimal at handoff)
             momentum = (recent - previous) / previous * 100
-            result['momentum'] = round(momentum, 2)
+            momentum = np.clip(momentum, -100.0, 100.0)  # Clamp to [-100%, +100%]
+            result['momentum'] = round(momentum, 2)      # Percent units
 
             # Strong downtrend: don't buy
             if momentum < -1.5:  # More than 1.5% down
@@ -1329,6 +1338,9 @@ class GridTradingBot:
                 result['reason'] = f"Mild downtrend ({momentum:.1f}%)"
             else:
                 result['reason'] = f"Sideways ({momentum:.1f}%)"
+        else:
+            # Denominator too small - set momentum to neutral 0.0 (percent)
+            result['momentum'] = 0.0
 
         return result
 
@@ -2523,6 +2535,89 @@ async def run_blocking(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+async def cancel_grid_buy_limits(bot: GridTradingBot, symbols: list, client) -> int:
+    """
+    Cancel grid-owned BUY limit orders on RISK_OFF entry.
+
+    SAFETY: Only cancels orders that are provably grid-owned by matching
+    Alpaca order IDs against local open_limit_orders tracking.
+    Orders not in local tracking are logged but NOT cancelled.
+
+    Returns:
+        Number of orders cancelled
+    """
+    cancelled = 0
+    total_notional = 0.0
+
+    for symbol in symbols:
+        try:
+            # Get Alpaca open orders for this symbol
+            alpaca_orders = await run_blocking(client.get_open_orders, [symbol])
+
+            for order in alpaca_orders:
+                # Only process BUYs
+                # NOTE: AlpacaClient.get_open_orders returns dicts (not Alpaca order objects)
+                order_side = str(order.get('side', '')).lower() if isinstance(order, dict) else str(getattr(order, 'side', '')).lower()
+                if 'buy' not in order_side:
+                    continue
+
+                order_id = str(order.get('id')) if isinstance(order, dict) else str(getattr(order, 'id', ''))
+                if not order_id:
+                    continue
+
+                # SAFETY: Search open_limit_orders VALUES for this order_id
+                # Keys are symbol:side:level_id, values are OpenLimitOrder dataclass
+                is_grid_owned = False
+                matching_key = None
+
+                for key, tracked in bot.grid_strategy.open_limit_orders.items():
+                    # Use attribute access (dataclass), not dict .get()
+                    if tracked.order_id == order_id and tracked.side == "buy":
+                        is_grid_owned = True
+                        matching_key = key
+                        break
+
+                if is_grid_owned:
+                    # Cancel the order
+                    try:
+                        await run_blocking(client.trading_client.cancel_order_by_id, order_id)
+                        cancelled += 1
+
+                        # Calculate notional for telemetry
+                        if isinstance(order, dict):
+                            order_qty = float(order.get('qty') or order.get('filled_qty') or 0)
+                            order_price = float(order.get('limit_price') or 0)
+                        else:
+                            order_qty = float(getattr(order, 'qty', 0) or getattr(order, 'filled_qty', 0) or 0)
+                            order_price = float(getattr(order, 'limit_price', 0) or 0)
+                        notional = order_qty * order_price
+                        total_notional += notional
+
+                        # Record in overlay telemetry
+                        bot.risk_overlay.record_cancelled_limit(symbol, notional)
+
+                        # Remove from local tracking
+                        del bot.grid_strategy.open_limit_orders[matching_key]
+
+                        logger.info(f"[RISK] Cancelled grid BUY limit {order_id[:8]} for {symbol} (${notional:.2f})")
+
+                    except Exception as e:
+                        logger.error(f"[RISK] Failed to cancel order {order_id}: {e}")
+                else:
+                    # NOT in local tracking - could be manual order or legacy
+                    bot.risk_overlay.record_untracked_buy(symbol, order_id)
+
+        except Exception as e:
+            logger.error(f"[RISK] Error cancelling buy limits for {symbol}: {e}")
+
+    if cancelled > 0:
+        logger.warning(f"[RISK_OFF] Cancelled {cancelled} grid BUY limits (${total_notional:.2f} notional)")
+        # Persist state after cancellations
+        bot.grid_strategy.save_state()
+
+    return cancelled
+
+
 async def run_grid_bot(broadcast_update, broadcast_log):
     """Run the Grid Trading bot."""
     logger.info("Starting BlueBird Grid Trading Bot...")
@@ -2687,6 +2782,60 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
             if regime_status.get('is_strong_trend'):
                 await broadcast_log(f"[REGIME] {symbol}: {regime_status['reason']}")
+
+            # === RISK OVERLAY EVALUATION (Crash Protection) ===
+            # Check for API command files (manual overrides)
+            bot.risk_overlay.check_command_file()
+
+            # Collect signals and evaluate state machine
+            max_corr = max(correlations.values()) if correlations else 0.0
+
+            # Determine ADX direction from regime (TRENDING_DOWN = "down", TRENDING_UP = "up")
+            if current_regime == MarketRegime.TRENDING_DOWN:
+                adx_direction = "down"
+            elif current_regime == MarketRegime.TRENDING_UP:
+                adx_direction = "up"
+            else:
+                adx_direction = "neutral"
+
+            # Build current prices dict for all symbols
+            current_prices = {}
+            for s in bot.symbols:
+                if s in bot.bars and len(bot.bars[s]) > 0:
+                    current_prices[s] = float(bot.bars[s][-1].close)
+
+            # momentum_status['momentum'] is in PERCENT units (e.g., -2.5 means -2.5%)
+            # risk_overlay expects DECIMAL units (e.g., -0.025 means -2.5%)
+            # Convert at this boundary to keep internal logic unchanged
+            momentum_pct = momentum_status.get("momentum", 0)  # Percent: -2.5 = -2.5%
+            momentum_decimal = momentum_pct / 100.0            # Decimal: -0.025 = -2.5%
+
+            overlay_signals = {
+                "momentum": momentum_decimal,  # risk_overlay expects decimal
+                "adx": regime_adx,
+                "adx_direction": adx_direction,
+                "max_correlation": max_corr,
+                "current_prices": current_prices,
+            }
+
+            previous_overlay_mode = bot.risk_overlay.mode
+            overlay_mode = bot.risk_overlay.evaluate(overlay_signals)
+
+            # Log mode transitions
+            if overlay_mode != previous_overlay_mode:
+                await broadcast_log(f"[RISK] Mode changed: {previous_overlay_mode.value} -> {overlay_mode.value}")
+                if overlay_mode == RiskMode.RISK_OFF:
+                    # Cancel grid-owned BUY limits on RISK_OFF entry
+                    await cancel_grid_buy_limits(bot, bot.symbols, client)
+
+            # Get overlay gates
+            overlay_allow_buy, overlay_buy_reason = bot.risk_overlay.allows_buy(symbol)
+            overlay_allow_sell, overlay_sell_reason = bot.risk_overlay.allows_sell(symbol)
+            overlay_position_mult = bot.risk_overlay.get_position_multiplier()
+
+            # In RISK_OFF: override other filters to ALLOW sells (exit opportunities)
+            if overlay_mode == RiskMode.RISK_OFF:
+                regime_allow_sell = True  # Override regime block on sells
 
             # Get current positions (run in thread to avoid blocking event loop)
             try:
@@ -2887,16 +3036,21 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             grid_price = buy_details['price']
                             base_qty = buy_details['quantity']
 
-                            # Apply filters (regime, momentum, allocation)
-                            if not regime_allow_buy:
+                            # Apply filters (regime, momentum, allocation, RISK OVERLAY)
+                            if not overlay_allow_buy:
+                                # RISK OVERLAY GATE - highest priority
+                                notional = buy_details['quantity'] * buy_details['price']
+                                bot.risk_overlay._record_blocked_buy(symbol, notional, overlay_buy_reason)
+                                logger.info(f"[RISK] Blocked resting BUY {symbol}: {overlay_buy_reason}")
+                            elif not regime_allow_buy:
                                 logger.debug(f"[REGIME] Skipping resting BUY {symbol}: {regime_status['reason']}")
                             elif not momentum_status['allow_buy']:
                                 logger.debug(f"[MOM] Skipping resting BUY {symbol}: {momentum_status['reason']}")
                             elif current_allocation >= max_allocation:
                                 logger.debug(f"[ALLOC] Skipping resting BUY {symbol}: {current_allocation:.1%} >= {max_allocation:.1%}")
                             else:
-                                # Apply adjustments
-                                qty = base_qty * time_quality * corr_adjustment
+                                # Apply adjustments (include overlay position multiplier)
+                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult
 
                                 try:
                                     limit_price = round_limit_price(symbol, grid_price, bot.config)
@@ -3048,6 +3202,24 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 )
 
                                 if can_rebalance:
+                                    # === RISK OVERLAY: Check if this is a rebalance-DOWN ===
+                                    # Get current grid center to determine direction
+                                    rebalance_blocked = False
+                                    grid = bot.grid_strategy.grids.get(symbol)
+                                    if grid:
+                                        grid_center = (grid.config.upper_price + grid.config.lower_price) / 2
+                                        is_rebalance_down = current_price < grid_center
+
+                                        # Block rebalance-down in RISK_OFF and RECOVERY
+                                        if is_rebalance_down:
+                                            overlay_allow_rebalance, rebalance_reason = bot.risk_overlay.allows_rebalance_down(symbol)
+                                            if not overlay_allow_rebalance:
+                                                logger.warning(f"[RISK] Blocked rebalance-DOWN for {symbol}: {rebalance_reason}")
+                                                await broadcast_log(f"[RISK] Blocked rebalance-DOWN: {rebalance_reason}")
+                                                # Don't reset counter - keep waiting
+                                                rebalance_blocked = True
+
+                                if can_rebalance and not rebalance_blocked:
                                     # Cancel existing open orders for this symbol before rebalancing
                                     cancelled = 0
                                     for key, order in list(bot.grid_strategy.open_limit_orders.items()):
@@ -3103,8 +3275,14 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             if evaluation.get('mode') == 'resting_limit':
                 pass  # Orders already placed above
             elif action == 'BUY' and order_details and not skip_trading:
-                # Check regime filter first (Smart Grid - avoid buying in strong downtrend)
-                if not regime_allow_buy:
+                # RISK OVERLAY GATE - highest priority (blocks buys in RISK_OFF)
+                if not overlay_allow_buy:
+                    notional = order_details.get('quantity', 0) * order_details.get('price', current_price)
+                    bot.risk_overlay._record_blocked_buy(symbol, notional, overlay_buy_reason)
+                    logger.info(f"[RISK] Blocked market BUY {symbol}: {overlay_buy_reason}")
+                    await broadcast_log(f"[RISK] Blocked BUY: {overlay_buy_reason}")
+                # Check regime filter (Smart Grid - avoid buying in strong downtrend)
+                elif not regime_allow_buy:
                     logger.info(f"[REGIME] Skipping BUY {symbol}: {regime_status['reason']}")
                     await broadcast_log(f"[REGIME] Skipping BUY: {regime_status['reason']}")
                 # Check momentum filter
@@ -3579,7 +3757,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         )
                     },
                     "orders": bot.get_order_health_summary()
-                }
+                },
+                "risk_overlay": bot.risk_overlay.get_status()
             })
 
         await broadcast_log(f"Will subscribe to: {', '.join(symbols)}")

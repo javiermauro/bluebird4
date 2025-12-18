@@ -361,6 +361,40 @@ class UltraConfig:
     }
 
     # =========================================
+    # RISK OVERLAY SETTINGS (Crash Protection)
+    # =========================================
+    # State machine: NORMAL -> RISK_OFF -> RECOVERY -> NORMAL
+    # Prevents "death spiral" of buying into crashes and rebalancing lower
+
+    # Master switch - easy kill switch if anything unexpected
+    RISK_OVERLAY_ENABLED = True
+
+    # RISK_OFF trigger settings (2-of-3 signals required)
+    RISK_OFF_TRIGGERS_REQUIRED = 2  # 2 signals must fire to enter RISK_OFF
+    RISK_OFF_MIN_HOLD_MINUTES = 20  # Minimum time in RISK_OFF before RECOVERY
+
+    # Trigger thresholds
+    RISK_OFF_MOMENTUM_THRESHOLD = -0.015      # Momentum < -1.5% = shock
+    RISK_OFF_ADX_THRESHOLD = 35               # ADX > 35 + direction=down = downtrend
+    RISK_OFF_CORRELATION_THRESHOLD = 0.90     # Correlation > 0.90 = correlated selloff
+
+    # Drawdown velocity (DISABLED by default - can be noisy)
+    RISK_OFF_DRAWDOWN_VELOCITY_ENABLED = False
+    RISK_OFF_DRAWDOWN_VELOCITY = 0.02  # 2% per hour (if enabled)
+
+    # Exposure caps
+    NORMAL_TOTAL_EXPOSURE_CAP = 0.70          # 70% of equity in NORMAL mode
+    RISK_OFF_TOTAL_EXPOSURE_CAP = 0.40        # 40% of equity in RISK_OFF mode
+
+    # RECOVERY settings (gradual re-entry after stability)
+    RECOVERY_STABILITY_BARS = 10              # Bars of stability per stage
+    RECOVERY_MIN_TOTAL_BARS = 30              # Minimum total bars in RECOVERY before NORMAL
+    RECOVERY_ENTRY_MOMENTUM_MIN = -0.005      # Momentum > -0.5% to enter RECOVERY
+    RECOVERY_ADVANCE_MOMENTUM_MIN = 0.0       # Momentum > 0% to advance stages
+    RECOVERY_POSITION_RAMP = [0.25, 0.5, 0.75, 1.0]  # Position size multipliers per stage
+    RECOVERY_NO_NEW_LOW = True                # Require price >= min(last N bars) to advance
+
+    # =========================================
     # LOGGING & MONITORING
     # =========================================
 
