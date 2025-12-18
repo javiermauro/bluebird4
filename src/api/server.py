@@ -1279,11 +1279,11 @@ async def get_risk_overlay_status():
                 state = json.load(f)
 
             # Get thresholds from config
-            from config_ultra import config
+            from config_ultra import Config
             thresholds = {
-                "momentum": getattr(config, "RISK_OFF_MOMENTUM_THRESHOLD", -0.015),
-                "correlation": getattr(config, "RISK_OFF_CORRELATION_THRESHOLD", 0.90),
-                "adx": getattr(config, "RISK_OFF_ADX_THRESHOLD", 35),
+                "momentum": getattr(Config, "RISK_OFF_MOMENTUM_THRESHOLD", -0.015),
+                "correlation": getattr(Config, "RISK_OFF_CORRELATION_THRESHOLD", 0.90),
+                "adx": getattr(Config, "RISK_OFF_ADX_THRESHOLD", 35),
             }
 
             return {
@@ -1307,7 +1307,7 @@ async def get_risk_overlay_status():
             }
         else:
             # No state file yet - overlay not initialized
-            from config_ultra import config
+            from config_ultra import Config
             return {
                 "mode": "NORMAL",
                 "mode_entered_at": None,
@@ -1334,9 +1334,9 @@ async def get_risk_overlay_status():
                     "adx_direction": "neutral"
                 },
                 "thresholds": {
-                    "momentum": getattr(config, "RISK_OFF_MOMENTUM_THRESHOLD", -0.015),
-                    "correlation": getattr(config, "RISK_OFF_CORRELATION_THRESHOLD", 0.90),
-                    "adx": getattr(config, "RISK_OFF_ADX_THRESHOLD", 35),
+                    "momentum": getattr(Config, "RISK_OFF_MOMENTUM_THRESHOLD", -0.015),
+                    "correlation": getattr(Config, "RISK_OFF_CORRELATION_THRESHOLD", 0.90),
+                    "adx": getattr(Config, "RISK_OFF_ADX_THRESHOLD", 35),
                 },
             }
     except Exception as e:
