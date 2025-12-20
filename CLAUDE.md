@@ -168,6 +168,46 @@ RECOVERY_POSITION_RAMP = [0.25, 0.5, 0.75, 1.0]
 - **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
 - Telemetry tracks $ amounts: `avoided_buys_notional`, `cancelled_limits_notional`
 
+## Downtrend Protection (Inventory Control)
+
+Two additional layers prevent inventory buildup during downtrends:
+
+### Developing Downtrend Size Multiplier
+
+When ADX is between 25-35 (developing trend) AND direction is DOWN, buy size is reduced to 50%.
+
+| ADX Level | Direction | Action |
+|-----------|-----------|--------|
+| < 25 | Any | Full size (100%) |
+| 25-35 | DOWN | Reduced size (50%) |
+| > 35 | DOWN | Buys blocked (STRONG DOWNTREND) |
+| Any | UP/NEUTRAL | Full size (100%) |
+
+**Config:**
+```python
+REGIME_ADX_DEVELOPING = 25              # "Developing trend" threshold
+DEVELOPING_DOWNTREND_SIZE_MULT = 0.50   # 50% size when ADX 25-35 + DOWN
+```
+
+### Consecutive Down Bars Block
+
+Simple crash guard: blocks buys after 3+ consecutive red (down) candles.
+
+**How it works:**
+1. Counts consecutive bars where `close < open`
+2. If count >= threshold, blocks all buys for that symbol
+3. Resets when a green bar appears
+
+**Config:**
+```python
+CONSECUTIVE_DOWN_BARS_ENABLED = True
+CONSECUTIVE_DOWN_BARS_BLOCK = 3         # Block after 3 consecutive down bars
+```
+
+**Log markers:**
+- `[DOWN] Skipping BUY {symbol}: 3 consecutive down bars`
+- `[REGIME] {symbol}: DEVELOPING DOWNTREND (ADX=30) - Size reduced to 50%`
+
 ## Important Constraints
 
 ### Single Instance Protection

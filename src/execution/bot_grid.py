@@ -24,7 +24,7 @@ import os
 import random
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 
 import pandas as pd
@@ -1120,9 +1120,17 @@ class GridTradingBot:
                 and adx > self.regime_adx_threshold
             )
 
+            # Check for developing downtrend (ADX between developing and strong threshold)
+            developing_threshold = getattr(self.config, 'REGIME_ADX_DEVELOPING', 25)
+            is_developing_downtrend = (
+                regime == MarketRegime.TRENDING_DOWN
+                and developing_threshold <= adx <= self.regime_adx_threshold
+            )
+
             # Determine whether to allow buys/sells based on regime
             allow_buy = True
             allow_sell = True
+            size_mult = 1.0  # Default: full size
             reason = f"Regime: {regime}"
 
             if is_strong_trend:
@@ -1133,6 +1141,7 @@ class GridTradingBot:
                     # ALLOW sells (take profit on existing positions)
                     allow_buy = False
                     allow_sell = True
+                    size_mult = 0.0  # No buys
                     reason = f"STRONG DOWNTREND (ADX={adx:.0f}) - Pausing buys"
 
                 elif regime == MarketRegime.TRENDING_UP:
@@ -1141,6 +1150,14 @@ class GridTradingBot:
                     allow_buy = True
                     allow_sell = False
                     reason = f"STRONG UPTREND (ADX={adx:.0f}) - Holding sells"
+
+            elif is_developing_downtrend:
+                # Developing downtrend: REDUCE buy size (don't catch falling knife early)
+                self.regime_pause[symbol] = False
+                size_mult = getattr(self.config, 'DEVELOPING_DOWNTREND_SIZE_MULT', 0.5)
+                reason = f"DEVELOPING DOWNTREND (ADX={adx:.0f}) - Size reduced to {size_mult:.0%}"
+                logger.info(f"[REGIME] {symbol}: {reason}")
+
             else:
                 self.regime_pause[symbol] = False
                 reason = f"{regime} (ADX={adx:.0f}) - Grid active"
@@ -1150,6 +1167,8 @@ class GridTradingBot:
                 'allow_buy': allow_buy,
                 'allow_sell': allow_sell,
                 'is_strong_trend': is_strong_trend,
+                'is_developing_downtrend': is_developing_downtrend,
+                'size_mult': size_mult,
                 'adx': adx,
                 'confidence': confidence,
                 'reason': reason,
@@ -1217,6 +1236,43 @@ class GridTradingBot:
             result['reason'] += f" (weekend: {self.weekend_size_mult:.0%} size)"
 
         return result
+
+    def check_consecutive_down_bars(self, symbol: str) -> Tuple[bool, int]:
+        """
+        Check for consecutive down (red) bars as a simple crash guard.
+
+        Args:
+            symbol: The trading symbol to check
+
+        Returns:
+            Tuple of (allow_buy, consecutive_down_count)
+            - allow_buy: True if buys are allowed, False if blocked
+            - consecutive_down_count: Number of consecutive down bars
+        """
+        if not getattr(self.config, 'CONSECUTIVE_DOWN_BARS_ENABLED', True):
+            return True, 0
+
+        bars = self.bars.get(symbol, [])
+        threshold = getattr(self.config, 'CONSECUTIVE_DOWN_BARS_BLOCK', 3)
+
+        if len(bars) < threshold:
+            return True, 0
+
+        # Count consecutive down bars from most recent
+        count = 0
+        for bar in reversed(bars[-threshold:]):
+            bar_open = float(bar.open) if hasattr(bar, 'open') else float(bar.get('open', 0))
+            bar_close = float(bar.close) if hasattr(bar, 'close') else float(bar.get('close', 0))
+            if bar_close < bar_open:
+                count += 1
+            else:
+                break
+
+        allow_buy = count < threshold
+        if not allow_buy:
+            logger.info(f"[DOWN] {symbol}: {count} consecutive down bars - blocking buys")
+
+        return allow_buy, count
 
     def calculate_correlations(self) -> Dict[str, float]:
         """
@@ -3036,7 +3092,10 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             grid_price = buy_details['price']
                             base_qty = buy_details['quantity']
 
-                            # Apply filters (regime, momentum, allocation, RISK OVERLAY)
+                            # Check consecutive down bars (crash guard)
+                            down_bar_allow, down_bar_count = bot.check_consecutive_down_bars(symbol)
+
+                            # Apply filters (regime, momentum, allocation, RISK OVERLAY, consecutive down bars)
                             if not overlay_allow_buy:
                                 # RISK OVERLAY GATE - highest priority
                                 notional = buy_details['quantity'] * buy_details['price']
@@ -3046,11 +3105,14 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 logger.debug(f"[REGIME] Skipping resting BUY {symbol}: {regime_status['reason']}")
                             elif not momentum_status['allow_buy']:
                                 logger.debug(f"[MOM] Skipping resting BUY {symbol}: {momentum_status['reason']}")
+                            elif not down_bar_allow:
+                                logger.info(f"[DOWN] Skipping resting BUY {symbol}: {down_bar_count} consecutive down bars")
                             elif current_allocation >= max_allocation:
                                 logger.debug(f"[ALLOC] Skipping resting BUY {symbol}: {current_allocation:.1%} >= {max_allocation:.1%}")
                             else:
-                                # Apply adjustments (include overlay position multiplier)
-                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult
+                                # Apply adjustments (include overlay position multiplier and regime size multiplier)
+                                regime_size_mult = regime_status.get('size_mult', 1.0)
+                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult * regime_size_mult
 
                                 try:
                                     limit_price = round_limit_price(symbol, grid_price, bot.config)
@@ -3275,6 +3337,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             if evaluation.get('mode') == 'resting_limit':
                 pass  # Orders already placed above
             elif action == 'BUY' and order_details and not skip_trading:
+                # Check consecutive down bars (crash guard)
+                down_bar_allow, down_bar_count = bot.check_consecutive_down_bars(symbol)
+
                 # RISK OVERLAY GATE - highest priority (blocks buys in RISK_OFF)
                 if not overlay_allow_buy:
                     notional = order_details.get('quantity', 0) * order_details.get('price', current_price)
@@ -3289,6 +3354,10 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 elif not momentum_status['allow_buy']:
                     logger.info(f"[MOM] Skipping BUY {symbol}: {momentum_status['reason']}")
                     await broadcast_log(f"[MOM] Skipping BUY: {momentum_status['reason']}")
+                # Check consecutive down bars
+                elif not down_bar_allow:
+                    logger.info(f"[DOWN] Skipping BUY {symbol}: {down_bar_count} consecutive down bars")
+                    await broadcast_log(f"[DOWN] Skipping BUY: {down_bar_count} consecutive down bars")
                 # Check allocation limit - prevent over-buying
                 else:
                     # Get target allocation for this symbol from config
@@ -3308,13 +3377,14 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         base_qty = order_details['quantity']
                         level_id = order_details.get('level_id')  # May be None for old grids
 
-                        # Apply time quality and correlation adjustments
+                        # Apply time quality, correlation, and regime size adjustments
                         time_quality = time_status.get('time_quality', 1.0)
-                        qty = base_qty * time_quality * corr_adjustment
+                        regime_size_mult = regime_status.get('size_mult', 1.0)
+                        qty = base_qty * time_quality * corr_adjustment * regime_size_mult
 
                         # Log adjustments if applied
-                        if time_quality < 1.0 or corr_adjustment < 1.0:
-                            await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%})")
+                        if time_quality < 1.0 or corr_adjustment < 1.0 or regime_size_mult < 1.0:
+                            await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%}, regime: {regime_size_mult:.0%})")
 
                         # === LIMIT ORDER PATH (Maker Fee Optimization) ===
                         if bot.use_limit_orders and level_id:

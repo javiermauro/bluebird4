@@ -395,6 +395,23 @@ class UltraConfig:
     RECOVERY_NO_NEW_LOW = True                # Require price >= min(last N bars) to advance
 
     # =========================================
+    # DEVELOPING DOWNTREND PROTECTION
+    # =========================================
+    # Reduce position size before trends become "strong" (ADX > 35)
+    # This prevents inventory buildup during early downtrends
+
+    REGIME_ADX_DEVELOPING = 25                # "Developing trend" ADX threshold
+    DEVELOPING_DOWNTREND_SIZE_MULT = 0.50     # 50% size when ADX 25-35 + DOWN
+
+    # =========================================
+    # CONSECUTIVE DOWN BARS PROTECTION
+    # =========================================
+    # Block buys after N consecutive red candles (simple crash guard)
+
+    CONSECUTIVE_DOWN_BARS_ENABLED = True
+    CONSECUTIVE_DOWN_BARS_BLOCK = 3           # Block buys after 3 consecutive down bars
+
+    # =========================================
     # LOGGING & MONITORING
     # =========================================
 
