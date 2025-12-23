@@ -219,7 +219,10 @@ system_state = {
         "sms_count_today": 0,
         "quiet_hours_active": False,
         "uptime": None
-    }
+    },
+
+    # Orchestrator state (inventory management)
+    "orchestrator": None
 }
 
 
@@ -1471,6 +1474,169 @@ async def get_risk_overlay_telemetry():
         return {"error": str(e)}
 
 
+# ============================================================================
+# ORCHESTRATOR ENDPOINTS (Inventory Management Meta-Controller)
+# ============================================================================
+
+ORCHESTRATOR_STATE_FILE = "/tmp/bluebird-orchestrator.json"
+
+
+@app.get("/api/orchestrator/status")
+async def get_orchestrator_status():
+    """
+    Get orchestrator status for all symbols.
+
+    Follows same pattern as /api/risk/overlay: system_state -> file -> defaults
+    """
+    # Try live data from bot first
+    orch_data = system_state.get("orchestrator")
+    if orch_data and orch_data.get("enabled") is not None:
+        return orch_data
+
+    # Fall back to state file
+    if os.path.exists(ORCHESTRATOR_STATE_FILE):
+        try:
+            with open(ORCHESTRATOR_STATE_FILE, 'r') as f:
+                state = json.load(f)
+            return {
+                "enabled": state.get("enabled", False),
+                "enforce": state.get("enforce", False),
+                "liquidation_enabled": state.get("liquidation_enabled", False),
+                "symbols": state.get("symbols", {}),
+                "telemetry": state.get("telemetry", {}),
+                "manual_blocks": state.get("manual_blocks", {}),
+                "last_updated": state.get("saved_at"),
+                "source": "state_file"
+            }
+        except Exception as e:
+            logger.error(f"Failed to read orchestrator state: {e}")
+
+    # Default response
+    return {
+        "enabled": False,
+        "enforce": False,
+        "liquidation_enabled": False,
+        "symbols": {},
+        "telemetry": {},
+        "manual_blocks": {},
+        "last_updated": None,
+        "source": "default",
+        "note": "No orchestrator data yet"
+    }
+
+
+@app.get("/api/orchestrator/symbol/{symbol}")
+async def get_orchestrator_symbol_status(symbol: str):
+    """
+    Get detailed orchestrator status for a specific symbol.
+
+    Args:
+        symbol: Trading symbol (use - instead of / for URL, e.g., BTC-USD)
+    """
+    symbol = symbol.replace("-", "/")  # URL-safe conversion (BTC-USD -> BTC/USD)
+
+    # Try system_state first
+    orch_data = system_state.get("orchestrator")
+    if orch_data and orch_data.get("symbols"):
+        symbol_state = orch_data.get("symbols", {}).get(symbol, {})
+        if symbol_state:
+            return {
+                "symbol": symbol,
+                **symbol_state,
+                "source": "live"
+            }
+
+    # Fall back to file
+    if os.path.exists(ORCHESTRATOR_STATE_FILE):
+        try:
+            with open(ORCHESTRATOR_STATE_FILE, 'r') as f:
+                state = json.load(f)
+            symbol_state = state.get("symbols", {}).get(symbol, {})
+            return {
+                "symbol": symbol,
+                "mode": symbol_state.get("mode", "grid_full"),
+                "mode_changed_at": symbol_state.get("mode_changed_at"),
+                "inventory_pct": symbol_state.get("inventory_pct", 0),
+                "episode": symbol_state.get("episode"),
+                "last_cancel_ts": symbol_state.get("last_cancel_ts"),
+                "last_liq_ts": symbol_state.get("last_liq_ts"),
+                "last_liq_order_id": symbol_state.get("last_liq_order_id"),
+                "source": "state_file"
+            }
+        except Exception as e:
+            logger.error(f"Failed to read orchestrator state for {symbol}: {e}")
+
+    return {
+        "symbol": symbol,
+        "error": "No orchestrator data available",
+        "source": "default"
+    }
+
+
+@app.get("/api/orchestrator/telemetry")
+async def get_orchestrator_telemetry():
+    """
+    Get orchestrator telemetry ($ amounts blocked/reduced/liquidated).
+
+    Returns dollar amounts for:
+    - Buys blocked by DEFENSIVE mode
+    - Size reductions applied
+    - Cancels issued on mode transitions
+    - Liquidation orders placed
+    """
+    # Try system_state first
+    orch_data = system_state.get("orchestrator")
+    if orch_data and orch_data.get("telemetry"):
+        telemetry = orch_data.get("telemetry", {})
+        return {
+            "buys_blocked_count": telemetry.get("buys_blocked_count", 0),
+            "buys_blocked_notional": round(telemetry.get("buys_blocked_notional", 0), 2),
+            "size_reductions_count": telemetry.get("size_reductions_count", 0),
+            "size_reduced_notional": round(telemetry.get("size_reduced_notional", 0), 2),
+            "cancels_issued_count": telemetry.get("cancels_issued_count", 0),
+            "cancels_issued_notional": round(telemetry.get("cancels_issued_notional", 0), 2),
+            "liquidations_placed_count": telemetry.get("liquidations_placed_count", 0),
+            "liquidations_placed_notional": round(telemetry.get("liquidations_placed_notional", 0), 2),
+            "mode_transitions": len(telemetry.get("mode_transitions", [])),
+            "source": "live"
+        }
+
+    # Fall back to state file
+    if os.path.exists(ORCHESTRATOR_STATE_FILE):
+        try:
+            with open(ORCHESTRATOR_STATE_FILE, 'r') as f:
+                state = json.load(f)
+            telemetry = state.get("telemetry", {})
+            return {
+                "buys_blocked_count": telemetry.get("buys_blocked_count", 0),
+                "buys_blocked_notional": round(telemetry.get("buys_blocked_notional", 0), 2),
+                "size_reductions_count": telemetry.get("size_reductions_count", 0),
+                "size_reduced_notional": round(telemetry.get("size_reduced_notional", 0), 2),
+                "cancels_issued_count": telemetry.get("cancels_issued_count", 0),
+                "cancels_issued_notional": round(telemetry.get("cancels_issued_notional", 0), 2),
+                "liquidations_placed_count": telemetry.get("liquidations_placed_count", 0),
+                "liquidations_placed_notional": round(telemetry.get("liquidations_placed_notional", 0), 2),
+                "mode_transitions": len(telemetry.get("mode_transitions", [])),
+                "source": "state_file"
+            }
+        except Exception as e:
+            logger.error(f"Failed to read orchestrator telemetry: {e}")
+
+    return {
+        "buys_blocked_count": 0,
+        "buys_blocked_notional": 0.0,
+        "size_reductions_count": 0,
+        "size_reduced_notional": 0.0,
+        "cancels_issued_count": 0,
+        "cancels_issued_notional": 0.0,
+        "liquidations_placed_count": 0,
+        "liquidations_placed_notional": 0.0,
+        "mode_transitions": 0,
+        "source": "default",
+        "note": "No telemetry data yet"
+    }
+
+
 @app.get("/api/orders/history")
 async def get_alpaca_history(days: int = 7):
     """
@@ -2150,6 +2316,17 @@ async def startup_event():
 async def shutdown_event():
     """Clean up on server shutdown."""
     logger.info("BlueBird API shutting down...")
+
+    # Finalize daily summary from DB (capture any remaining trades)
+    try:
+        from src.database import db as database
+        result = database.recompute_daily_summary()
+        if result.get('skipped'):
+            logger.info("[SHUTDOWN] Daily summary: no equity data for today")
+        else:
+            logger.info(f"[SHUTDOWN] Daily summary finalized: {result.get('trades', 0)} trades, ${result.get('realized_pnl', 0):.2f} realized P/L")
+    except Exception as e:
+        logger.warning(f"Failed to finalize daily summary on shutdown: {e}")
 
     # Release process lock if held
     try:

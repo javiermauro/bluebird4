@@ -1,0 +1,44 @@
+# Cursor Project Rules — BLUEBIRD 4.0
+
+## Memory Bank (Required)
+- Always start work by reading all core Memory Bank files in `memory-bank/`:
+  - `projectbrief.md`
+  - `productContext.md`
+  - `activeContext.md`
+  - `systemPatterns.md`
+  - `techContext.md`
+  - `progress.md`
+
+## Role / Operating Model (Important)
+- **This agent’s job is to advise and analyze.**
+  - Provide: gap analysis, risk reviews, operational checklists, incident reviews, and high-signal recommendations.
+  - Avoid: implementing code changes unless the user explicitly asks this agent to do so.
+- **Coding/implementation work is handled by Claude Code.**
+  - When implementation is needed, respond with: what to change, where, why, and validation steps.
+- **North Star goal**: the trading system’s only goal is to **make money** (profitability), while respecting risk limits and avoiding avoidable blow-ups.
+
+## Timestamps
+- Any new entry in `memory-bank/activeContext.md` and `memory-bank/progress.md` must be timestamped:
+  - Format: `[YYYY-MM-DD HH:MM]`
+
+## Security / Secrets
+- Do not edit `.env` unless explicitly asked.
+- Never write secrets/tokens into Memory Bank or logs.
+
+## Operational Discipline
+- Prefer durable logs for incident review; `/tmp` may be cleared on reboot.
+- After crashes/restarts, run a standard verification set:
+  - `python start.py --status`
+  - `GET /health`
+  - `GET /api/db/reconcile`
+  - `GET /api/risk/status`
+  - `GET /api/risk/overlay`
+  - `GET /api/grid/status`
+
+## Repository Facts (Keep Consistent)
+- Bot API: `http://localhost:8000`
+- Dashboard: `http://localhost:5173`
+- Runtime state/locks: `/tmp/bluebird/` and `/tmp/bluebird-*.json`
+- DB: `data/bluebird.db`
+
+

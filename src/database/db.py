@@ -151,6 +151,10 @@ def init_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summary(date)")
 
+        # Unique indexes for idempotency and upsert operations
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique ON trades(order_id, side, quantity, price)")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_summary(date)")
+
         conn.commit()
         logger.info(f"Database initialized at {DB_PATH}")
 
@@ -169,23 +173,53 @@ def record_trade(
     notes: str = None,
     timestamp: datetime = None
 ) -> int:
-    """Record a trade execution."""
+    """
+    Record a trade execution. Idempotent via unique constraint on order_id+side+qty+price.
+
+    Returns:
+        Trade ID if inserted, -1 if already exists or skipped
+    """
+    # Guard: order_id must be present for idempotency
+    if not order_id:
+        logger.warning(f"record_trade called without order_id for {symbol} {side}, skipping")
+        return -1
+
     if timestamp is None:
         timestamp = datetime.now()
 
-    total_value = quantity * price
+    # Normalize side to lowercase for consistent grouping in daily summary
+    side_normalized = side.lower()
+
+    # Lazy import to avoid circular imports (db.py shouldn't depend on trading config at import time)
+    try:
+        from config_ultra import SYMBOL_PRECISION
+        # Format: (price_decimals, qty_decimals)
+        price_decimals, qty_decimals = SYMBOL_PRECISION.get(symbol, (2, 6))
+    except ImportError:
+        # Fallback if config not available
+        price_decimals, qty_decimals = 2, 6
+
+    # Round qty/price to symbol-specific precision to avoid float drift duplicates
+    quantity_rounded = round(quantity, qty_decimals)
+    price_rounded = round(price, price_decimals)
+    total_value = quantity_rounded * price_rounded
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO trades (timestamp, symbol, side, quantity, price, total_value,
+            INSERT OR IGNORE INTO trades (timestamp, symbol, side, quantity, price, total_value,
                               order_id, profit, fees, source, notes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (timestamp.isoformat(), symbol, side.lower(), quantity, price, total_value,
-              order_id, profit, fees, source, notes))
+        """, (timestamp.isoformat(), symbol, side_normalized, quantity_rounded, price_rounded,
+              total_value, order_id, profit, fees, source, notes))
+
+        if cursor.rowcount == 0:
+            logger.debug(f"Trade already exists for order {order_id}, skipping")
+            return -1
+
         conn.commit()
         trade_id = cursor.lastrowid
-        logger.debug(f"Recorded trade #{trade_id}: {side} {quantity} {symbol} @ ${price:.2f}")
+        logger.debug(f"Recorded trade #{trade_id}: {side_normalized} {quantity_rounded} {symbol} @ ${price_rounded:.2f}")
         return trade_id
 
 
@@ -564,6 +598,102 @@ def get_daily_summaries(days: int = 30) -> List[Dict]:
         """, (start,))
 
         return [dict(row) for row in cursor.fetchall()]
+
+
+def recompute_daily_summary(date_local: str = None) -> Dict:
+    """
+    Recompute daily summary from equity_snapshots and orders (filled) for given local date.
+    Uses substr(timestamp, 1, 10) to match YYYY-MM-DD prefix (avoids SQLite date() parsing).
+    Idempotent - can be called multiple times safely.
+
+    Trade counts come from orders table (authoritative, synced with Alpaca).
+    Realized P/L is derived from equity change (ending - starting).
+    Fees are estimated at 0.25% of notional (Alpaca taker rate).
+
+    Args:
+        date_local: Date string in YYYY-MM-DD format. Defaults to today (Mac mini local time).
+
+    Returns:
+        Dict with date, trades count, realized_pnl, notional, and optional 'skipped' flag
+    """
+    if date_local is None:
+        date_local = datetime.now().strftime('%Y-%m-%d')  # Mac mini local time
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        # Get equity stats for local day from equity_snapshots
+        # Use substr() to match YYYY-MM-DD prefix (timestamps are stored in local ISO format)
+        cursor.execute("""
+            SELECT
+                MIN(equity) as low_equity,
+                MAX(equity) as high_equity,
+                (SELECT equity FROM equity_snapshots
+                 WHERE substr(timestamp, 1, 10) = ? ORDER BY timestamp ASC LIMIT 1) as starting_equity,
+                (SELECT equity FROM equity_snapshots
+                 WHERE substr(timestamp, 1, 10) = ? ORDER BY timestamp DESC LIMIT 1) as ending_equity
+            FROM equity_snapshots
+            WHERE substr(timestamp, 1, 10) = ?
+        """, (date_local, date_local, date_local))
+        equity_row = cursor.fetchone()
+
+        # Get trade stats for local day from orders table (filled orders)
+        # Note: orders table is authoritative - it syncs with Alpaca
+        # We use filled_at for date grouping; fees estimated at 0.25% taker rate
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN side = 'buy' THEN 1 ELSE 0 END) as total_buys,
+                SUM(CASE WHEN side = 'sell' THEN 1 ELSE 0 END) as total_sells,
+                COALESCE(SUM(filled_qty * filled_avg_price), 0) as notional,
+                COALESCE(SUM(filled_qty * filled_avg_price * 0.0025), 0) as fees_estimated
+            FROM orders
+            WHERE status = 'filled' AND substr(COALESCE(filled_at, submitted_at), 1, 10) = ?
+        """, (date_local,))
+        trades_row = cursor.fetchone()
+
+        # Guard: don't insert if no equity data for this date (would create NULL row)
+        if equity_row['low_equity'] is None and equity_row['high_equity'] is None:
+            logger.debug(f"No equity snapshots for {date_local}, skipping daily summary")
+            return {'date': date_local, 'trades': 0, 'realized_pnl': 0, 'skipped': True}
+
+        # Upsert daily_summary (requires unique index on date!)
+        # Calculate realized P/L from equity change (ending - starting)
+        # This is more accurate than summing individual trade profits
+        realized_pnl = 0.0
+        if equity_row['ending_equity'] and equity_row['starting_equity']:
+            realized_pnl = equity_row['ending_equity'] - equity_row['starting_equity']
+
+        cursor.execute("""
+            INSERT INTO daily_summary
+            (date, starting_equity, ending_equity, high_equity, low_equity,
+             total_trades, total_buys, total_sells, realized_pnl, fees, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(date) DO UPDATE SET
+                ending_equity = excluded.ending_equity,
+                high_equity = MAX(daily_summary.high_equity, excluded.high_equity),
+                low_equity = MIN(daily_summary.low_equity, excluded.low_equity),
+                total_trades = excluded.total_trades,
+                total_buys = excluded.total_buys,
+                total_sells = excluded.total_sells,
+                realized_pnl = excluded.realized_pnl,
+                fees = excluded.fees,
+                updated_at = datetime('now')
+        """, (date_local,
+              equity_row['starting_equity'], equity_row['ending_equity'],
+              equity_row['high_equity'], equity_row['low_equity'],
+              trades_row['total_trades'] or 0, trades_row['total_buys'] or 0,
+              trades_row['total_sells'] or 0, realized_pnl,
+              trades_row['fees_estimated'] or 0))
+
+        conn.commit()
+        logger.debug(f"Recomputed daily summary for {date_local}: {trades_row['total_trades']} trades, ${realized_pnl:.2f} P/L")
+        return {
+            'date': date_local,
+            'trades': trades_row['total_trades'] or 0,
+            'realized_pnl': realized_pnl,
+            'notional': trades_row['notional'] or 0
+        }
 
 
 # ============ BACKFILL FUNCTIONS ============

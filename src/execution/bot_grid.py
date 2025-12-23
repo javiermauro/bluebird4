@@ -44,6 +44,7 @@ from src.strategy.grid_trading import (
 from src.strategy.regime_detector import RegimeDetector, MarketRegime
 from src.strategy.feature_calculator import FeatureCalculator
 from src.strategy.risk_overlay import RiskOverlay, RiskMode
+from src.strategy.orchestrator import Orchestrator, OrchestratorContext, OrchestratorMode
 
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -204,6 +205,14 @@ class GridTradingBot:
         # Blocks buys and rebalance-down during crashes, gradual re-entry on recovery
         self.risk_overlay = RiskOverlay(config)
         logger.info(f"  Risk Overlay: {'ENABLED' if getattr(config, 'RISK_OVERLAY_ENABLED', True) else 'DISABLED'}")
+
+        # === ORCHESTRATOR (Thin Meta-Controller for Inventory Management) ===
+        # Consumes existing signals and adds inventory episode tracking + liquidation
+        # Critical: Never overrides RiskOverlay decisions
+        self.orchestrator = Orchestrator(config)
+        logger.info(f"  Orchestrator: {'ENABLED' if self.orchestrator.enabled else 'DISABLED'} "
+                    f"(enforce={'Yes' if self.orchestrator.enforce else 'Shadow'}, "
+                    f"liquidation={'Yes' if self.orchestrator.liquidation_enabled else 'No'})")
 
         # === LIMIT ORDER SETTINGS (Maker Fee Optimization) ===
         self.use_limit_orders = getattr(config, 'GRID_USE_LIMIT_ORDERS', True)
@@ -699,6 +708,21 @@ class GridTradingBot:
                                 source=source
                             )
 
+                            # Record to database (idempotent via unique index)
+                            try:
+                                database.record_trade(
+                                    symbol=symbol,
+                                    side=side,
+                                    quantity=filled_qty,
+                                    price=filled_price,
+                                    order_id=order_id,
+                                    profit=profit or 0,
+                                    source=source,
+                                    notes="limit_fill_fast"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to log limit fill to database: {e}")
+
                             # Always remove tracking (it's terminal)
                             self.grid_strategy.remove_open_limit_order(order_id)
                             # Remove pending only if applied or recorded unmatched
@@ -725,6 +749,21 @@ class GridTradingBot:
                                 order_id=order_id,
                                 source=source
                             )
+
+                            # Record to database (idempotent via unique index)
+                            try:
+                                database.record_trade(
+                                    symbol=symbol,
+                                    side=side,
+                                    quantity=filled_qty,
+                                    price=filled_price,
+                                    order_id=order_id,
+                                    profit=profit or 0,
+                                    source=source,
+                                    notes="partial_fill_fast"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to log partial fill to database: {e}")
 
                             result['partials_detected'] += 1
                             self.fast_fill_stats['partial_applied_count'] += 1
@@ -1873,7 +1912,7 @@ class GridTradingBot:
                     filled_price = float(filled_order.get('filled_avg_price') or 0)
 
                     if filled_qty > 0 and filled_price > 0:
-                        self.grid_strategy.apply_filled_order(
+                        profit = self.grid_strategy.apply_filled_order(
                             symbol=tracked.symbol,
                             side=tracked.side,
                             fill_price=filled_price,
@@ -1881,6 +1920,22 @@ class GridTradingBot:
                             order_id=order_id,
                             source=tracked.source
                         )
+
+                        # Record to database (idempotent via unique index)
+                        try:
+                            database.record_trade(
+                                symbol=tracked.symbol,
+                                side=tracked.side,
+                                quantity=filled_qty,
+                                price=filled_price,
+                                order_id=order_id,
+                                profit=profit or 0,
+                                source=tracked.source,
+                                notes="startup_reconcile"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to log reconciled fill to database: {e}")
+
                         results['filled'].append(order_id)
                     else:
                         logger.warning(f"[STARTUP] Order {order_id[:8]} has invalid fill data")
@@ -2439,14 +2494,43 @@ class GridTradingBot:
             try:
                 # Get account details for full snapshot
                 account = self.client.trading_client.get_account()
+                cash_value = float(account.cash) if account.cash else 0.0
+
+                # Calculate positions_value with fallback
+                positions_value = 0.0
+                try:
+                    positions = self.client.get_positions()
+                    positions_value = sum(float(p.market_value) for p in positions) if positions else 0.0
+                except Exception as pos_e:
+                    # Fallback: derive from equity - cash
+                    positions_value = equity - cash_value if cash_value else 0.0
+
+                    # Log warning once per hour if repeatedly falling back
+                    if not hasattr(self, '_last_positions_fallback_warn') or \
+                       (now - self._last_positions_fallback_warn).seconds >= 3600:
+                        logger.warning(f"[POSITIONS] Using derived positions_value (equity - cash), "
+                                       f"Alpaca positions fetch failed: {pos_e}")
+                        self._last_positions_fallback_warn = now
+
                 database.record_equity_snapshot(
                     equity=equity,
-                    cash=float(account.cash) if account.cash else None,
+                    cash=cash_value if cash_value else None,
                     buying_power=float(account.buying_power) if account.buying_power else None,
+                    positions_value=positions_value,
                     daily_pnl=self.daily_pnl * self.daily_start_equity if self.daily_start_equity else None,
                     daily_pnl_pct=self.daily_pnl * 100 if self.daily_pnl else None
                 )
                 self._last_equity_snapshot = now
+
+                # Recompute daily summary hourly
+                if not hasattr(self, '_last_daily_summary') or (now - self._last_daily_summary).seconds >= 3600:
+                    try:
+                        result = database.recompute_daily_summary()
+                        logger.debug(f"[DAILY] Recomputed summary: {result}")
+                        self._last_daily_summary = now
+                    except Exception as daily_e:
+                        logger.debug(f"Failed to recompute daily summary: {daily_e}")
+
             except Exception as e:
                 logger.debug(f"Failed to log equity snapshot: {e}")
 
@@ -2674,8 +2758,82 @@ async def cancel_grid_buy_limits(bot: GridTradingBot, symbols: list, client) -> 
     return cancelled
 
 
+async def execute_orchestrator_liquidation(bot: GridTradingBot, symbol: str, liq, client):
+    """
+    Place a staged LIMIT sell order for inventory reduction.
+
+    Uses EXISTING rounding helpers and GTC to match grid orders.
+    Called by orchestrator when liquidation decision is triggered.
+
+    Args:
+        bot: GridTradingBot instance
+        symbol: Trading symbol (e.g., "BTC/USD")
+        liq: LiquidationDecision dataclass from orchestrator
+        client: AlpacaClient instance
+    """
+    # Use EXISTING rounding helpers (CRITICAL - don't use raw round())
+    rounded_qty = round_qty(symbol, liq.qty, bot.config)
+    rounded_price = round_limit_price(symbol, liq.limit_price, bot.config)
+
+    # Validate qty
+    if rounded_qty <= 0:
+        logger.debug(f"[ORCH] Skipping liquidation {symbol}: qty=0 after rounding")
+        return
+
+    # Validate min notional
+    notional = rounded_qty * rounded_price
+    if notional < 10:
+        logger.debug(f"[ORCH] Skipping liquidation {symbol}: notional ${notional:.2f} < $10")
+        return
+
+    try:
+        order_request = LimitOrderRequest(
+            symbol=symbol,
+            qty=rounded_qty,
+            side=OrderSide.SELL,
+            limit_price=rounded_price,
+            time_in_force=TimeInForce.GTC,  # GTC to match existing grid orders
+            client_order_id=liq.client_order_id
+        )
+        result = await run_blocking(client.trading_client.submit_order, order_request)
+
+        logger.info(f"[ORCH] Placed liquidation SELL {symbol}: qty={rounded_qty:.6f}, "
+                    f"price=${rounded_price:.2f}, reason={liq.reason}, "
+                    f"order_id={result.id}")
+
+        # Update orchestrator state
+        bot.orchestrator.last_liq_ts[symbol] = datetime.now()
+        bot.orchestrator.last_liq_order_id[symbol] = str(result.id)
+        bot.orchestrator.telemetry["liquidations_placed_count"] += 1
+        bot.orchestrator.telemetry["liquidations_placed_notional"] += notional
+        bot.orchestrator._save_state()
+
+        # Broadcast to dashboard
+        from src.api.server import broadcast_log as api_broadcast_log
+        await api_broadcast_log(f"[ORCH] Liquidation SELL placed: {rounded_qty:.6f} {symbol} @ ${rounded_price:.2f} ({liq.reason})")
+
+    except Exception as e:
+        logger.error(f"[ORCH] Liquidation order failed {symbol}: {e}")
+
+
 async def run_grid_bot(broadcast_update, broadcast_log):
     """Run the Grid Trading bot."""
+    import time as time_module
+
+    # Log timezone at startup for daily_summary date grouping visibility
+    tz_name = time_module.tzname[time_module.daylight] if time_module.daylight else time_module.tzname[0]
+    logger.info(f"[STARTUP] Using local timezone for daily_summary: {tz_name}")
+
+    # Recompute daily summary on startup (backfill "today so far")
+    try:
+        result = database.recompute_daily_summary()
+        if result.get('skipped'):
+            logger.info("[STARTUP] Daily summary: no equity data for today yet")
+        else:
+            logger.info(f"[STARTUP] Daily summary recomputed: {result.get('trades', 0)} trades, ${result.get('realized_pnl', 0):.2f} realized P/L")
+    except Exception as e:
+        logger.warning(f"Failed to recompute daily summary on startup: {e}")
+
     logger.info("Starting BlueBird Grid Trading Bot...")
     await broadcast_log("Starting GRID TRADING BOT")
     await broadcast_log("=" * 50)
@@ -3062,7 +3220,80 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     except Exception as e:
                         await broadcast_log(f"[RISK] STOP-LOSS ORDER FAILED: {e}")
                         evaluation = {'action': 'STOP_LOSS_FAILED', 'reason': str(e)}
+
+                    # Mark stop-loss executed to skip orchestrator actions
+                    stop_loss_executed = True
                 else:
+                    stop_loss_executed = False
+
+                    # === ORCHESTRATOR EVALUATION ===
+                    # Run AFTER windfall + stop-loss, BEFORE grid orders
+                    # Orchestrator can only restrict buys, never override RiskOverlay
+                    orch_size_mult = 1.0  # Default: no reduction
+                    orch_allow_buy = True  # Default: allow
+
+                    if bot.orchestrator.enabled and not stop_loss_executed:
+                        # Extract P/L data from position (same pattern as windfall block)
+                        avg_entry_price = None
+                        unrealized_pnl_pct = None
+                        if position_data:
+                            avg_entry_price = float(position_data.avg_entry_price) if hasattr(position_data, 'avg_entry_price') else None
+                            unrealized_pnl_pct = float(position_data.unrealized_plpc) if hasattr(position_data, 'unrealized_plpc') else None
+
+                        # Use bot.config.GRID_CONFIGS (NOT Config import)
+                        grid_configs = getattr(bot.config, "GRID_CONFIGS", DEFAULT_GRID_CONFIGS)
+                        investment_ratio = grid_configs.get(symbol, {}).get("investment_ratio", 0.25)
+
+                        orch_context = OrchestratorContext(
+                            overlay_mode=overlay_mode,
+                            overlay_allow_buy=overlay_allow_buy,
+                            overlay_allow_sell=overlay_allow_sell,
+                            overlay_position_mult=overlay_position_mult,
+                            overlay_reasons=bot.risk_overlay.trigger_reasons,
+                            regime_allow_buy=regime_allow_buy,
+                            regime_allow_sell=regime_allow_sell,
+                            regime_size_mult=regime_status.get('size_mult', 1.0),
+                            regime=regime_status.get('regime'),
+                            adx=regime_adx,
+                            confidence=regime_status.get('confidence', 0),
+                            time_should_trade=time_status.get('should_trade', True),
+                            time_quality=time_status.get('time_quality', 1.0),
+                            momentum_allow_buy=momentum_status.get('allow_buy', True),
+                            corr_adjustment=corr_adjustment,
+                            equity=equity,
+                            current_price=current_price,
+                            position_qty=position_qty,  # Updated by windfall if it executed
+                            avg_entry_price=avg_entry_price,
+                            unrealized_pnl_pct=unrealized_pnl_pct,
+                            investment_ratio=investment_ratio
+                        )
+
+                        orch_decision = bot.orchestrator.evaluate(symbol, orch_context, alpaca_open_orders)
+
+                        # Log decision (always, for shadow mode visibility)
+                        inv_pct = bot.orchestrator._calculate_inventory_pct(orch_context)
+                        logger.info(f"[ORCH] {symbol}: mode={orch_decision.effective_mode.value}, "
+                                    f"inv={inv_pct:.0f}%, allow_buy={orch_decision.allow_buy}, "
+                                    f"size_mult={orch_decision.size_mult:.2f}")
+
+                        if bot.orchestrator.enforce:
+                            # Apply orchestrator gates (can only restrict, never relax)
+                            orch_allow_buy = orch_decision.allow_buy
+                            orch_size_mult = orch_decision.size_mult
+
+                            # Cancel buy limits on mode downgrade (uses EXISTING function)
+                            if orch_decision.cancel_buy_limits:
+                                logger.info(f"[ORCH] Cancelling buy limits for {symbol} (DEFENSIVE transition)")
+                                await cancel_grid_buy_limits(bot, [symbol], client)
+                                bot.orchestrator.last_cancel_ts[symbol] = datetime.now()
+
+                            # Execute liquidation if warranted
+                            # CRITICAL: Skip if windfall already executed this bar
+                            if (orch_decision.liquidation and
+                                orch_decision.liquidation.enabled and
+                                windfall_executed is None):
+                                await execute_orchestrator_liquidation(bot, symbol, orch_decision.liquidation, client)
+
                     # === RESTING LIMIT MODE (New - proactive maker orders) ===
                     if bot.use_limit_orders:
                         # Use new method that finds maker-safe levels AHEAD of price
@@ -3095,12 +3326,17 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             # Check consecutive down bars (crash guard)
                             down_bar_allow, down_bar_count = bot.check_consecutive_down_bars(symbol)
 
-                            # Apply filters (regime, momentum, allocation, RISK OVERLAY, consecutive down bars)
+                            # Apply filters (regime, momentum, allocation, RISK OVERLAY, ORCHESTRATOR, consecutive down bars)
                             if not overlay_allow_buy:
                                 # RISK OVERLAY GATE - highest priority
                                 notional = buy_details['quantity'] * buy_details['price']
                                 bot.risk_overlay._record_blocked_buy(symbol, notional, overlay_buy_reason)
                                 logger.info(f"[RISK] Blocked resting BUY {symbol}: {overlay_buy_reason}")
+                            elif not orch_allow_buy:
+                                # ORCHESTRATOR GATE - second priority
+                                notional = buy_details['quantity'] * buy_details['price']
+                                bot.orchestrator._record_blocked_buy(symbol, notional, "orchestrator_defensive")
+                                logger.info(f"[ORCH] Blocked resting BUY {symbol}: DEFENSIVE mode")
                             elif not regime_allow_buy:
                                 logger.debug(f"[REGIME] Skipping resting BUY {symbol}: {regime_status['reason']}")
                             elif not momentum_status['allow_buy']:
@@ -3110,9 +3346,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             elif current_allocation >= max_allocation:
                                 logger.debug(f"[ALLOC] Skipping resting BUY {symbol}: {current_allocation:.1%} >= {max_allocation:.1%}")
                             else:
-                                # Apply adjustments (include overlay position multiplier and regime size multiplier)
+                                # Apply adjustments (include overlay position multiplier, regime size multiplier, and orchestrator size multiplier)
                                 regime_size_mult = regime_status.get('size_mult', 1.0)
-                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult * regime_size_mult
+                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult * regime_size_mult * orch_size_mult
 
                                 try:
                                     limit_price = round_limit_price(symbol, grid_price, bot.config)
@@ -3828,7 +4064,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     },
                     "orders": bot.get_order_health_summary()
                 },
-                "risk_overlay": bot.risk_overlay.get_status()
+                "risk_overlay": bot.risk_overlay.get_status(),
+                "orchestrator": bot.orchestrator.get_status()
             })
 
         await broadcast_log(f"Will subscribe to: {', '.join(symbols)}")

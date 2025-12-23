@@ -252,23 +252,23 @@ class UltraConfig:
     # Tighter ranges = more grid completions = more profits
     GRID_CONFIGS = {
         "BTC/USD": {
-            "num_grids": 4,        # 4 levels, 5% range = 1.25% per grid (0.75% after fees)
-            "range_pct": 0.05,     # TIGHTER: 5% range for more trades
+            "num_grids": 5,        # 5 grids = 6 levels, ~1.25% spacing (was 4 grids)
+            "range_pct": 0.0625,   # 6.25% range for 1.25% per grid
             "investment_ratio": 0.30  # 30% - reduced from 35%, still largest
         },
         "SOL/USD": {
-            "num_grids": 4,        # 4 levels, 5% range = 1.25% per grid
-            "range_pct": 0.05,     # TIGHTER: 5% range for more trades
+            "num_grids": 5,        # 5 grids = 6 levels, ~1.30% spacing (was 4 grids)
+            "range_pct": 0.065,    # 6.5% range for 1.30% per grid
             "investment_ratio": 0.25  # 25% - reduced from 30%, less concentration
         },
         "LTC/USD": {
-            "num_grids": 5,        # 5 levels - 100% completion rate, working great!
-            "range_pct": 0.08,     # TIGHTER: 8% range (was 10%)
+            "num_grids": 6,        # 6 grids = 7 levels, ~1.40% spacing (was 5 grids, 1.69%)
+            "range_pct": 0.084,    # 8.4% range for 1.40% per grid - TIGHTENED
             "investment_ratio": 0.25  # INCREASED: 25% - best performer!
         },
         "AVAX/USD": {
-            "num_grids": 5,        # 5 levels - 120% completion rate, excellent!
-            "range_pct": 0.08,     # TIGHTER: 8% range (was 10%)
+            "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing (was 5 grids, 1.68%)
+            "range_pct": 0.087,    # 8.7% range for 1.45% per grid - TIGHTENED
             "investment_ratio": 0.20  # INCREASED: 20% - second best performer!
         }
     }
@@ -410,6 +410,55 @@ class UltraConfig:
 
     CONSECUTIVE_DOWN_BARS_ENABLED = True
     CONSECUTIVE_DOWN_BARS_BLOCK = 3           # Block buys after 3 consecutive down bars
+
+    # =========================================
+    # ORCHESTRATOR SETTINGS (Meta-controller for inventory management)
+    # =========================================
+    # Thin meta-controller that consumes existing signals and adds:
+    # - Inventory episode tracking (how long we've been "stuck" holding inventory)
+    # - Staged LIMIT-sell liquidation (only in NORMAL overlay mode)
+    # - Mode-based gates and size multipliers
+    # Critical: Orchestrator never overrides RiskOverlay decisions.
+
+    # Master switches
+    ORCHESTRATOR_ENABLED = True          # Enable orchestrator evaluation
+    ORCHESTRATOR_ENFORCE = True          # True = enforce mode (active)
+    ORCHESTRATOR_LIQUIDATION_ENABLED = True   # Enable staged liquidation
+
+    # Cooldowns and rate limits
+    ORCHESTRATOR_COOLDOWN_MINUTES = 60   # Min time between mode changes
+    LIQ_MIN_INTERVAL_MINUTES = 90        # Min time between liquidation orders per symbol
+
+    # Episode tracking
+    EPISODE_START_PCT = 30               # Start episode when inventory >= 30%
+    EPISODE_RESET_PCT = 10               # Reset episode when inventory <= 10%
+
+    # Mode thresholds (with hysteresis)
+    DEFENSIVE_INVENTORY_PCT = 150        # Enter DEFENSIVE when inventory >= 150%
+    DEFENSIVE_EXIT_PCT = 130             # Exit DEFENSIVE when inventory < 130%
+    GRID_REDUCED_ENTER_PCT = 100         # Enter GRID_REDUCED when inventory >= 100%
+    GRID_REDUCED_EXIT_PCT = 80           # Exit GRID_REDUCED when inventory < 80%
+
+    # Liquidation triggers - TP Trim (take profit) - SAFEST
+    LIQ_TP_HOURS = 24                    # Min episode age for TP
+    LIQ_TP_MIN_PNL_PCT = 0.003           # Min unrealized P/L (+0.3%)
+    LIQ_TP_INVENTORY_PCT = 120           # Min inventory level
+    LIQ_TP_TARGET_INV_PCT = 100          # Target inventory after trim
+
+    # Liquidation triggers - Loss Cut (conservative)
+    LIQ_LOSS_HOURS = 48                  # Min episode age for loss cut
+    LIQ_LOSS_CUT_PCT = -0.02             # Max unrealized loss (-2%)
+    LIQ_LOSS_INVENTORY_PCT = 130         # Min inventory level
+    LIQ_LOSS_REDUCE_MULT = 0.25          # Reduce 25% of excess inventory
+
+    # Liquidation triggers - Max Age Stop
+    LIQ_MAX_AGE_HOURS = 72               # Max episode age
+    LIQ_MAX_AGE_INVENTORY_PCT = 120      # Min inventory level
+
+    # Execution - Adaptive slippage based on stress proxy (ADX>30)
+    # Note: ADX is trend-strength, not volatility. Consider ATR% later.
+    LIQ_SLIPPAGE_NORMAL = 0.004          # 0.4% in calm conditions
+    LIQ_SLIPPAGE_STRESSED = 0.008        # 0.8% when ADX > 30 (stress proxy)
 
     # =========================================
     # LOGGING & MONITORING

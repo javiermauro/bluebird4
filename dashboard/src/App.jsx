@@ -351,6 +351,31 @@ function App() {
     error: null
   });
 
+  // Orchestrator state (inventory management layer)
+  const [orchestrator, setOrchestrator] = useState({
+    enabled: false,
+    enforce: false,
+    liquidation_enabled: false,
+    symbols: {},
+    telemetry: {
+      buys_blocked_count: 0,
+      buys_blocked_notional: 0,
+      size_reductions_count: 0,
+      size_reduced_notional: 0,
+      cancels_issued_count: 0,
+      cancels_issued_notional: 0,
+      liquidations_placed_count: 0,
+      liquidations_placed_notional: 0
+    },
+    last_updated: null
+  });
+  const [orchestratorExpanded, setOrchestratorExpanded] = useState(false);
+  const [orchestratorFetch, setOrchestratorFetch] = useState({
+    status: 'init',
+    lastFetchedAt: null,
+    error: null
+  });
+
   // Per-symbol chart data storage
   const [symbolChartData, setSymbolChartData] = useState({
     'BTC/USD': { labels: [], data: [] },
@@ -435,6 +460,10 @@ function App() {
           if (updateData.risk_overlay) {
             setRiskOverlay(updateData.risk_overlay);
             setRiskOverlayFetch({ status: 'ok', lastFetchedAt: Date.now(), error: null });
+          }
+          if (updateData.orchestrator) {
+            setOrchestrator(updateData.orchestrator);
+            setOrchestratorFetch({ status: 'ok', lastFetchedAt: Date.now(), error: null });
           }
 
           // Track per-symbol prices from positions and grid data
@@ -698,6 +727,31 @@ function App() {
     }
   };
 
+  // Fetch orchestrator status
+  const fetchOrchestrator = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/orchestrator/status`);
+      if (response.ok) {
+        const data = await response.json();
+        setOrchestrator(data);
+        setOrchestratorFetch({ status: 'ok', lastFetchedAt: Date.now(), error: null });
+      } else {
+        setOrchestratorFetch(prev => ({
+          status: 'error',
+          lastFetchedAt: prev.lastFetchedAt,
+          error: `HTTP ${response.status}`
+        }));
+      }
+    } catch (error) {
+      console.log('Could not fetch orchestrator status');
+      setOrchestratorFetch(prev => ({
+        status: 'error',
+        lastFetchedAt: prev.lastFetchedAt,
+        error: error?.message || 'fetch_failed'
+      }));
+    }
+  };
+
   // Set risk overlay mode (manual override)
   const setRiskMode = async (mode, reason) => {
     try {
@@ -857,6 +911,13 @@ function App() {
   useEffect(() => {
     fetchRiskOverlay();
     const interval = setInterval(fetchRiskOverlay, 15000); // Every 15 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch orchestrator status periodically
+  useEffect(() => {
+    fetchOrchestrator();
+    const interval = setInterval(fetchOrchestrator, 15000); // Every 15 seconds
     return () => clearInterval(interval);
   }, []);
 
@@ -1664,6 +1725,288 @@ function App() {
                 </div>
               </div>
             )}
+
+            {/* ═══════════════════════════════════════════════════════════════════
+                ORCHESTRATOR PANEL - Inventory Management Layer
+            ═══════════════════════════════════════════════════════════════════ */}
+            {(() => {
+              const staleMs = 60000; // 1 minute staleness threshold
+              const isStale = orchestratorFetch.lastFetchedAt != null
+                ? (Date.now() - orchestratorFetch.lastFetchedAt) > staleMs
+                : true;
+              const orchOk = orchestratorFetch.status === 'ok' && !isStale;
+
+              // Compute aggregate mode across all symbols (worst mode wins)
+              const symbolEntries = Object.entries(orchestrator.symbols || {});
+              const modes = symbolEntries.map(([, s]) => s?.mode || 'grid_full');
+              const worstMode = modes.includes('defensive') ? 'defensive'
+                : modes.includes('grid_reduced') ? 'grid_reduced'
+                : 'grid_full';
+
+              // Find highest inventory %
+              const inventoryPcts = symbolEntries.map(([, s]) => s?.episode?.start_inventory_pct || 0);
+              const maxInventory = Math.max(0, ...inventoryPcts);
+
+              // Find oldest active episode
+              const episodeAges = symbolEntries
+                .filter(([, s]) => s?.episode?.age_hours)
+                .map(([, s]) => s.episode.age_hours);
+              const maxEpisodeAge = Math.max(0, ...episodeAges);
+
+              const modeConfig = {
+                grid_full: { icon: '⚡', label: 'GRID FULL', color: 'var(--orch-full)' },
+                grid_reduced: { icon: '⚠️', label: 'REDUCED', color: 'var(--orch-reduced)' },
+                defensive: { icon: '🛡️', label: 'DEFENSIVE', color: 'var(--orch-defensive)' }
+              };
+              const currentModeConfig = modeConfig[worstMode] || modeConfig.grid_full;
+
+              return (
+                <>
+                  <div
+                    className={`orch-banner ${orchOk ? `orch-banner-${worstMode}` : 'orch-banner-unavailable'}`}
+                    onClick={() => setOrchestratorExpanded(!orchestratorExpanded)}
+                  >
+                    <div className="orch-banner-content">
+                      {/* Mode Badge */}
+                      <div className="orch-mode-badge-wrap">
+                        <span className="orch-label">ORCHESTRATOR</span>
+                        <div className={`orch-mode-badge ${worstMode}`}>
+                          <span className="orch-mode-icon">{currentModeConfig.icon}</span>
+                          <span className="orch-mode-text">{orchOk ? currentModeConfig.label : 'OFFLINE'}</span>
+                        </div>
+                      </div>
+
+                      {/* Enforcement Status */}
+                      {orchOk && (
+                        <div className="orch-status-badges">
+                          <span className={`orch-mini-badge ${orchestrator.enforce ? 'active' : 'shadow'}`}>
+                            {orchestrator.enforce ? '● ENFORCE' : '◌ SHADOW'}
+                          </span>
+                          <span className={`orch-mini-badge ${orchestrator.liquidation_enabled ? 'liq-on' : 'liq-off'}`}>
+                            {orchestrator.liquidation_enabled ? '💧 LIQ ON' : '○ LIQ OFF'}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Inventory Gauge */}
+                      {orchOk && maxInventory > 0 && (
+                        <div className="orch-inventory-wrap">
+                          <span className="orch-inv-label">INVENTORY</span>
+                          <div className="orch-inventory-gauge">
+                            <div
+                              className={`orch-inventory-fill ${maxInventory >= 150 ? 'critical' : maxInventory >= 100 ? 'warning' : 'normal'}`}
+                              style={{ width: `${Math.min((maxInventory / 150) * 100, 100)}%` }}
+                            />
+                            <div className="orch-inventory-markers">
+                              <div className="orch-inv-marker" style={{ left: '66.67%' }} title="100%"></div>
+                              <div className="orch-inv-marker critical" style={{ left: '100%' }} title="150%"></div>
+                            </div>
+                          </div>
+                          <span className={`orch-inv-value ${maxInventory >= 150 ? 'critical' : maxInventory >= 100 ? 'warning' : ''}`}>
+                            {maxInventory.toFixed(0)}%
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Episode Duration */}
+                      {orchOk && maxEpisodeAge > 0 && (
+                        <div className="orch-episode-wrap">
+                          <span className="orch-episode-label">EPISODE</span>
+                          <span className={`orch-episode-value ${maxEpisodeAge >= 24 ? 'aged' : ''}`}>
+                            {maxEpisodeAge < 1 ? `${Math.round(maxEpisodeAge * 60)}m` : `${maxEpisodeAge.toFixed(1)}h`}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Telemetry Quick Stats */}
+                      {orchOk && (orchestrator.telemetry?.buys_blocked_notional > 0 || orchestrator.telemetry?.liquidations_placed_notional > 0) && (
+                        <div className="orch-telem-quick">
+                          {orchestrator.telemetry?.buys_blocked_notional > 0 && (
+                            <span className="orch-telem-badge blocked">
+                              🚫 ${orchestrator.telemetry.buys_blocked_notional.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </span>
+                          )}
+                          {orchestrator.telemetry?.liquidations_placed_notional > 0 && (
+                            <span className="orch-telem-badge liq">
+                              💧 ${orchestrator.telemetry.liquidations_placed_notional.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Expand Chevron */}
+                      <div className={`orch-chevron ${orchestratorExpanded ? 'expanded' : ''}`}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="6 9 12 15 18 9"></polyline>
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Expanded Panel */}
+                  {orchestratorExpanded && (
+                    <div className="orch-panel">
+                      <div className="orch-panel-grid">
+                        {/* Symbol Status Section */}
+                        <div className="orch-section orch-symbols">
+                          <div className="orch-section-header">
+                            <span className="orch-section-icon">📊</span>
+                            <span className="orch-section-title">Symbol Status</span>
+                          </div>
+                          <div className="orch-symbol-grid">
+                            {symbolEntries.length > 0 ? symbolEntries.map(([symbol, symData]) => {
+                              const mode = symData?.mode || 'grid_full';
+                              const invPct = symData?.episode?.start_inventory_pct || 0;
+                              const ageHours = symData?.episode?.age_hours || 0;
+                              const modeInfo = modeConfig[mode] || modeConfig.grid_full;
+                              return (
+                                <div key={symbol} className={`orch-symbol-card ${mode}`}>
+                                  <div className="orch-symbol-header">
+                                    <span className="orch-symbol-name">{symbol.replace('/', '')}</span>
+                                    <span className={`orch-symbol-mode ${mode}`}>
+                                      {modeInfo.icon} {mode.replace('_', ' ').toUpperCase()}
+                                    </span>
+                                  </div>
+                                  <div className="orch-symbol-stats">
+                                    <div className="orch-symbol-stat">
+                                      <span className="orch-stat-label">Inventory</span>
+                                      <span className={`orch-stat-value ${invPct >= 100 ? 'warning' : ''}`}>{invPct.toFixed(0)}%</span>
+                                    </div>
+                                    {ageHours > 0 && (
+                                      <div className="orch-symbol-stat">
+                                        <span className="orch-stat-label">Episode</span>
+                                        <span className={`orch-stat-value ${ageHours >= 24 ? 'aged' : ''}`}>
+                                          {ageHours < 1 ? `${Math.round(ageHours * 60)}m` : `${ageHours.toFixed(1)}h`}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            }) : (
+                              <div className="orch-empty-state">No symbols tracked</div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Mode Thresholds Section */}
+                        <div className="orch-section orch-thresholds">
+                          <div className="orch-section-header">
+                            <span className="orch-section-icon">📐</span>
+                            <span className="orch-section-title">Mode Thresholds</span>
+                          </div>
+                          <div className="orch-thresholds-list">
+                            <div className="orch-threshold-item">
+                              <div className="orch-threshold-bar">
+                                <div className="orch-threshold-zone full" style={{ width: '66.67%' }}>
+                                  <span>GRID FULL</span>
+                                </div>
+                                <div className="orch-threshold-zone reduced" style={{ width: '16.67%' }}>
+                                  <span>REDUCED</span>
+                                </div>
+                                <div className="orch-threshold-zone defensive" style={{ width: '16.67%' }}>
+                                  <span>DEF</span>
+                                </div>
+                              </div>
+                              <div className="orch-threshold-labels">
+                                <span>0%</span>
+                                <span style={{ left: '66.67%' }}>100%</span>
+                                <span style={{ left: '100%' }}>150%+</span>
+                              </div>
+                            </div>
+                            <div className="orch-mode-effects">
+                              <div className="orch-effect-item">
+                                <span className="orch-effect-mode full">GRID_FULL</span>
+                                <span className="orch-effect-desc">Normal trading, 100% size</span>
+                              </div>
+                              <div className="orch-effect-item">
+                                <span className="orch-effect-mode reduced">GRID_REDUCED</span>
+                                <span className="orch-effect-desc">Size reduced to 50%</span>
+                              </div>
+                              <div className="orch-effect-item">
+                                <span className="orch-effect-mode defensive">DEFENSIVE</span>
+                                <span className="orch-effect-desc">All buys blocked</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Telemetry Section */}
+                        <div className="orch-section orch-telemetry">
+                          <div className="orch-section-header">
+                            <span className="orch-section-icon">📈</span>
+                            <span className="orch-section-title">Telemetry</span>
+                          </div>
+                          <div className="orch-telemetry-grid">
+                            <div className="orch-telem-stat">
+                              <span className="orch-telem-icon">🚫</span>
+                              <div className="orch-telem-data">
+                                <span className="orch-telem-value">
+                                  ${(orchestrator.telemetry?.buys_blocked_notional || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                                <span className="orch-telem-label">Buys Blocked ({orchestrator.telemetry?.buys_blocked_count || 0})</span>
+                              </div>
+                            </div>
+                            <div className="orch-telem-stat">
+                              <span className="orch-telem-icon">📉</span>
+                              <div className="orch-telem-data">
+                                <span className="orch-telem-value">
+                                  ${(orchestrator.telemetry?.size_reduced_notional || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                                <span className="orch-telem-label">Size Reduced ({orchestrator.telemetry?.size_reductions_count || 0})</span>
+                              </div>
+                            </div>
+                            <div className="orch-telem-stat">
+                              <span className="orch-telem-icon">❌</span>
+                              <div className="orch-telem-data">
+                                <span className="orch-telem-value">
+                                  ${(orchestrator.telemetry?.cancels_issued_notional || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                                <span className="orch-telem-label">Cancels ({orchestrator.telemetry?.cancels_issued_count || 0})</span>
+                              </div>
+                            </div>
+                            <div className="orch-telem-stat highlight">
+                              <span className="orch-telem-icon">💧</span>
+                              <div className="orch-telem-data">
+                                <span className="orch-telem-value">
+                                  ${(orchestrator.telemetry?.liquidations_placed_notional || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                                <span className="orch-telem-label">Liquidations ({orchestrator.telemetry?.liquidations_placed_count || 0})</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Liquidation Rules Section */}
+                        <div className="orch-section orch-liq-rules">
+                          <div className="orch-section-header">
+                            <span className="orch-section-icon">⚙️</span>
+                            <span className="orch-section-title">Liquidation Triggers</span>
+                            <span className={`orch-liq-status ${orchestrator.liquidation_enabled ? 'enabled' : 'disabled'}`}>
+                              {orchestrator.liquidation_enabled ? 'ENABLED' : 'DISABLED'}
+                            </span>
+                          </div>
+                          <div className="orch-liq-rules-list">
+                            <div className="orch-liq-rule">
+                              <span className="orch-rule-name">TP Trim</span>
+                              <span className="orch-rule-cond">Episode ≥24h • P/L ≥+0.3% • Inv ≥120%</span>
+                            </div>
+                            <div className="orch-liq-rule">
+                              <span className="orch-rule-name">Loss Cut</span>
+                              <span className="orch-rule-cond">Episode ≥48h • P/L ≤-2% • Inv ≥130%</span>
+                            </div>
+                            <div className="orch-liq-rule">
+                              <span className="orch-rule-name">Max Age</span>
+                              <span className="orch-rule-cond">Episode ≥72h • Inv ≥120%</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             {/* ═══════════════════════════════════════════════════════════════════
                 HEALTH STATUS PANEL

@@ -52,6 +52,7 @@ ls /tmp/bluebird/*.pid                     # Running services
 - **`src/execution/bot_grid.py`** - Grid trading bot implementation. Handles order execution, risk controls, and state management.
 - **`src/strategy/grid_trading.py`** - Grid trading strategy logic. Creates grid levels, tracks fills, calculates profits.
 - **`src/strategy/risk_overlay.py`** - Risk overlay state machine (NORMAL/RISK_OFF/RECOVERY). Provides crash protection.
+- **`src/strategy/orchestrator.py`** - Thin meta-controller for inventory management. Adds inventory episode tracking and staged liquidation.
 - **`src/database/db.py`** - SQLite database for persistent trade/equity/order storage at `data/bluebird.db`.
 - **`src/utils/process_lock.py`** - Single-instance protection using file locks in `/tmp/bluebird/`.
 - **`config_ultra.py`** - All trading configuration (symbols, risk limits, grid settings).
@@ -68,6 +69,7 @@ ls /tmp/bluebird/*.pid                     # Running services
 - **Grid state**: `/tmp/bluebird-grid-state.json`
 - **Risk state**: `/tmp/bluebird-risk-state.json`
 - **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
+- **Orchestrator state**: `/tmp/bluebird-orchestrator.json`
 - **Daily equity**: `/tmp/bluebird-daily-equity.json`
 - **Database**: `data/bluebird.db`
 - **Lock files**: `/tmp/bluebird/*.lock`, `/tmp/bluebird/*.pid`
@@ -168,6 +170,67 @@ RECOVERY_POSITION_RAMP = [0.25, 0.5, 0.75, 1.0]
 - **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
 - Telemetry tracks $ amounts: `avoided_buys_notional`, `cancelled_limits_notional`
 
+## Orchestrator (Inventory Management)
+
+The Orchestrator is a thin meta-controller that adds inventory episode tracking and staged liquidation on top of existing signals. It runs AFTER windfall/stop-loss, BEFORE grid orders.
+
+**Critical**: Orchestrator never overrides RiskOverlay decisions. It can only add restrictions.
+
+### Orchestrator Modes
+
+| Mode | Description | Buy Orders | Size Multiplier |
+|------|-------------|------------|-----------------|
+| **GRID_FULL** | Normal operation | Allowed | 100% |
+| **GRID_REDUCED** | High inventory (≥100%) | Allowed | 50% |
+| **DEFENSIVE** | Very high inventory (≥150%) | BLOCKED | 0% |
+
+### Inventory Episode Tracking
+
+Tracks how long we've been "stuck" holding meaningful inventory:
+- Episode starts when `inventory_pct >= 30%`
+- Episode resets when `inventory_pct <= 10%`
+- Episode age used for liquidation trigger thresholds
+
+### Staged Liquidation (NORMAL only)
+
+Liquidation orders are ONLY placed in overlay mode NORMAL:
+
+| Trigger | Conditions | Action |
+|---------|------------|--------|
+| **TP Trim** | Episode ≥24h, P/L ≥+0.3%, inventory ≥120% | Reduce to 100% |
+| **Loss Cut** | Episode ≥48h, P/L ≤-2%, inventory ≥130% | Reduce 25% of excess |
+| **Max Age** | Episode ≥72h, inventory ≥120% | Reduce to 100% |
+
+### API Endpoints
+
+```bash
+# Get orchestrator status
+curl http://localhost:8000/api/orchestrator/status
+
+# Get symbol-specific status
+curl http://localhost:8000/api/orchestrator/symbol/BTC-USD
+
+# Get telemetry ($ amounts)
+curl http://localhost:8000/api/orchestrator/telemetry
+```
+
+### Config Settings
+
+In `config_ultra.py`:
+```python
+ORCHESTRATOR_ENABLED = True           # Enable evaluation
+ORCHESTRATOR_ENFORCE = False          # False = shadow mode
+ORCHESTRATOR_LIQUIDATION_ENABLED = False  # Enable staged liquidation
+ORCHESTRATOR_COOLDOWN_MINUTES = 60    # Min time between mode changes
+DEFENSIVE_INVENTORY_PCT = 150         # Enter DEFENSIVE threshold
+GRID_REDUCED_ENTER_PCT = 100          # Enter GRID_REDUCED threshold
+```
+
+### State Persistence
+
+- **Orchestrator state**: `/tmp/bluebird-orchestrator.json`
+- Telemetry tracks $ amounts: `buys_blocked_notional`, `liquidations_placed_notional`
+
 ## Downtrend Protection (Inventory Control)
 
 Two additional layers prevent inventory buildup during downtrends:
@@ -254,6 +317,9 @@ Key endpoints on `http://localhost:8000`:
 - `GET /api/risk/overlay` - Risk overlay mode, triggers, telemetry
 - `GET /api/risk/overlay/telemetry` - $ amounts of buys avoided/cancelled
 - `POST /api/risk/overlay` - Manual override (NORMAL, RISK_OFF, or clear)
+- `GET /api/orchestrator/status` - Orchestrator mode, inventory %, episodes
+- `GET /api/orchestrator/symbol/{symbol}` - Per-symbol orchestrator status
+- `GET /api/orchestrator/telemetry` - $ amounts blocked/liquidated
 - `GET /api/grid/status` - Grid levels and fill status
 - `GET /api/db/stats` - Database statistics
 - `GET /api/db/reconcile` - Sync database with Alpaca

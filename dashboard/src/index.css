@@ -57,6 +57,17 @@
   --risk-off: #ff6b6b;
   --risk-off-bg: rgba(255, 107, 107, 0.12);
   --risk-off-glow: rgba(255, 107, 107, 0.35);
+
+  /* Orchestrator Colors - Teal/Cyan theme for inventory management */
+  --orch-full: #22d3ee;
+  --orch-full-bg: rgba(34, 211, 238, 0.08);
+  --orch-full-glow: rgba(34, 211, 238, 0.25);
+  --orch-reduced: #fbbf24;
+  --orch-reduced-bg: rgba(251, 191, 36, 0.1);
+  --orch-reduced-glow: rgba(251, 191, 36, 0.3);
+  --orch-defensive: #f87171;
+  --orch-defensive-bg: rgba(248, 113, 113, 0.12);
+  --orch-defensive-glow: rgba(248, 113, 113, 0.35);
 }
 
 * {
@@ -3739,6 +3750,678 @@ input:focus {
 .risk-unavailable-text {
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ORCHESTRATOR PANEL - Inventory Management Command Center
+   Teal/Cyan theme to distinguish from RiskOverlay's red/gold
+═══════════════════════════════════════════════════════════════════════════ */
+
+.orch-banner {
+  background: var(--midnight-surface);
+  border: 1px solid rgba(34, 211, 238, 0.1);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.orch-banner::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 12px 12px 0 0;
+}
+
+/* GRID_FULL Mode - Teal */
+.orch-banner-grid_full {
+  border-color: rgba(34, 211, 238, 0.15);
+}
+
+.orch-banner-grid_full::before {
+  background: linear-gradient(90deg, transparent, var(--orch-full), transparent);
+}
+
+/* GRID_REDUCED Mode - Amber */
+.orch-banner-grid_reduced {
+  border-color: rgba(251, 191, 36, 0.2);
+  background: linear-gradient(135deg, var(--midnight-surface), var(--orch-reduced-bg));
+  animation: orch-reduced-pulse 3s ease-in-out infinite;
+}
+
+.orch-banner-grid_reduced::before {
+  background: linear-gradient(90deg, var(--orch-reduced), var(--gold-primary), var(--orch-reduced));
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes orch-reduced-pulse {
+  0%, 100% { box-shadow: 0 0 20px var(--orch-reduced-glow); }
+  50% { box-shadow: 0 0 35px var(--orch-reduced-glow), 0 0 60px rgba(251, 191, 36, 0.15); }
+}
+
+/* DEFENSIVE Mode - Red */
+.orch-banner-defensive {
+  border-color: rgba(248, 113, 113, 0.25);
+  background: linear-gradient(135deg, var(--midnight-surface), var(--orch-defensive-bg));
+  animation: orch-defensive-pulse 2s ease-in-out infinite;
+}
+
+.orch-banner-defensive::before {
+  background: linear-gradient(90deg, var(--orch-defensive), #fca5a5, var(--orch-defensive));
+  height: 4px;
+}
+
+@keyframes orch-defensive-pulse {
+  0%, 100% { box-shadow: 0 0 25px var(--orch-defensive-glow); }
+  50% { box-shadow: 0 0 45px var(--orch-defensive-glow), 0 0 80px rgba(248, 113, 113, 0.2); }
+}
+
+.orch-banner-unavailable {
+  opacity: 0.6;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.orch-banner-unavailable::before {
+  background: linear-gradient(90deg, transparent, var(--text-muted), transparent);
+}
+
+/* Banner Content */
+.orch-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.orch-mode-badge-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.orch-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-weight: 600;
+}
+
+.orch-mode-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.orch-mode-icon {
+  font-size: 1.1rem;
+}
+
+.orch-mode-text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.orch-mode-badge.grid_full .orch-mode-text { color: var(--orch-full); }
+.orch-mode-badge.grid_reduced .orch-mode-text { color: var(--orch-reduced); }
+.orch-mode-badge.defensive .orch-mode-text { color: var(--orch-defensive); }
+
+/* Status Badges */
+.orch-status-badges {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.orch-mini-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+.orch-mini-badge.active {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--orch-full);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+}
+
+.orch-mini-badge.shadow {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.orch-mini-badge.liq-on {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+}
+
+.orch-mini-badge.liq-off {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Inventory Gauge */
+.orch-inventory-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.orch-inv-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.orch-inventory-gauge {
+  width: 100px;
+  height: 8px;
+  background: var(--midnight-elevated);
+  border-radius: 4px;
+  position: relative;
+  overflow: visible;
+}
+
+.orch-inventory-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease, background 0.3s ease;
+}
+
+.orch-inventory-fill.normal {
+  background: linear-gradient(90deg, var(--orch-full), #06b6d4);
+}
+
+.orch-inventory-fill.warning {
+  background: linear-gradient(90deg, var(--orch-reduced), #f59e0b);
+}
+
+.orch-inventory-fill.critical {
+  background: linear-gradient(90deg, var(--orch-defensive), #ef4444);
+  animation: inventory-critical-pulse 1s ease-in-out infinite;
+}
+
+@keyframes inventory-critical-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.orch-inventory-markers {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.orch-inv-marker {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.3);
+  transform: translateX(-50%);
+}
+
+.orch-inv-marker.critical {
+  background: var(--orch-defensive);
+}
+
+.orch-inv-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.orch-inv-value.warning { color: var(--orch-reduced); }
+.orch-inv-value.critical { color: var(--orch-defensive); }
+
+/* Episode Duration */
+.orch-episode-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.orch-episode-label {
+  font-size: 0.55rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.orch-episode-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.orch-episode-value.aged {
+  color: var(--orch-reduced);
+}
+
+/* Quick Telemetry */
+.orch-telem-quick {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.orch-telem-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.orch-telem-badge.blocked {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--orch-defensive);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+}
+
+.orch-telem-badge.liq {
+  background: rgba(96, 165, 250, 0.12);
+  color: #60a5fa;
+  border: 1px solid rgba(96, 165, 250, 0.25);
+}
+
+/* Chevron */
+.orch-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+  transition: transform 0.3s ease;
+}
+
+.orch-chevron.expanded {
+  transform: rotate(180deg);
+}
+
+/* Expanded Panel */
+.orch-panel {
+  background: var(--midnight-surface);
+  border: 1px solid rgba(34, 211, 238, 0.08);
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  margin-top: -1.25rem;
+  margin-bottom: 1.25rem;
+  padding: 1.25rem;
+  animation: slideDown 0.25s ease;
+}
+
+.orch-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.orch-section {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 10px;
+  padding: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.orch-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.orch-section-icon {
+  font-size: 0.9rem;
+}
+
+.orch-section-title {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+/* Symbol Grid */
+.orch-symbol-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.orch-symbol-card {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 0.75rem;
+  border-left: 3px solid var(--orch-full);
+  transition: all 0.2s ease;
+}
+
+.orch-symbol-card.grid_reduced {
+  border-left-color: var(--orch-reduced);
+  background: rgba(251, 191, 36, 0.05);
+}
+
+.orch-symbol-card.defensive {
+  border-left-color: var(--orch-defensive);
+  background: rgba(248, 113, 113, 0.05);
+}
+
+.orch-symbol-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.orch-symbol-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.orch-symbol-mode {
+  font-size: 0.65rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.orch-symbol-mode.grid_full {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--orch-full);
+}
+
+.orch-symbol-mode.grid_reduced {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--orch-reduced);
+}
+
+.orch-symbol-mode.defensive {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--orch-defensive);
+}
+
+.orch-symbol-stats {
+  display: flex;
+  gap: 1rem;
+}
+
+.orch-symbol-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.orch-stat-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.orch-stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.orch-stat-value.warning { color: var(--orch-reduced); }
+.orch-stat-value.aged { color: var(--orch-reduced); }
+
+.orch-empty-state {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 1rem;
+  font-style: italic;
+}
+
+/* Mode Thresholds Visualization */
+.orch-thresholds-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.orch-threshold-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.orch-threshold-bar {
+  display: flex;
+  height: 24px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--midnight-elevated);
+}
+
+.orch-threshold-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.orch-threshold-zone.full {
+  background: linear-gradient(90deg, rgba(34, 211, 238, 0.2), rgba(34, 211, 238, 0.3));
+  color: var(--orch-full);
+}
+
+.orch-threshold-zone.reduced {
+  background: linear-gradient(90deg, rgba(251, 191, 36, 0.2), rgba(251, 191, 36, 0.3));
+  color: var(--orch-reduced);
+}
+
+.orch-threshold-zone.defensive {
+  background: linear-gradient(90deg, rgba(248, 113, 113, 0.2), rgba(248, 113, 113, 0.3));
+  color: var(--orch-defensive);
+}
+
+.orch-threshold-labels {
+  display: flex;
+  justify-content: space-between;
+  position: relative;
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  padding: 0 0.25rem;
+}
+
+.orch-threshold-labels span {
+  position: absolute;
+}
+
+.orch-threshold-labels span:first-child { left: 0; }
+.orch-threshold-labels span:last-child { right: 0; }
+
+.orch-mode-effects {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.orch-effect-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.orch-effect-mode {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-weight: 500;
+  min-width: 90px;
+  text-align: center;
+}
+
+.orch-effect-mode.full {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--orch-full);
+}
+
+.orch-effect-mode.reduced {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--orch-reduced);
+}
+
+.orch-effect-mode.defensive {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--orch-defensive);
+}
+
+.orch-effect-desc {
+  color: var(--text-secondary);
+}
+
+/* Telemetry Grid */
+.orch-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+}
+
+.orch-telem-stat {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+}
+
+.orch-telem-stat.highlight {
+  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid rgba(96, 165, 250, 0.15);
+}
+
+.orch-telem-icon {
+  font-size: 1rem;
+}
+
+.orch-telem-data {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.orch-telem-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.orch-telem-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+}
+
+/* Liquidation Rules */
+.orch-liq-status {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.6rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.orch-liq-status.enabled {
+  background: rgba(34, 211, 238, 0.15);
+  color: var(--orch-full);
+}
+
+.orch-liq-status.disabled {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+}
+
+.orch-liq-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.orch-liq-rule {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+  border-left: 2px solid rgba(96, 165, 250, 0.3);
+}
+
+.orch-rule-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #60a5fa;
+  min-width: 70px;
+}
+
+.orch-rule-cond {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .orch-banner-content {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .orch-chevron {
+    position: absolute;
+    right: 1rem;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .orch-chevron.expanded {
+    transform: translateY(-50%) rotate(180deg);
+  }
+
+  .orch-panel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .orch-telemetry-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Responsive */
