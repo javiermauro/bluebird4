@@ -13,6 +13,13 @@
   - Grid-level creation/tracking, profits, cycles.
 - **Risk Overlay (Crash Protection)**: `src/strategy/risk_overlay.py`
   - State machine: NORMAL → RISK_OFF → RECOVERY → NORMAL
+  - Triggers: 2-of-3 (momentum shock, ADX downtrend, correlation spike)
+- **Orchestrator (Inventory Management)**: `src/strategy/orchestrator.py`
+  - Meta-controller that runs AFTER windfall/stop-loss, BEFORE grid orders
+  - Modes: GRID_FULL → GRID_REDUCED (100%+) → DEFENSIVE (150%+)
+  - Episode tracking: starts at 30% inventory, resets at 10%
+  - Staged liquidation: TP Trim (24h), Loss Cut (48h), Max Age (72h)
+  - Critical: Never overrides Risk Overlay decisions
 - **Database**: `src/database/db.py` using SQLite at `data/bluebird.db`
 - **Single-instance / process locks**: `src/utils/process_lock.py` using `/tmp/bluebird/`
 
@@ -22,6 +29,7 @@
   - `/tmp/bluebird-grid-state.json`
   - `/tmp/bluebird-risk-state.json`
   - `/tmp/bluebird-risk-overlay.json`
+  - `/tmp/bluebird-orchestrator.json` (NEW)
   - `/tmp/bluebird-daily-equity.json`
 - **Locks / PIDs**:
   - `/tmp/bluebird/*.lock`
@@ -29,36 +37,39 @@
 
 ## Safety Gating Order (Conceptual)
 When deciding whether to buy:
-- **Risk overlay gate** (highest priority): can block buys entirely in RISK_OFF.
-- **Regime/momentum/time gates**: reduce frequency / avoid poor conditions.
-- **Allocation caps**: prevent concentration and overbuying.
-- **Crash-guard heuristics**: e.g., consecutive down bars block (inventory control).
+1. **Risk Overlay gate** (highest priority): blocks buys entirely in RISK_OFF
+2. **Orchestrator gate**: blocks buys in DEFENSIVE mode, reduces size in GRID_REDUCED
+3. **Downtrend protection**: 50% size when ADX 25-35 + DOWN direction
+4. **Consecutive down bars**: blocks buys after 3+ red candles
+5. **Regime/momentum/time gates**: reduce frequency / avoid poor conditions
+6. **Allocation caps**: prevent concentration and overbuying
+
+## Dashboard Panels
+- **Risk Overlay Panel**: Red/gold color scheme, shows NORMAL/RISK_OFF/RECOVERY status
+- **Orchestrator Panel**: Teal/cyan color scheme, shows inventory %, episode tracking, telemetry
+- Both panels are collapsible with expanded detail views
 
 ## Operational Pattern: Reconcile on Recovery
-- After restarts/outages, use a reconcile endpoint (`/api/db/reconcile`) to align local DB/tracking with Alpaca fills.
-- Strategy is resilient to downtime because **existing limit orders live on the exchange** and can fill while the bot is offline.
+- After restarts/outages, use `/api/db/reconcile` to align local DB/tracking with Alpaca fills
+- Strategy is resilient to downtime because **existing limit orders live on the exchange**
 
-## Reporting / “Day Boundary” Pattern
-- Operator-facing rollups (e.g., `daily_summary`) should follow **Mac mini local time** for day boundaries so daily P&L matches how the operator thinks.
-- To avoid DST ambiguity, store the local timezone name (or offset) alongside the summary logic (either in config, logs, or an explicit DB field if added later).
+## Reporting / "Day Boundary" Pattern
+- Operator-facing rollups follow **Mac mini local time** for day boundaries
+- Daily P&L matches how the operator thinks about trading days
 
-## AI / ML Components Present (Reference Inventory)
-These exist in the repo for experimentation but are **not the primary live edge** today (grid-first).
-- **`src/strategy/adaptive_ai.py`**: `AdaptiveAI` — indicator computation + ML prediction + confidence/reasoning.
-- **`src/strategy/ml_strategy.py`**: `MLStrategy` — legacy ML trading loop scaffold.
-- **`src/strategy/ultra_strategy.py`**: `UltraStrategy` — regime-driven controller (multi-strategy concept).
-- **`src/models/predictor.py`**: `Predictor` wrapper around a model’s `predict()` for probabilities.
+## Grid Trading Metrics
+- **Cycle win rate**: 100% by design (spacing > fees = guaranteed profit per cycle)
+- **Fee efficiency**: Target 40x+ profit/fee ratio
+- **Spacing requirements**: Must exceed ~0.60% round-trip fees to be profitable
 
-Recommended exploration pattern:
-- Start **shadow-mode** (log signals only), then allow AI to **only reduce risk** (pause buys / reduce size) if it proves it improves profitability/risk.
-
-## Logging Pattern (Current Reality)
-- Notifier writes to a file (e.g., `/tmp/bluebird-notifier.log`) via a `FileHandler`.
-- Bot logging depends on how it is launched:
-  - If launched using shell redirection (per `CLAUDE.md`), output goes to `/tmp/bluebird-bot.log`.
-  - If launched via `start.py`, bot stdout/stderr is piped (`subprocess.PIPE`) and may not persist to a log file unless explicitly drained/redirected.
+## API Endpoints (Key)
+- `GET /health` - Service health and regime
+- `GET /api/risk/status` - Equity, daily P/L, drawdown
+- `GET /api/risk/overlay` - Risk overlay mode, triggers, telemetry
+- `GET /api/orchestrator/status` - Orchestrator mode, inventory, episodes
+- `GET /api/grid/status` - Grid levels, fill status, profits
+- `POST /api/risk/overlay` - Manual override (RISK_OFF, NORMAL, or clear)
 
 ## Deprecated Patterns
-- Prediction-first bots under `archive/old_bots/` are considered legacy; current system is grid-first.
-
-
+- Prediction-first bots under `archive/old_bots/` are considered legacy
+- Current system is grid-first with protection layers
