@@ -1,10 +1,22 @@
 # Progress — Status & History
 
 ## Current Status
-- [2025-12-21 21:00] System healthy, NORMAL mode, all protection layers active
-- [2025-12-21 21:00] Best day since grid trading started: +$1,685 (+1.83%)
+- [2025-12-23 10:35] System healthy, NORMAL mode, all protection layers active
+- [2025-12-23 10:35] Notification system overhauled - now database-backed with retry logic
 
 ## Recent Work (High Signal)
+
+### Dec 23, 2025 — Notification System Reliability Overhaul
+- **Critical Fix**: Notifier was down 26+ hours (file permission error) - fixed and restarted
+- **Database Persistence**: All notification state now in SQLite (`data/bluebird.db`):
+  - `sms_history` - Audit trail of all SMS sent
+  - `notified_trade_ids` - Prevents duplicate alerts across restarts
+  - `sms_queue` - Failed SMS retry queue
+  - `notifier_status` - Heartbeat, status, API failure tracking
+- **SMS Retry Logic**: 3 attempts with exponential backoff (5s, 10s, 20s), then queued for later
+- **API Resilience**: Exponential backoff + circuit breaker (5 failures = SMS alert + 5min cooldown)
+- **Watchdog Monitoring**: Cron job every 5 min checks DB heartbeat, auto-restarts if stale
+- **Files Modified**: `src/database/db.py`, `src/notifications/notifier.py`, `scripts/check_notifier.sh`
 
 ### Dec 21, 2025 — Orchestrator Launch + Strong Performance
 - **Orchestrator Go-Live (3 stages)**:
@@ -39,8 +51,9 @@
 ## Known Issues / Follow-ups
 - **P2**: New grid configs saved but grids using old state until price moves 3%+ (triggers rebalance)
 - **P2**: Orchestrator hasn't been stress-tested with inventory >100% yet
-- **P2**: Bot log persistence depends on launch method
-- **P3**: Auto-restart after reboot not configured (LaunchAgent)
+- **P3**: Bot auto-restart after reboot not configured (LaunchAgent)
+- ~~P2: Notifier state persistence~~ FIXED Dec 23 - now database-backed
+- ~~P3: Notifier monitoring~~ FIXED Dec 23 - watchdog cron job active
 
 ## Performance Tracking
 | Date | Daily P/L | Grid P/L | Notes |

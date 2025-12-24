@@ -43,6 +43,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.notifications.config import NotificationConfig
 from src.notifications import templates
+from src.database.db import (
+    record_sms, is_trade_notified, mark_trade_notified, get_notified_trade_ids,
+    queue_failed_sms, get_queued_sms, update_queued_sms,
+    update_notifier_heartbeat, get_notifier_status, increment_sms_count,
+    get_sms_history, cleanup_old_sms_records
+)
 
 # PID and state file paths (for dashboard integration)
 PID_FILE = "/tmp/bluebird-notifier.pid"
@@ -78,14 +84,15 @@ class NotificationService:
 
         # State tracking
         self.last_order_count = 0
-        self.last_trade_ids: Set[str] = set()
+        self.last_trade_ids: Set[str] = get_notified_trade_ids()  # Load from DB
         self.last_risk_halted = False
         self.last_drawdown_alert_sent = False
         self.last_daily_summary_date: Optional[datetime] = None
         self.starting_equity: Optional[float] = None
 
-        # Risk overlay state tracking
-        self.last_risk_overlay_mode: Optional[str] = None
+        # Risk overlay state tracking (load from DB if exists)
+        db_status = get_notifier_status()
+        self.last_risk_overlay_mode: Optional[str] = db_status.get('last_overlay_mode') if db_status else None
         self.risk_overlay_alert_sent = False
 
         # Watchdog state - detect stale data (bot stream disconnected)
@@ -93,10 +100,17 @@ class NotificationService:
         self.stale_alert_sent = False
         self.stale_threshold_minutes = 5  # Alert if no update for 5 minutes
 
-        # SMS counter (persisted to disk)
-        self.sms_count_today = 0
-        self.sms_count_date: Optional[str] = None
-        self._load_sms_count()
+        # API resilience tracking
+        self.api_failure_count = db_status.get('api_failures', 0) if db_status else 0
+        self.api_backoff_multiplier = 1
+        self.circuit_breaker_open = False
+        self.circuit_breaker_opened_at: Optional[datetime] = None
+
+        # SMS counter (loaded from DB via get_notifier_status)
+        self.sms_count_today = db_status.get('sms_today', 0) if db_status else 0
+        self.sms_count_date: Optional[str] = db_status.get('sms_today_date') if db_status else None
+
+        logger.info(f"Loaded {len(self.last_trade_ids)} notified trade IDs from database")
 
         # Twilio client (lazy load)
         self._twilio_client = None
@@ -151,43 +165,8 @@ class NotificationService:
         except Exception as e:
             logger.debug(f"Could not write startup file: {e}")
 
-    def _load_sms_count(self) -> None:
-        """Load SMS count from disk."""
-        try:
-            if os.path.exists(SMS_COUNT_FILE):
-                with open(SMS_COUNT_FILE, 'r') as f:
-                    data = json.load(f)
-                    # Reset count if it's a new day
-                    today = datetime.now().strftime('%Y-%m-%d')
-                    if data.get('date') == today:
-                        self.sms_count_today = data.get('count', 0)
-                        self.sms_count_date = today
-                    else:
-                        self.sms_count_today = 0
-                        self.sms_count_date = today
-        except Exception as e:
-            logger.debug(f"Could not load SMS count: {e}")
-            self.sms_count_today = 0
-            self.sms_count_date = datetime.now().strftime('%Y-%m-%d')
-
-    def _save_sms_count(self, last_sent: Optional[str] = None) -> None:
-        """Save SMS count to disk for dashboard."""
-        try:
-            today = datetime.now().strftime('%Y-%m-%d')
-            # Reset if new day
-            if self.sms_count_date != today:
-                self.sms_count_today = 0
-                self.sms_count_date = today
-
-            data = {
-                "count": self.sms_count_today,
-                "date": today,
-                "last_sent": last_sent or datetime.now().isoformat()
-            }
-            with open(SMS_COUNT_FILE, 'w') as f:
-                json.dump(data, f)
-        except Exception as e:
-            logger.debug(f"Could not save SMS count: {e}")
+    # Note: _load_sms_count() and _save_sms_count() removed - now using database via
+    # get_notifier_status() and increment_sms_count()
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
@@ -209,20 +188,19 @@ class NotificationService:
                 raise
         return self._twilio_client
 
-    def send_sms(self, message: str, force: bool = False, sms_type: str = "alert") -> bool:
+    def send_sms(self, message: str, force: bool = False, sms_type: str = "alert", max_retries: int = 3) -> bool:
         """
-        Send an SMS message via Twilio.
+        Send an SMS message via Twilio with retry logic.
 
         Args:
             message: The message content
             force: If True, ignore quiet hours
             sms_type: Type of SMS (startup, trade, alert, summary, test)
+            max_retries: Number of retry attempts on failure
 
         Returns:
             True if sent successfully, False otherwise
         """
-        from src.notifications.config import add_sms_to_history
-
         # Check quiet hours
         current_hour = datetime.now().hour
         if not force and self.config.is_quiet_hours(current_hour):
@@ -235,53 +213,164 @@ class NotificationService:
             logger.debug(f"Message would have been: {message}")
             return False
 
-        try:
-            result = self.twilio_client.messages.create(
-                body=message,
-                from_=self.config.twilio_phone_number,
-                to=self.config.notify_phone_number
-            )
-            logger.info(f"SMS sent: {result.sid}")
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                result = self.twilio_client.messages.create(
+                    body=message,
+                    from_=self.config.twilio_phone_number,
+                    to=self.config.notify_phone_number
+                )
+                logger.info(f"SMS sent: {result.sid}")
 
-            # Track SMS count
-            self.sms_count_today += 1
-            self._save_sms_count(datetime.now().isoformat())
+                # Track SMS count in database
+                self.sms_count_today += 1
+                increment_sms_count()
 
-            # Add to SMS history
-            add_sms_to_history(
-                sms_type=sms_type,
-                preview=message,
-                status="sent",
-                recipient=self.config.notify_phone_number
-            )
+                # Record in database history
+                record_sms(
+                    message_type=sms_type,
+                    recipient=self.config.notify_phone_number,
+                    body_preview=message[:100] if message else "",
+                    twilio_sid=result.sid,
+                    status="sent",
+                    retry_count=attempt
+                )
 
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send SMS: {e}")
-            # Track failed SMS in history too
-            add_sms_to_history(
-                sms_type=sms_type,
-                preview=message,
-                status="failed",
-                recipient=self.config.notify_phone_number
-            )
-            return False
+                return True
+
+            except Exception as e:
+                last_error = str(e)
+                wait_time = (2 ** attempt) * 5  # 5s, 10s, 20s
+                logger.warning(f"SMS attempt {attempt + 1}/{max_retries} failed: {e}")
+
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+
+        # All retries failed - queue for later
+        logger.error(f"SMS failed after {max_retries} attempts, queuing for retry")
+        queue_failed_sms(
+            body=message,
+            message_type=sms_type,
+            priority=1 if sms_type == "alert" else 0,
+            error_message=last_error
+        )
+
+        # Record failed SMS in history
+        record_sms(
+            message_type=sms_type,
+            recipient=self.config.notify_phone_number,
+            body_preview=message[:100] if message else "",
+            status="queued",
+            retry_count=max_retries,
+            error_message=last_error
+        )
+
+        return False
+
+    def _retry_queued_sms(self) -> None:
+        """Retry any queued SMS messages that are due for retry."""
+        queued = get_queued_sms(limit=5)
+        if not queued:
+            return
+
+        logger.info(f"Retrying {len(queued)} queued SMS messages")
+        for item in queued:
+            try:
+                result = self.twilio_client.messages.create(
+                    body=item['body'],
+                    from_=self.config.twilio_phone_number,
+                    to=self.config.notify_phone_number
+                )
+                logger.info(f"Queued SMS sent successfully: {result.sid}")
+                update_queued_sms(item['id'], success=True)
+
+                # Record success in history
+                record_sms(
+                    message_type=item.get('message_type', 'retry'),
+                    recipient=self.config.notify_phone_number,
+                    body_preview=item['body'][:100],
+                    twilio_sid=result.sid,
+                    status="sent",
+                    retry_count=item['attempts']
+                )
+
+                increment_sms_count()
+
+            except Exception as e:
+                logger.warning(f"Queued SMS retry failed: {e}")
+                update_queued_sms(item['id'], success=False, error_message=str(e))
 
     def fetch_stats(self) -> Optional[Dict[str, Any]]:
-        """Fetch current stats from the bot's API."""
-        try:
-            response = requests.get(
-                f"{self.config.bot_api_url}/stats",
-                timeout=10
+        """Fetch current stats from the bot's API with exponential backoff and circuit breaker."""
+        # Circuit breaker check
+        if self.circuit_breaker_open:
+            if self.circuit_breaker_opened_at:
+                elapsed = (datetime.now() - self.circuit_breaker_opened_at).total_seconds()
+                if elapsed < 300:  # 5 minute cooldown
+                    logger.debug(f"Circuit breaker open, {300 - elapsed:.0f}s until retry")
+                    return None
+                else:
+                    logger.info("Circuit breaker cooldown expired, attempting reconnection")
+                    self.circuit_breaker_open = False
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                response = requests.get(
+                    f"{self.config.bot_api_url}/stats",
+                    timeout=10
+                )
+                response.raise_for_status()
+
+                # Success - reset failure tracking
+                if self.api_failure_count > 0:
+                    logger.info(f"API reconnected after {self.api_failure_count} failures")
+                self.api_failure_count = 0
+                self.api_backoff_multiplier = 1
+                update_notifier_heartbeat(api_failures=0)
+
+                return response.json()
+
+            except requests.exceptions.ConnectionError:
+                self.api_failure_count += 1
+                if attempt < max_attempts - 1:
+                    wait = min(self.api_backoff_multiplier * 10, 60)
+                    logger.warning(f"Cannot connect to bot API (attempt {attempt + 1}/{max_attempts}), retrying in {wait}s")
+                    time.sleep(wait)
+                    self.api_backoff_multiplier *= 2
+                else:
+                    logger.warning(f"Cannot connect to bot API after {max_attempts} attempts")
+
+            except Exception as e:
+                self.api_failure_count += 1
+                logger.error(f"Failed to fetch stats: {e}")
+                break
+
+        # Track failures in database
+        update_notifier_heartbeat(api_failures=self.api_failure_count)
+
+        # Circuit breaker logic - open after 5 consecutive failures
+        if self.api_failure_count >= 5 and not self.circuit_breaker_open:
+            self.circuit_breaker_open = True
+            self.circuit_breaker_opened_at = datetime.now()
+            logger.error(f"Circuit breaker OPEN after {self.api_failure_count} failures - bot may be down")
+
+            # Send alert that bot may be unresponsive
+            self.send_sms(
+                f"⚠️ BLUEBIRD ALERT\n\n"
+                f"Bot API unresponsive!\n"
+                f"Failed {self.api_failure_count} consecutive attempts.\n\n"
+                f"Check bot status:\n"
+                f"  curl http://localhost:8000/health\n\n"
+                f"Restart if needed:\n"
+                f"  python3 start.py --stop && python3 start.py",
+                force=True,
+                sms_type="alert"
             )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.ConnectionError:
-            logger.warning("Cannot connect to bot API - is the bot running?")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to fetch stats: {e}")
-            return None
+
+        return None
 
     def check_for_new_trades(self, stats: Dict[str, Any]) -> None:
         """Check for new trade executions and send alerts."""
@@ -296,22 +385,48 @@ class NotificationService:
         # First run - initialize state
         if self.last_order_count == 0:
             self.last_order_count = current_count
+            # Mark all current trades as notified (they existed before we started)
+            for order in confirmed:
+                order_id = order.get('order_id', '')
+                if order_id and not is_trade_notified(order_id):
+                    mark_trade_notified(order_id)
             self.last_trade_ids = {o.get('order_id', '') for o in confirmed}
             return
 
         # Check for new trades
         if current_count > self.last_order_count:
-            # Find new orders
-            current_ids = {o.get('order_id', '') for o in confirmed}
-            new_ids = current_ids - self.last_trade_ids
-
             for order in confirmed:
-                if order.get('order_id', '') in new_ids:
+                order_id = order.get('order_id', '')
+                if not order_id:
+                    continue
+
+                # Check database to prevent duplicates (survives restart)
+                if not is_trade_notified(order_id):
+                    # Only notify about recent trades (within last 5 minutes)
+                    # This prevents SMS spam when bot restarts and reconciles old trades
+                    filled_at = order.get('filled_at', '')
+                    if filled_at:
+                        try:
+                            trade_time = datetime.fromisoformat(filled_at.replace('Z', '+00:00'))
+                            if trade_time.tzinfo:
+                                trade_time = trade_time.replace(tzinfo=None)
+                            age_seconds = (datetime.now() - trade_time).total_seconds()
+                            if age_seconds > 300:  # 5 minutes
+                                logger.debug(f"Skipping old trade {order_id}: filled {age_seconds:.0f}s ago")
+                                mark_trade_notified(order_id)  # Mark as notified to avoid re-checking
+                                self.last_trade_ids.add(order_id)
+                                continue
+                        except Exception as e:
+                            logger.warning(f"Could not parse filled_at timestamp: {e}")
+
                     message = templates.format_trade_alert(order)
                     logger.info(f"New trade detected: {order.get('symbol')} {order.get('side')}")
                     self.send_sms(message, sms_type="trade")
 
-            self.last_trade_ids = current_ids
+                    # Mark as notified in database
+                    mark_trade_notified(order_id)
+                    self.last_trade_ids.add(order_id)
+
             self.last_order_count = current_count
 
     def check_risk_alerts(self, stats: Dict[str, Any]) -> None:
@@ -444,6 +559,7 @@ class NotificationService:
         # First run - just initialize state
         if self.last_risk_overlay_mode is None:
             self.last_risk_overlay_mode = current_mode
+            update_notifier_heartbeat(overlay_mode=current_mode)  # Persist to DB
             logger.info(f"Risk overlay initialized: {current_mode}")
             return
 
@@ -483,6 +599,7 @@ class NotificationService:
                 self.send_sms(message, force=True, sms_type="alert")
 
             self.last_risk_overlay_mode = current_mode
+            update_notifier_heartbeat(overlay_mode=current_mode)  # Persist to DB
 
     def initialize_starting_equity(self, stats: Dict[str, Any]) -> None:
         """Initialize starting equity from stats or risk data."""
@@ -521,6 +638,9 @@ class NotificationService:
 
         self.running = True
 
+        # Initialize heartbeat in database
+        update_notifier_heartbeat(pid=os.getpid(), status='running')
+
         # Send startup notification (with cooldown to prevent spam on restarts)
         if self.config.is_configured() and self._should_send_startup_sms():
             self.send_sms(templates.format_startup_message(
@@ -529,8 +649,16 @@ class NotificationService:
             ), sms_type="startup")
             self._record_startup_sms()
 
+        # Track cycles for periodic tasks
+        cycle_count = 0
+
         while self.running:
             try:
+                cycle_count += 1
+
+                # Update heartbeat in database every cycle
+                update_notifier_heartbeat(pid=os.getpid(), status='running')
+
                 # Fetch current stats
                 stats = self.fetch_stats()
 
@@ -545,6 +673,14 @@ class NotificationService:
                     self.check_daily_summary(stats)
                     self.check_stale_data(stats)
 
+                # Retry any queued SMS (every cycle)
+                if self.config.is_configured():
+                    self._retry_queued_sms()
+
+                # Periodic cleanup (every 60 cycles = ~1 hour at 60s poll)
+                if cycle_count % 60 == 0:
+                    cleanup_old_sms_records(keep_days=30)
+
                 # Wait for next poll
                 time.sleep(self.config.poll_interval)
 
@@ -556,6 +692,9 @@ class NotificationService:
                 time.sleep(self.config.poll_interval)
 
         logger.info("Notification service stopped")
+
+        # Update status in database
+        update_notifier_heartbeat(status='stopped')
 
         # Clean up PID file
         self._remove_pid_file()

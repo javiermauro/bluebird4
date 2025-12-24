@@ -143,6 +143,67 @@ def init_database():
             )
         """)
 
+        # ============ NOTIFICATION TABLES ============
+
+        # SMS History - persistent record of all SMS sent
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sms_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                message_type TEXT NOT NULL,
+                recipient TEXT NOT NULL,
+                body_preview TEXT,
+                twilio_sid TEXT,
+                status TEXT DEFAULT 'sent',
+                retry_count INTEGER DEFAULT 0,
+                error_message TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Notified Trade IDs - prevent duplicate alerts
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notified_trade_ids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id TEXT UNIQUE NOT NULL,
+                notified_at TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Failed SMS Queue - retry later
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sms_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                body TEXT NOT NULL,
+                message_type TEXT,
+                priority INTEGER DEFAULT 0,
+                attempts INTEGER DEFAULT 0,
+                max_attempts INTEGER DEFAULT 5,
+                last_attempt TEXT,
+                next_retry TEXT,
+                error_message TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Notifier Status - heartbeat and state (single row table)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notifier_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                pid INTEGER,
+                started_at TEXT,
+                last_heartbeat TEXT,
+                last_sms_at TEXT,
+                sms_today INTEGER DEFAULT 0,
+                sms_today_date TEXT,
+                last_overlay_mode TEXT,
+                last_drawdown_alert REAL,
+                api_failures INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'running'
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
@@ -154,6 +215,11 @@ def init_database():
         # Unique indexes for idempotency and upsert operations
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_unique ON trades(order_id, side, quantity, price)")
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_summary(date)")
+
+        # Notification indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sms_history_timestamp ON sms_history(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sms_queue_next_retry ON sms_queue(next_retry)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_notified_trades_order_id ON notified_trade_ids(order_id)")
 
         conn.commit()
         logger.info(f"Database initialized at {DB_PATH}")
@@ -1042,6 +1108,240 @@ def get_database_stats() -> Dict:
             stats['db_size_mb'] = 0
 
         return stats
+
+
+# ============ NOTIFICATION FUNCTIONS ============
+
+def record_sms(
+    message_type: str,
+    recipient: str,
+    body_preview: str,
+    twilio_sid: str = None,
+    status: str = 'sent',
+    retry_count: int = 0,
+    error_message: str = None
+) -> int:
+    """Record an SMS in the history table."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO sms_history
+            (timestamp, message_type, recipient, body_preview, twilio_sid, status, retry_count, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (datetime.now().isoformat(), message_type, recipient, body_preview[:100] if body_preview else None,
+              twilio_sid, status, retry_count, error_message))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def is_trade_notified(order_id: str) -> bool:
+    """Check if a trade has already been notified."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM notified_trade_ids WHERE order_id = ?", (order_id,))
+        return cursor.fetchone() is not None
+
+
+def mark_trade_notified(order_id: str) -> int:
+    """Mark a trade as notified to prevent duplicates."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT OR IGNORE INTO notified_trade_ids (order_id, notified_at)
+                VALUES (?, ?)
+            """, (order_id, datetime.now().isoformat()))
+            conn.commit()
+            return cursor.lastrowid
+        except Exception:
+            return -1
+
+
+def get_notified_trade_ids(limit: int = 1000) -> set:
+    """Get all notified trade IDs (for migration from in-memory set)."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT order_id FROM notified_trade_ids
+            ORDER BY notified_at DESC LIMIT ?
+        """, (limit,))
+        return {row['order_id'] for row in cursor.fetchall()}
+
+
+def queue_failed_sms(
+    body: str,
+    message_type: str = None,
+    priority: int = 0,
+    error_message: str = None
+) -> int:
+    """Queue a failed SMS for later retry."""
+    next_retry = (datetime.now() + timedelta(minutes=5)).isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO sms_queue
+            (body, message_type, priority, attempts, last_attempt, next_retry, error_message)
+            VALUES (?, ?, ?, 1, ?, ?, ?)
+        """, (body, message_type, priority, datetime.now().isoformat(), next_retry, error_message))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_queued_sms(limit: int = 10) -> List[Dict]:
+    """Get SMS messages due for retry."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        cursor.execute("""
+            SELECT id, body, message_type, priority, attempts, max_attempts
+            FROM sms_queue
+            WHERE next_retry <= ? AND attempts < max_attempts
+            ORDER BY priority DESC, created_at ASC
+            LIMIT ?
+        """, (now, limit))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def update_queued_sms(queue_id: int, success: bool, error_message: str = None):
+    """Update a queued SMS after retry attempt."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if success:
+            # Remove from queue on success
+            cursor.execute("DELETE FROM sms_queue WHERE id = ?", (queue_id,))
+        else:
+            # Increment attempts and set next retry with exponential backoff
+            cursor.execute("SELECT attempts FROM sms_queue WHERE id = ?", (queue_id,))
+            row = cursor.fetchone()
+            if row:
+                attempts = row['attempts'] + 1
+                backoff_minutes = min(5 * (2 ** attempts), 60)  # Max 60 min backoff
+                next_retry = (datetime.now() + timedelta(minutes=backoff_minutes)).isoformat()
+                cursor.execute("""
+                    UPDATE sms_queue
+                    SET attempts = ?, last_attempt = ?, next_retry = ?, error_message = ?
+                    WHERE id = ?
+                """, (attempts, datetime.now().isoformat(), next_retry, error_message, queue_id))
+        conn.commit()
+
+
+def update_notifier_heartbeat(
+    pid: int = None,
+    status: str = 'running',
+    overlay_mode: str = None,
+    api_failures: int = None
+):
+    """Update the notifier status/heartbeat (upsert single row)."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        # Check if row exists
+        cursor.execute("SELECT sms_today, sms_today_date FROM notifier_status WHERE id = 1")
+        row = cursor.fetchone()
+
+        if row:
+            # Reset daily counter if new day
+            sms_today = row['sms_today'] if row['sms_today_date'] == today else 0
+
+            updates = ["last_heartbeat = ?", "status = ?"]
+            params = [now, status]
+
+            if pid is not None:
+                updates.append("pid = ?")
+                params.append(pid)
+            if overlay_mode is not None:
+                updates.append("last_overlay_mode = ?")
+                params.append(overlay_mode)
+            if api_failures is not None:
+                updates.append("api_failures = ?")
+                params.append(api_failures)
+
+            params.append(1)  # WHERE id = 1
+            cursor.execute(f"UPDATE notifier_status SET {', '.join(updates)} WHERE id = ?", params)
+        else:
+            # Insert initial row
+            cursor.execute("""
+                INSERT INTO notifier_status
+                (id, pid, started_at, last_heartbeat, sms_today, sms_today_date, status)
+                VALUES (1, ?, ?, ?, 0, ?, ?)
+            """, (pid, now, now, today, status))
+
+        conn.commit()
+
+
+def get_notifier_status() -> Optional[Dict]:
+    """Get the current notifier status."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notifier_status WHERE id = 1")
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def increment_sms_count():
+    """Increment the daily SMS counter."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        now = datetime.now().isoformat()
+
+        cursor.execute("SELECT sms_today_date FROM notifier_status WHERE id = 1")
+        row = cursor.fetchone()
+
+        if row:
+            if row['sms_today_date'] == today:
+                cursor.execute("""
+                    UPDATE notifier_status
+                    SET sms_today = sms_today + 1, last_sms_at = ?
+                    WHERE id = 1
+                """, (now,))
+            else:
+                # New day, reset counter
+                cursor.execute("""
+                    UPDATE notifier_status
+                    SET sms_today = 1, sms_today_date = ?, last_sms_at = ?
+                    WHERE id = 1
+                """, (today, now))
+        conn.commit()
+
+
+def get_sms_history(limit: int = 20) -> List[Dict]:
+    """Get recent SMS history."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM sms_history
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def cleanup_old_sms_records(keep_days: int = 30) -> int:
+    """Delete old SMS history and resolved queue items."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=keep_days)).isoformat()
+
+        # Clean old history
+        cursor.execute("DELETE FROM sms_history WHERE timestamp < ?", (cutoff,))
+        deleted_history = cursor.rowcount
+
+        # Clean old notified trade IDs (keep last 30 days)
+        cursor.execute("DELETE FROM notified_trade_ids WHERE notified_at < ?", (cutoff,))
+        deleted_trades = cursor.rowcount
+
+        # Clean old failed queue items that exceeded max attempts
+        cursor.execute("DELETE FROM sms_queue WHERE attempts >= max_attempts AND created_at < ?", (cutoff,))
+        deleted_queue = cursor.rowcount
+
+        conn.commit()
+        total = deleted_history + deleted_trades + deleted_queue
+        if total > 0:
+            logger.info(f"Cleaned up {total} old notification records")
+        return total
 
 
 # Initialize database on import

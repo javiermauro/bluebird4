@@ -71,8 +71,17 @@ ls /tmp/bluebird/*.pid                     # Running services
 - **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
 - **Orchestrator state**: `/tmp/bluebird-orchestrator.json`
 - **Daily equity**: `/tmp/bluebird-daily-equity.json`
-- **Database**: `data/bluebird.db`
+- **Database**: `data/bluebird.db` (trades, equity, orders, notifications)
 - **Lock files**: `/tmp/bluebird/*.lock`, `/tmp/bluebird/*.pid`
+
+### Database Tables
+**Trading tables**: `trades`, `equity_snapshots`, `orders`, `daily_summary`, `grid_snapshots`
+
+**Notification tables** (added Dec 23, 2025):
+- `sms_history` - Audit trail of all SMS sent
+- `notified_trade_ids` - Prevents duplicate trade alerts across restarts
+- `sms_queue` - Failed SMS queued for retry with exponential backoff
+- `notifier_status` - Heartbeat, PID, API failure count, overlay mode
 
 ## Configuration
 
@@ -270,6 +279,49 @@ CONSECUTIVE_DOWN_BARS_BLOCK = 3         # Block after 3 consecutive down bars
 **Log markers:**
 - `[DOWN] Skipping BUY {symbol}: 3 consecutive down bars`
 - `[REGIME] {symbol}: DEVELOPING DOWNTREND (ADX=30) - Size reduced to 50%`
+
+## Notification System (SMS Alerts)
+
+The notifier (`src/notifications/notifier.py`) polls the bot API and sends SMS alerts via Twilio.
+
+### Reliability Features (Added Dec 23, 2025)
+
+| Feature | Description |
+|---------|-------------|
+| **Database Persistence** | All state stored in SQLite, survives restarts |
+| **SMS Retry** | 3 attempts with exponential backoff (5s, 10s, 20s) |
+| **Failed SMS Queue** | Queued in DB for retry on next poll cycle |
+| **API Resilience** | Exponential backoff + circuit breaker (5 failures = alert) |
+| **Heartbeat** | Updates DB every 60s poll cycle |
+| **Watchdog** | Cron job checks DB heartbeat, auto-restarts if stale |
+
+### Alert Types
+- **Trade alerts**: New order executions
+- **Risk alerts**: Trading halted, drawdown threshold
+- **Risk overlay**: RISK_OFF/RECOVERY mode transitions
+- **Stale data**: Bot stream disconnected (5 min threshold)
+- **API down**: Circuit breaker opened after 5 consecutive failures
+
+### Watchdog Setup
+```bash
+# Cron job (every 5 min)
+*/5 * * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_notifier.sh" >> /tmp/bluebird-watchdog.log 2>&1
+
+# Manual check
+bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_notifier.sh"
+```
+
+### Check Notifier Status
+```bash
+# Via database
+sqlite3 data/bluebird.db "SELECT pid, last_heartbeat, status, sms_today FROM notifier_status"
+
+# Via process
+ps aux | grep notifier
+
+# Via logs
+tail -f /tmp/bluebird-notifier.log
+```
 
 ## Important Constraints
 

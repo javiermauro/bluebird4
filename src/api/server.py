@@ -655,57 +655,98 @@ SMS_COUNT_FILE = "/tmp/bluebird-notifier-count.json"
 
 
 def get_notifier_status() -> dict:
-    """Check if the notifier process is running."""
+    """Check if the notifier process is running. Uses database first, falls back to files."""
     import os
     import json
     from datetime import datetime
+    from src.database import db as database
 
     result = {
         "running": False,
         "pid": None,
         "uptime": None,
+        "started_at": None,
+        "last_heartbeat": None,
+        "heartbeat_age_seconds": None,
         "last_sms_sent": None,
         "sms_count_today": 0,
-        "quiet_hours_active": False
+        "api_failures": 0,
+        "quiet_hours_active": False,
+        "source": "legacy"
     }
 
-    # Check PID file
-    if os.path.exists(PID_FILE):
-        try:
-            with open(PID_FILE, 'r') as f:
-                data = json.load(f)
-                pid = data.get('pid')
-                started_at = data.get('started_at')
+    # Try database first
+    try:
+        db_status = database.get_notifier_status()
+        if db_status and db_status.get('pid'):
+            pid = db_status.get('pid')
 
-            # Check if process is actually running
-            if pid:
-                try:
-                    os.kill(pid, 0)  # Signal 0 just checks if process exists
-                    result["running"] = True
-                    result["pid"] = pid
+            # Verify process is actually running
+            try:
+                os.kill(pid, 0)
+                result["running"] = True
+                result["pid"] = pid
+                result["started_at"] = db_status.get('started_at')
+                result["last_heartbeat"] = db_status.get('last_heartbeat')
+                result["last_sms_sent"] = db_status.get('last_sms_at')
+                result["sms_count_today"] = db_status.get('sms_today', 0)
+                result["api_failures"] = db_status.get('api_failures', 0)
+                result["source"] = "database"
 
-                    # Calculate uptime
-                    if started_at:
-                        start_time = datetime.fromisoformat(started_at)
-                        uptime_seconds = (datetime.now() - start_time).total_seconds()
-                        hours, remainder = divmod(int(uptime_seconds), 3600)
-                        minutes, _ = divmod(remainder, 60)
-                        result["uptime"] = f"{hours}h {minutes}m"
-                except (ProcessLookupError, PermissionError):
-                    # Process not running, clean up PID file
-                    os.remove(PID_FILE)
-        except (json.JSONDecodeError, FileNotFoundError):
-            pass
+                # Calculate uptime
+                if db_status.get('started_at'):
+                    start_time = datetime.fromisoformat(db_status['started_at'])
+                    uptime_seconds = (datetime.now() - start_time).total_seconds()
+                    hours, remainder = divmod(int(uptime_seconds), 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    result["uptime"] = f"{hours}h {minutes}m"
 
-    # Check SMS count file
-    if os.path.exists(SMS_COUNT_FILE):
-        try:
-            with open(SMS_COUNT_FILE, 'r') as f:
-                count_data = json.load(f)
-                result["sms_count_today"] = count_data.get("count", 0)
-                result["last_sms_sent"] = count_data.get("last_sent")
-        except:
-            pass
+                # Calculate heartbeat age
+                if db_status.get('last_heartbeat'):
+                    last_hb = datetime.fromisoformat(db_status['last_heartbeat'])
+                    result["heartbeat_age_seconds"] = int((datetime.now() - last_hb).total_seconds())
+
+            except (ProcessLookupError, PermissionError):
+                # Process not running despite DB record
+                result["running"] = False
+    except Exception as e:
+        logger.warning(f"Database status lookup failed, using legacy: {e}")
+
+    # Fallback to legacy file-based approach if database didn't provide data
+    if result["source"] == "legacy":
+        if os.path.exists(PID_FILE):
+            try:
+                with open(PID_FILE, 'r') as f:
+                    data = json.load(f)
+                    pid = data.get('pid')
+                    started_at = data.get('started_at')
+
+                if pid:
+                    try:
+                        os.kill(pid, 0)
+                        result["running"] = True
+                        result["pid"] = pid
+                        result["started_at"] = started_at
+
+                        if started_at:
+                            start_time = datetime.fromisoformat(started_at)
+                            uptime_seconds = (datetime.now() - start_time).total_seconds()
+                            hours, remainder = divmod(int(uptime_seconds), 3600)
+                            minutes, _ = divmod(remainder, 60)
+                            result["uptime"] = f"{hours}h {minutes}m"
+                    except (ProcessLookupError, PermissionError):
+                        os.remove(PID_FILE)
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+
+        if os.path.exists(SMS_COUNT_FILE):
+            try:
+                with open(SMS_COUNT_FILE, 'r') as f:
+                    count_data = json.load(f)
+                    result["sms_count_today"] = count_data.get("count", 0)
+                    result["last_sms_sent"] = count_data.get("last_sent")
+            except:
+                pass
 
     # Check quiet hours
     current_hour = datetime.now().hour
@@ -832,15 +873,49 @@ async def test_notifier():
 
 
 @app.get("/api/notifier/history")
-async def get_notifier_history():
-    """Get SMS notification history (last 20 messages)."""
+async def get_notifier_history(limit: int = 20):
+    """Get SMS notification history from database."""
+    from src.database import db as database
+
+    try:
+        # Try database first
+        history = database.get_sms_history(limit=limit)
+        if history:
+            return {
+                "history": history,
+                "count": len(history),
+                "source": "database"
+            }
+    except Exception as e:
+        logger.warning(f"Database SMS history lookup failed: {e}")
+
+    # Fallback to legacy config-based loader
     try:
         from src.notifications.config import load_sms_history
         history = load_sms_history()
-        # Return in reverse order (newest first)
-        return {"history": list(reversed(history))}
+        return {
+            "history": list(reversed(history))[:limit],
+            "count": len(history),
+            "source": "legacy"
+        }
     except Exception as e:
-        return {"history": [], "error": str(e)}
+        return {"history": [], "count": 0, "error": str(e), "source": "error"}
+
+
+@app.get("/api/notifier/queue")
+async def get_notifier_queue():
+    """Get failed SMS queue (messages pending retry)."""
+    from src.database import db as database
+
+    try:
+        queue = database.get_queued_sms(limit=10)
+        return {
+            "queue": queue,
+            "count": len(queue),
+            "source": "database"
+        }
+    except Exception as e:
+        return {"queue": [], "count": 0, "error": str(e)}
 
 
 @app.get("/api/notifier/config")
