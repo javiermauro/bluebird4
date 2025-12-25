@@ -17,6 +17,10 @@ import numpy as np
 from datetime import datetime
 from pydantic import BaseModel
 
+# Project root for persistent state files (survives reboot, unlike /tmp)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
@@ -961,11 +965,62 @@ async def update_notifier_config(request: Request):
         return {"status": "error", "message": str(e)}
 
 
+# === BOT HEARTBEAT ===
+# Periodic heartbeat to database for external watchdog monitoring
+
+BOT_HEARTBEAT_INTERVAL = 60  # Update heartbeat every 60 seconds
+
+async def bot_heartbeat_loop():
+    """
+    Periodically update bot heartbeat in database.
+    This allows an external watchdog script to detect if the bot is dead.
+    """
+    import os as _os
+    from src.database.db import update_bot_heartbeat
+
+    pid = _os.getpid()
+    logger.info(f"[HEARTBEAT] Bot heartbeat loop started (PID: {pid}, interval: {BOT_HEARTBEAT_INTERVAL}s)")
+
+    # Initial heartbeat
+    try:
+        overlay_mode = system_state.get("risk_overlay", {}).get("mode", "UNKNOWN")
+        active_symbols = len(system_state.get("grids", {}))
+        update_bot_heartbeat(
+            pid=pid,
+            overlay_mode=overlay_mode,
+            active_symbols=active_symbols,
+            status="running"
+        )
+    except Exception as e:
+        logger.error(f"[HEARTBEAT] Initial heartbeat failed: {e}")
+
+    while True:
+        try:
+            await asyncio.sleep(BOT_HEARTBEAT_INTERVAL)
+
+            # Get current state for heartbeat
+            overlay_mode = system_state.get("risk_overlay", {}).get("mode", "UNKNOWN")
+            active_symbols = len(system_state.get("grids", {}))
+            total_trades = system_state.get("total_trades", 0)
+
+            update_bot_heartbeat(
+                overlay_mode=overlay_mode,
+                active_symbols=active_symbols,
+                total_trades=total_trades,
+                status="running"
+            )
+        except asyncio.CancelledError:
+            logger.info("[HEARTBEAT] Bot heartbeat loop cancelled")
+            break
+        except Exception as e:
+            logger.error(f"[HEARTBEAT] Heartbeat update failed: {e}")
+
+
 # === NOTIFIER WATCHDOG ===
 # Auto-restarts notifier if it stops detecting trades
 
 WATCHDOG_INTERVAL = 300  # Check every 5 minutes
-WATCHDOG_STATE_FILE = "/tmp/bluebird-watchdog.json"
+WATCHDOG_STATE_FILE = os.path.join(STATE_DIR, "watchdog.json")
 
 watchdog_state = {
     "enabled": True,
@@ -1214,7 +1269,7 @@ async def get_risk_status():
     import json
     file_state = {}
     try:
-        circuit_file = "/tmp/bluebird-circuit-breaker.json"
+        circuit_file = os.path.join(STATE_DIR, "circuit-breaker.json")
         if os.path.exists(circuit_file):
             with open(circuit_file, 'r') as f:
                 file_state = json.load(f)
@@ -1241,7 +1296,7 @@ async def reset_circuit_breakers(reset_type: str = "all"):
     """
     import json
 
-    circuit_file = "/tmp/bluebird-circuit-breaker.json"
+    circuit_file = os.path.join(STATE_DIR, "circuit-breaker.json")
 
     # Read current state
     current_state = {}
@@ -1326,8 +1381,8 @@ async def reset_circuit_breakers(reset_type: str = "all"):
 # RISK OVERLAY API ENDPOINTS (Crash Protection)
 # =========================================
 
-RISK_OVERLAY_STATE_FILE = "/tmp/bluebird-risk-overlay.json"
-RISK_OVERLAY_COMMAND_FILE = "/tmp/bluebird-risk-overlay-command.json"
+RISK_OVERLAY_STATE_FILE = os.path.join(STATE_DIR, "risk-overlay.json")
+RISK_OVERLAY_COMMAND_FILE = os.path.join(STATE_DIR, "risk-overlay-command.json")
 
 
 class RiskOverlayOverride(BaseModel):
@@ -1553,7 +1608,7 @@ async def get_risk_overlay_telemetry():
 # ORCHESTRATOR ENDPOINTS (Inventory Management Meta-Controller)
 # ============================================================================
 
-ORCHESTRATOR_STATE_FILE = "/tmp/bluebird-orchestrator.json"
+ORCHESTRATOR_STATE_FILE = os.path.join(STATE_DIR, "orchestrator.json")
 
 
 @app.get("/api/orchestrator/status")
@@ -1768,7 +1823,7 @@ async def get_windfall_stats():
         from config_ultra import WINDFALL_PROFIT_CONFIG
         import json
 
-        log_file = "/tmp/bluebird-windfall-log.json"
+        log_file = os.path.join(STATE_DIR, "windfall-log.json")
         stats = {"total_captures": 0, "total_profit": 0.0, "transactions": []}
 
         if os.path.exists(log_file):
@@ -1834,7 +1889,7 @@ async def get_windfall_log():
         Full windfall log from file
     """
     import json
-    log_file = "/tmp/bluebird-windfall-log.json"
+    log_file = os.path.join(STATE_DIR, "windfall-log.json")
 
     try:
         if os.path.exists(log_file):
@@ -2385,6 +2440,13 @@ async def startup_event():
         logger.info("Notifier watchdog started")
     except Exception as e:
         logger.error(f"Failed to start watchdog: {e}", exc_info=True)
+
+    # Start the bot heartbeat loop (for external watchdog monitoring)
+    try:
+        asyncio.create_task(bot_heartbeat_loop())
+        logger.info("Bot heartbeat loop started")
+    except Exception as e:
+        logger.error(f"Failed to start bot heartbeat: {e}", exc_info=True)
 
 
 @app.on_event("shutdown")

@@ -17,6 +17,10 @@ from typing import Dict, List, Optional, Tuple
 import json
 import os
 
+# Project root for persistent state files (survives reboot, unlike /tmp)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
+
 logger = logging.getLogger("RiskOverlay")
 
 
@@ -57,7 +61,7 @@ class RiskOverlay:
     """
 
     # State persistence file
-    STATE_FILE = "/tmp/bluebird-risk-overlay.json"
+    STATE_FILE = os.path.join(STATE_DIR, "risk-overlay.json")
 
     def __init__(self, config):
         self.config = config
@@ -564,7 +568,7 @@ class RiskOverlay:
     # =========================================================================
 
     # Command file for API-initiated overrides
-    COMMAND_FILE = "/tmp/bluebird-risk-overlay-command.json"
+    COMMAND_FILE = os.path.join(STATE_DIR, "risk-overlay-command.json")
 
     def set_manual_override(self, mode: Optional[RiskMode], reason: str = None) -> None:
         """

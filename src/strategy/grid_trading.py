@@ -29,6 +29,10 @@ from enum import Enum
 
 import config_ultra as config
 
+# Project root for persistent state files (survives reboot, unlike /tmp)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
+
 logger = logging.getLogger("GridTrading")
 
 
@@ -82,7 +86,7 @@ def normalize_fee_type(value: Any) -> str:
 
 
 # Grid state persistence file
-GRID_STATE_FILE = "/tmp/bluebird-grid-state.json"
+GRID_STATE_FILE = os.path.join(STATE_DIR, "grid-state.json")
 
 
 class GridOrderSide(Enum):

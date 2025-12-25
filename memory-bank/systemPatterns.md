@@ -25,13 +25,15 @@
 
 ## State & Persistence
 - **DB (durable)**: `data/bluebird.db`
-- **Runtime JSON state** (fast restore + operator visibility):
-  - `/tmp/bluebird-grid-state.json`
-  - `/tmp/bluebird-risk-state.json`
-  - `/tmp/bluebird-risk-overlay.json`
-  - `/tmp/bluebird-orchestrator.json` (NEW)
-  - `/tmp/bluebird-daily-equity.json`
-- **Locks / PIDs**:
+- **Persistent JSON state** in `data/state/` (survives reboot):
+  - `grid-state.json` - Grid levels, fills, pending orders
+  - `risk-overlay.json` - RISK_OFF/RECOVERY mode and triggers
+  - `orchestrator.json` - Inventory episode tracking
+  - `daily-equity.json` - Daily P&L tracking
+  - `alltime-equity.json` - All-time performance stats
+  - `circuit-breaker.json` - Max drawdown/stop-loss flags
+  - `windfall-log.json` - Windfall profit captures
+- **Locks / PIDs** (ephemeral, intentionally cleared on reboot):
   - `/tmp/bluebird/*.lock`
   - `/tmp/bluebird/*.pid`
 
@@ -73,3 +75,24 @@ When deciding whether to buy:
 ## Deprecated Patterns
 - Prediction-first bots under `archive/old_bots/` are considered legacy
 - Current system is grid-first with protection layers
+
+## Maintenance Infrastructure (Dec 25, 2025)
+
+### Watchdog Pattern
+- Bot and notifier write heartbeat to DB every 60 seconds
+- Cron runs watchdog scripts every 5 minutes
+- If heartbeat stale > 5 min, watchdog kills and restarts service
+
+### Active Cron Jobs
+| Schedule | Script | Purpose |
+|----------|--------|---------|
+| `*/5 * * * *` | `check_notifier.sh` | Notifier watchdog |
+| `*/5 * * * *` | `check_bot.sh` | Bot watchdog |
+| `0 3 * * *` | `backup_db.sh` | Daily DB backup |
+| `0 5 * * *` | `rotate_logs.sh` | Daily log rotation |
+
+### Maintenance Scripts (in `scripts/`)
+- `check_bot.sh` / `check_notifier.sh` - Watchdogs
+- `backup_db.sh` - SQLite backup, 7-day retention
+- `rotate_logs.sh` - Log rotation, 50 MB limit
+- `cleanup_db.py` - Manual DB cleanup (90-day retention)

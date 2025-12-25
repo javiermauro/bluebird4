@@ -19,6 +19,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+# Project root for persistent state files (survives reboot, unlike /tmp)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
+
 logger = logging.getLogger("Orchestrator")
 
 
@@ -102,7 +106,7 @@ class Orchestrator:
     Respects RiskOverlay precedence and avoids duplicating existing gating/sizing logic.
     """
 
-    STATE_FILE = "/tmp/bluebird-orchestrator.json"
+    STATE_FILE = os.path.join(STATE_DIR, "orchestrator.json")
 
     def __init__(self, config):
         self.config = config
@@ -479,7 +483,7 @@ class Orchestrator:
 
     def _save_state(self):
         """
-        Persist to /tmp/bluebird-orchestrator.json.
+        Persist to data/state/orchestrator.json.
         Uses atomic write (temp + rename) to prevent partial writes.
         """
         try:

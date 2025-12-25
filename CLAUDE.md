@@ -8,6 +8,36 @@ BLUEBIRD 4.0 is a cryptocurrency grid trading bot that trades on Alpaca. It uses
 
 **Key Insight**: The system originally used ML predictions but achieved only 21% win rate. Grid trading was adopted because it thrives in sideways markets without needing predictions.
 
+## Memory Bank (IMPORTANT)
+
+The `memory-bank/` directory is **Claude's tool** for maintaining context and understanding across sessions. Since each conversation starts fresh, this is how you remember what happened before, what's working, what's broken, and what the system looks like.
+
+**Maintain it properly** - your future self depends on it.
+
+### At the START of every task:
+1. Read `memory-bank/activeContext.md` - Current focus, system health, recent work
+2. Read `memory-bank/progress.md` - Status history, known issues, what's been done
+
+### At the END of every significant task:
+1. Update `memory-bank/progress.md` with what was accomplished
+2. Update `memory-bank/activeContext.md` with new status
+3. Update other files if relevant:
+   - `systemPatterns.md` - Architecture changes, new patterns
+   - `techContext.md` - New dependencies, paths, scripts
+   - `productContext.md` - Product behavior changes
+
+### Memory Bank Files:
+| File | Purpose |
+|------|---------|
+| `activeContext.md` | Current focus, system health, next steps |
+| `progress.md` | Status history, completed work, known issues |
+| `systemPatterns.md` | Architecture, design patterns, safety gates |
+| `techContext.md` | Tech stack, paths, scripts, dependencies |
+| `productContext.md` | Product goals, success metrics, UX |
+| `projectbrief.md` | Foundation document (rarely changes) |
+
+**Rule**: If you completed something important, document it in the memory bank before finishing.
+
 ## Running the System
 
 ### Start All Services
@@ -66,13 +96,22 @@ ls /tmp/bluebird/*.pid                     # Running services
 6. Notifier polls API and sends SMS alerts for significant events
 
 ### State Persistence
-- **Grid state**: `/tmp/bluebird-grid-state.json`
-- **Risk state**: `/tmp/bluebird-risk-state.json`
-- **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
-- **Orchestrator state**: `/tmp/bluebird-orchestrator.json`
-- **Daily equity**: `/tmp/bluebird-daily-equity.json`
-- **Database**: `data/bluebird.db` (trades, equity, orders, notifications)
-- **Lock files**: `/tmp/bluebird/*.lock`, `/tmp/bluebird/*.pid`
+**Persistent state files** (survive system reboot) in `data/state/`:
+- `grid-state.json` - Grid levels, fills, pending orders
+- `risk-overlay.json` - RISK_OFF/RECOVERY mode and triggers
+- `orchestrator.json` - Inventory episode tracking
+- `daily-equity.json` - Daily P&L tracking
+- `alltime-equity.json` - All-time performance stats
+- `circuit-breaker.json` - Max drawdown/stop-loss flags
+- `windfall-log.json` - Windfall profit captures
+- `watchdog.json` - Notifier watchdog state
+
+**Process/lock files** (in `/tmp`, cleared on reboot - intentional):
+- `/tmp/bluebird/*.lock`, `/tmp/bluebird/*.pid` - Single-instance protection
+- `/tmp/bluebird-notifier.log` - Notifier log file
+- `/tmp/bluebird-bot.log` - Bot log file
+
+**Database**: `data/bluebird.db` (trades, equity, orders, notifications)
 
 ### Database Tables
 **Trading tables**: `trades`, `equity_snapshots`, `orders`, `daily_summary`, `grid_snapshots`
@@ -176,7 +215,7 @@ RECOVERY_POSITION_RAMP = [0.25, 0.5, 0.75, 1.0]
 
 ### State Persistence
 
-- **Risk overlay state**: `/tmp/bluebird-risk-overlay.json`
+- **Risk overlay state**: `data/state/risk-overlay.json`
 - Telemetry tracks $ amounts: `avoided_buys_notional`, `cancelled_limits_notional`
 
 ## Orchestrator (Inventory Management)
@@ -237,7 +276,7 @@ GRID_REDUCED_ENTER_PCT = 100          # Enter GRID_REDUCED threshold
 
 ### State Persistence
 
-- **Orchestrator state**: `/tmp/bluebird-orchestrator.json`
+- **Orchestrator state**: `data/state/orchestrator.json`
 - Telemetry tracks $ amounts: `buys_blocked_notional`, `liquidations_placed_notional`
 
 ## Downtrend Protection (Inventory Control)
@@ -302,25 +341,31 @@ The notifier (`src/notifications/notifier.py`) polls the bot API and sends SMS a
 - **Stale data**: Bot stream disconnected (5 min threshold)
 - **API down**: Circuit breaker opened after 5 consecutive failures
 
-### Watchdog Setup
+### Watchdog Setup (Bot + Notifier)
+Both bot and notifier have watchdog scripts that auto-restart on crash:
 ```bash
-# Cron job (every 5 min)
+# Cron jobs (every 5 min) - both run and log to same file
 */5 * * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_notifier.sh" >> /tmp/bluebird-watchdog.log 2>&1
+*/5 * * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_bot.sh" >> /tmp/bluebird-watchdog.log 2>&1
 
-# Manual check
+# Manual checks
+bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_bot.sh"
 bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_notifier.sh"
+
+# View watchdog log
+tail -f /tmp/bluebird-watchdog.log
 ```
 
-### Check Notifier Status
+### Check Service Status
 ```bash
-# Via database
+# Bot heartbeat (via database)
+sqlite3 data/bluebird.db "SELECT pid, last_heartbeat, overlay_mode, status FROM bot_status"
+
+# Notifier heartbeat (via database)
 sqlite3 data/bluebird.db "SELECT pid, last_heartbeat, status, sms_today FROM notifier_status"
 
-# Via process
-ps aux | grep notifier
-
-# Via logs
-tail -f /tmp/bluebird-notifier.log
+# Via start.py
+python3 start.py --status
 ```
 
 ## Important Constraints

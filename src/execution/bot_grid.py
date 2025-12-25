@@ -23,6 +23,10 @@ import logging
 import os
 import random
 from datetime import datetime, timedelta
+
+# Project root for persistent state files (survives reboot, unlike /tmp)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
@@ -175,7 +179,7 @@ class GridTradingBot:
 
         # === ALL-TIME PERFORMANCE TRACKING ===
         # These are PERMANENT values that persist across restarts
-        self.alltime_equity_file = "/tmp/bluebird-alltime-equity.json"
+        self.alltime_equity_file = os.path.join(STATE_DIR, "alltime-equity.json")
         self.alltime_starting_equity = 0.0  # When trading first started (Nov 24)
         self.alltime_starting_date = None
         self.grid_starting_equity = 0.0  # When grid trading started (Dec 2)
@@ -186,11 +190,11 @@ class GridTradingBot:
         self.daily_pnl = 0.0
         self.daily_start_equity = 0.0
         self.last_trading_day = None
-        self.daily_equity_file = "/tmp/bluebird-daily-equity.json"
+        self.daily_equity_file = os.path.join(STATE_DIR, "daily-equity.json")
         self._load_daily_equity()  # Load persisted daily equity on startup
 
         # Circuit breaker flags (persist across restarts for safety)
-        self.circuit_breaker_file = "/tmp/bluebird-circuit-breaker.json"
+        self.circuit_breaker_file = os.path.join(STATE_DIR, "circuit-breaker.json")
         self.daily_limit_hit = False
         self.max_drawdown_hit = False
         self.stop_loss_triggered: Dict[str, bool] = {}  # Per-symbol stop loss
@@ -238,7 +242,7 @@ class GridTradingBot:
 
         # === WINDFALL PROFIT-TAKING STATE ===
         # Captures profits when positions show significant unrealized gains
-        self.windfall_log_file = "/tmp/bluebird-windfall-log.json"
+        self.windfall_log_file = os.path.join(STATE_DIR, "windfall-log.json")
         self.windfall_cooldowns: Dict[str, datetime] = {}  # Per-symbol cooldown
         self.windfall_stats = {
             "total_captures": 0,

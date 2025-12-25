@@ -25,7 +25,8 @@ Directional prediction was not reliably profitable (21% win rate); the system pi
   - Downtrend protection: reduces size in developing downtrends
 - **State persistence**:
   - SQLite DB: `data/bluebird.db`
-  - Runtime state files: `/tmp/bluebird-*.json` (grid/risk/overlay/orchestrator/equity)
+  - Persistent state files: `data/state/*.json` (survives reboot)
+  - Lock files: `/tmp/bluebird/` (ephemeral, cleared on reboot)
 - **Resilience guardrails**:
   - Single-instance locks in `/tmp/bluebird/`
   - Staged recovery (25% → 50% → 75% → 100%) after RISK_OFF
@@ -45,3 +46,12 @@ Directional prediction was not reliably profitable (21% win rate); the system pi
 - **Fee efficiency**: Maintain 40x+ profit/fee ratio
 - **Inventory health**: Keep below 100% to avoid GRID_REDUCED mode
 - **Drawdown**: Minimize daily drawdown, especially during volatile periods
+
+## Automated Maintenance (Dec 25, 2025)
+The system now has comprehensive automated maintenance:
+- **Watchdogs**: Bot and notifier auto-restart on crash (every 5 min check)
+- **Backups**: Daily database backup at 3 AM (7-day retention)
+- **Log rotation**: Daily at 5 AM (50 MB limit, 3 rotations)
+- **DB cleanup**: Manual script for 90-day data retention
+
+All maintenance is hands-off except for occasional `cleanup_db.py --execute`.

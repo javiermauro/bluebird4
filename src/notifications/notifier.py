@@ -39,7 +39,11 @@ if platform.system() == 'Darwin':
         pass  # Non-critical, continue anyway
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+
+# Persistent state directory (survives reboot, unlike /tmp)
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
 
 from src.notifications.config import NotificationConfig
 from src.notifications import templates
@@ -54,7 +58,7 @@ from src.database.db import (
 PID_FILE = "/tmp/bluebird-notifier.pid"
 SMS_COUNT_FILE = "/tmp/bluebird-notifier-count.json"
 LOG_FILE = "/tmp/bluebird-notifier.log"
-LAST_STARTUP_FILE = "/tmp/bluebird-notifier-startup.json"
+LAST_STARTUP_FILE = os.path.join(STATE_DIR, "notifier-startup.json")  # Persists across reboot
 
 # Minimum time between startup SMS notifications (in seconds)
 # Prevents SMS spam when launchd restarts the service frequently

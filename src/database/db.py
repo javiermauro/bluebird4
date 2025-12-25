@@ -204,6 +204,20 @@ def init_database():
             )
         """)
 
+        # Bot Status - heartbeat and state for API server (single row table)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                pid INTEGER,
+                started_at TEXT,
+                last_heartbeat TEXT,
+                overlay_mode TEXT,
+                active_symbols INTEGER DEFAULT 0,
+                total_trades INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'running'
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
@@ -1342,6 +1356,68 @@ def cleanup_old_sms_records(keep_days: int = 30) -> int:
         if total > 0:
             logger.info(f"Cleaned up {total} old notification records")
         return total
+
+
+# ============================================================================
+# Bot Status (Heartbeat for Watchdog)
+# ============================================================================
+
+def update_bot_heartbeat(
+    pid: Optional[int] = None,
+    overlay_mode: Optional[str] = None,
+    active_symbols: Optional[int] = None,
+    total_trades: Optional[int] = None,
+    status: str = "running"
+):
+    """
+    Update the bot heartbeat in the database.
+    Called periodically by the API server to prove it's alive.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+
+        # Check if row exists
+        cursor.execute("SELECT id FROM bot_status WHERE id = 1")
+        row = cursor.fetchone()
+
+        if row:
+            updates = ["last_heartbeat = ?", "status = ?"]
+            params = [now, status]
+
+            if pid is not None:
+                updates.append("pid = ?")
+                params.append(pid)
+            if overlay_mode is not None:
+                updates.append("overlay_mode = ?")
+                params.append(overlay_mode)
+            if active_symbols is not None:
+                updates.append("active_symbols = ?")
+                params.append(active_symbols)
+            if total_trades is not None:
+                updates.append("total_trades = ?")
+                params.append(total_trades)
+
+            params.append(1)  # WHERE id = 1
+            cursor.execute(f"UPDATE bot_status SET {', '.join(updates)} WHERE id = ?", params)
+        else:
+            # Insert initial row
+            cursor.execute("""
+                INSERT INTO bot_status
+                (id, pid, started_at, last_heartbeat, overlay_mode, active_symbols, total_trades, status)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            """, (pid, now, now, overlay_mode, active_symbols or 0, total_trades or 0, status))
+
+        conn.commit()
+
+
+def get_bot_status() -> Optional[Dict]:
+    """Get the current bot status."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM bot_status WHERE id = 1")
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
 
 # Initialize database on import

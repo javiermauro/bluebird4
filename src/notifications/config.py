@@ -13,9 +13,13 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Project root for persistent state files (survives reboot, unlike /tmp)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
+
 # File paths for persistent storage
-SMS_HISTORY_FILE = "/tmp/bluebird-notifier-history.json"
-SETTINGS_FILE = "/tmp/bluebird-notifier-settings.json"
+SMS_HISTORY_FILE = os.path.join(STATE_DIR, "notifier-history.json")  # Legacy, now using DB
+SETTINGS_FILE = os.path.join(STATE_DIR, "notifier-settings.json")
 
 # Default notification settings (can be modified via dashboard)
 DEFAULT_SETTINGS = {
