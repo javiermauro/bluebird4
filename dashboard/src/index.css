@@ -2182,6 +2182,221 @@ input:focus {
   color: #ff6464;
 }
 
+/* Paper Trading Warning Banner */
+.paper-trading-warning {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.paper-trading-warning .warning-content {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex: 1;
+}
+
+.paper-trading-warning .warning-icon {
+  font-size: 1.25rem;
+  color: #ffc107;
+}
+
+.paper-trading-warning .warning-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.paper-trading-warning .warning-text strong {
+  color: #ffc107;
+}
+
+.paper-trading-warning .warning-link {
+  color: var(--gold);
+  text-decoration: none;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.paper-trading-warning .warning-link:hover {
+  text-decoration: underline;
+}
+
+.paper-trading-warning .warning-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.25rem;
+  cursor: pointer;
+  padding: 0 0.5rem;
+  line-height: 1;
+}
+
+.paper-trading-warning .warning-dismiss:hover {
+  color: var(--text-primary);
+}
+
+/* Fee Tier Info Card */
+.fee-tier-card {
+  background: var(--card-bg);
+  border: 1px solid rgba(212, 175, 55, 0.15);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.fee-tier-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.tier-badge {
+  background: linear-gradient(135deg, var(--gold) 0%, #c9a227 100%);
+  color: var(--bg-dark);
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.fee-rates {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  gap: 0.5rem;
+}
+
+.fee-rates .rate-divider {
+  color: rgba(212, 175, 55, 0.3);
+}
+
+.fee-tier-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-top: 1px solid rgba(212, 175, 55, 0.1);
+  border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+  margin-bottom: 0.75rem;
+}
+
+.volume-info {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.volume-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.volume-value {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.tier-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex: 1;
+  max-width: 250px;
+  margin-left: 2rem;
+}
+
+.tier-progress .progress-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(212, 175, 55, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.tier-progress .progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold) 0%, var(--mint) 100%);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.tier-progress .progress-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.estimated-fees {
+  display: flex;
+  gap: 1.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.fee-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.fee-row .fee-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.fee-row .fee-value {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.fee-row .fee-value.negative {
+  color: var(--rose-gold);
+}
+
+.fee-row.conservative {
+  opacity: 0.7;
+}
+
+.fee-uncertain {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.fee-uncertain .uncertain-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  background: rgba(255, 193, 7, 0.2);
+  color: #ffc107;
+  border-radius: 50%;
+  font-size: 0.6rem;
+  font-style: normal;
+}
+
+/* Net Conservative Card Style */
+.history-metric-card.net-conservative {
+  border-color: rgba(255, 193, 7, 0.2);
+  background: rgba(255, 193, 7, 0.03);
+}
+
 /* Key Metrics Grid */
 .history-metrics-grid {
   display: grid;

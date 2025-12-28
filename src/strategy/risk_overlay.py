@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import json
 import os
 
+from src.utils.atomic_io import atomic_write_json
+
 # Project root for persistent state files (survives reboot, unlike /tmp)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
@@ -663,8 +665,8 @@ class RiskOverlay:
                 "saved_at": datetime.now().isoformat(),
             }
 
-            with open(self.STATE_FILE, "w") as f:
-                json.dump(state, f, indent=2)
+            # Use atomic write to prevent corruption on power loss
+            atomic_write_json(self.STATE_FILE, state)
 
         except Exception as e:
             logger.error(f"Failed to save risk overlay state: {e}")

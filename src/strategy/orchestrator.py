@@ -13,11 +13,12 @@ It can only add restrictions, not remove them.
 import json
 import logging
 import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+from src.utils.atomic_io import atomic_write_json
 
 # Project root for persistent state files (survives reboot, unlike /tmp)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -515,12 +516,8 @@ class Orchestrator:
                     "last_liq_order_id": self.last_liq_order_id.get(symbol)
                 }
 
-            # Atomic write: write to temp file then rename
-            dir_name = os.path.dirname(self.STATE_FILE)
-            with tempfile.NamedTemporaryFile(mode='w', dir=dir_name, delete=False, suffix='.tmp') as f:
-                json.dump(state, f, indent=2)
-                temp_path = f.name
-            os.replace(temp_path, self.STATE_FILE)
+            # Use atomic write utility to prevent corruption on power loss
+            atomic_write_json(self.STATE_FILE, state)
 
         except Exception as e:
             logger.error(f"[ORCH] Failed to save state: {e}")

@@ -43,6 +43,39 @@ def get_db_connection():
         conn.close()
 
 
+def _run_migrations(conn):
+    """
+    Run database migrations to add new columns.
+    Safe to run multiple times (idempotent).
+    """
+    cursor = conn.cursor()
+
+    # Get existing columns in trades table
+    cursor.execute("PRAGMA table_info(trades)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+
+    # Fee audit columns migration (Dec 2025)
+    fee_columns = [
+        ("fee_rate", "REAL"),           # The rate applied (e.g., 0.0025)
+        ("fee_type", "TEXT"),           # 'maker', 'taker', or 'maker_assumed'
+        ("fee_tier", "TEXT"),           # 'Tier 1', 'Tier 2', etc.
+        ("rolling_30d_volume", "REAL"), # Volume at time of fill
+        ("fee_day_bucket", "TEXT"),     # '2025-12-10' (ET fee day)
+        ("fee_conservative", "REAL"),   # Worst-case fee (taker rate)
+    ]
+
+    for col_name, col_type in fee_columns:
+        if col_name not in existing_columns:
+            try:
+                cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                logger.info(f"Migration: Added column trades.{col_name}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    logger.warning(f"Migration error adding {col_name}: {e}")
+
+    conn.commit()
+
+
 def init_database():
     """Initialize the database with all required tables."""
     ensure_db_dir()
@@ -238,6 +271,9 @@ def init_database():
         conn.commit()
         logger.info(f"Database initialized at {DB_PATH}")
 
+        # Run migrations after initial schema creation
+        _run_migrations(conn)
+
 
 # ============ TRADE FUNCTIONS ============
 
@@ -251,10 +287,25 @@ def record_trade(
     fees: float = 0,
     source: str = 'grid',
     notes: str = None,
-    timestamp: datetime = None
+    timestamp: datetime = None,
+    # Fee audit fields (optional, for tier-correct fee tracking)
+    fee_rate: float = None,
+    fee_type: str = None,
+    fee_tier: str = None,
+    rolling_30d_volume: float = None,
+    fee_day_bucket: str = None,
+    fee_conservative: float = None,
 ) -> int:
     """
     Record a trade execution. Idempotent via unique constraint on order_id+side+qty+price.
+
+    Fee audit fields:
+        fee_rate: Applied fee rate (e.g., 0.0015 for maker)
+        fee_type: 'maker', 'taker', or 'maker_assumed'
+        fee_tier: 'Tier 1', 'Tier 2', etc.
+        rolling_30d_volume: 30-day volume at time of fill (for tier calculation)
+        fee_day_bucket: Fee day in ET (3am boundary), e.g., '2025-12-10'
+        fee_conservative: Worst-case fee assuming taker rate
 
     Returns:
         Trade ID if inserted, -1 if already exists or skipped
@@ -287,11 +338,17 @@ def record_trade(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT OR IGNORE INTO trades (timestamp, symbol, side, quantity, price, total_value,
-                              order_id, profit, fees, source, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (timestamp.isoformat(), symbol, side_normalized, quantity_rounded, price_rounded,
-              total_value, order_id, profit, fees, source, notes))
+            INSERT OR IGNORE INTO trades (
+                timestamp, symbol, side, quantity, price, total_value,
+                order_id, profit, fees, source, notes,
+                fee_rate, fee_type, fee_tier, rolling_30d_volume, fee_day_bucket, fee_conservative
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            timestamp.isoformat(), symbol, side_normalized, quantity_rounded, price_rounded,
+            total_value, order_id, profit, fees, source, notes,
+            fee_rate, fee_type, fee_tier, rolling_30d_volume, fee_day_bucket, fee_conservative
+        ))
 
         if cursor.rowcount == 0:
             logger.debug(f"Trade already exists for order {order_id}, skipping")
@@ -301,6 +358,182 @@ def record_trade(
         trade_id = cursor.lastrowid
         logger.debug(f"Recorded trade #{trade_id}: {side_normalized} {quantity_rounded} {symbol} @ ${price_rounded:.2f}")
         return trade_id
+
+
+def update_trade_fees(
+    trade_id: int = None,
+    order_id: str = None,
+    fees: float = None,
+    fee_rate: float = None,
+    fee_type: str = None,
+    fee_tier: str = None,
+    rolling_30d_volume: float = None,
+    fee_day_bucket: str = None,
+    fee_conservative: float = None,
+) -> bool:
+    """
+    Update fee fields on an existing trade (for backfill).
+
+    Args:
+        trade_id: Trade ID to update (preferred)
+        order_id: Order ID to match (if trade_id not provided)
+        Other args: Fee fields to update
+
+    Returns:
+        True if updated, False if not found
+    """
+    if trade_id is None and order_id is None:
+        logger.warning("update_trade_fees requires either trade_id or order_id")
+        return False
+
+    # Build SET clause dynamically for non-None fields
+    updates = []
+    params = []
+
+    if fees is not None:
+        updates.append("fees = ?")
+        params.append(fees)
+    if fee_rate is not None:
+        updates.append("fee_rate = ?")
+        params.append(fee_rate)
+    if fee_type is not None:
+        updates.append("fee_type = ?")
+        params.append(fee_type)
+    if fee_tier is not None:
+        updates.append("fee_tier = ?")
+        params.append(fee_tier)
+    if rolling_30d_volume is not None:
+        updates.append("rolling_30d_volume = ?")
+        params.append(rolling_30d_volume)
+    if fee_day_bucket is not None:
+        updates.append("fee_day_bucket = ?")
+        params.append(fee_day_bucket)
+    if fee_conservative is not None:
+        updates.append("fee_conservative = ?")
+        params.append(fee_conservative)
+
+    if not updates:
+        return False
+
+    # Build WHERE clause
+    if trade_id is not None:
+        where = "id = ?"
+        params.append(trade_id)
+    else:
+        where = "order_id = ?"
+        params.append(order_id)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE trades SET {', '.join(updates)} WHERE {where}", params)
+        conn.commit()
+
+        if cursor.rowcount > 0:
+            identifier = f"#{trade_id}" if trade_id else f"order={order_id}"
+            logger.debug(f"Updated fees for trade {identifier}")
+            return True
+        return False
+
+
+def get_fee_stats(days: int = None, since_date: str = None) -> Dict:
+    """
+    Get aggregated fee statistics.
+
+    Args:
+        days: Number of days to look back
+        since_date: Start date string (ISO format), e.g., '2025-12-01'
+
+    Returns:
+        Dict with fee totals, uncertain count, by-tier breakdown
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        where_clauses = []
+        params = []
+
+        if days:
+            start = (datetime.now() - timedelta(days=days)).isoformat()
+            where_clauses.append("timestamp >= ?")
+            params.append(start)
+
+        if since_date:
+            where_clauses.append("timestamp >= ?")
+            params.append(since_date)
+
+        where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        # Total fee stats
+        cursor.execute(f"""
+            SELECT
+                COALESCE(SUM(fees), 0) as total_fees_expected,
+                COALESCE(SUM(fee_conservative), 0) as total_fees_conservative,
+                COALESCE(SUM(total_value), 0) as total_notional,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN fee_type = 'maker_assumed' THEN 1 ELSE 0 END) as uncertain_count
+            FROM trades {where}
+        """, params)
+
+        result = cursor.fetchone()
+
+        # By tier breakdown
+        cursor.execute(f"""
+            SELECT
+                fee_tier,
+                COUNT(*) as trades,
+                COALESCE(SUM(fees), 0) as fees_expected,
+                COALESCE(SUM(fee_conservative), 0) as fees_conservative,
+                COALESCE(SUM(total_value), 0) as notional
+            FROM trades {where}
+            GROUP BY fee_tier
+            ORDER BY fee_tier
+        """, params)
+
+        by_tier = {}
+        for row in cursor.fetchall():
+            tier = row['fee_tier'] or 'Unknown'
+            by_tier[tier] = {
+                'trades': row['trades'],
+                'fees_expected': row['fees_expected'] or 0,
+                'fees_conservative': row['fees_conservative'] or 0,
+                'notional': row['notional'] or 0,
+            }
+
+        return {
+            'total_fees_expected': result['total_fees_expected'] or 0,
+            'total_fees_conservative': result['total_fees_conservative'] or 0,
+            'total_notional': result['total_notional'] or 0,
+            'total_trades': result['total_trades'] or 0,
+            'uncertain_count': result['uncertain_count'] or 0,
+            'by_tier': by_tier,
+        }
+
+
+def get_rolling_30d_volume(as_of_timestamp: datetime = None) -> float:
+    """
+    Get rolling 30-day trading volume from trades table.
+
+    Args:
+        as_of_timestamp: Calculate volume as of this time (default: now)
+
+    Returns:
+        Rolling 30-day volume in USD
+    """
+    if as_of_timestamp is None:
+        as_of_timestamp = datetime.now()
+
+    start_time = as_of_timestamp - timedelta(days=30)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(SUM(total_value), 0) as volume
+            FROM trades
+            WHERE timestamp > ? AND timestamp <= ?
+        """, (start_time.isoformat(), as_of_timestamp.isoformat()))
+
+        result = cursor.fetchone()
+        return float(result['volume']) if result else 0.0
 
 
 def get_trades(

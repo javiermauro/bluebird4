@@ -1,14 +1,17 @@
 # Active Context — Current Focus
 
 ## Now
+- [2025-12-27] **TIER-CORRECT FEE MODELING COMPLETE** - Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
+- [2025-12-26 06:35] **WATCHDOG LAUNCHD MIGRATION COMPLETE** - Fixed EPERM on external volume, durable local state
+- [2025-12-26 01:45] **TIMEOUT HARDENING COMPLETE** - All main loop Alpaca calls bounded with 10-15s timeouts
+- [2025-12-25 18:30] **PHASE A ROBUSTNESS COMPLETE** - Crash loop detection, atomic writes, disk monitoring
 - [2025-12-25 11:55] **ALL 5 MAINTENANCE PHASES COMPLETE**
-- [2025-12-25 11:55] **Maintenance Phase 5 Complete** - Log rotation daily at 5 AM
-- [2025-12-25 11:53] **Maintenance Phase 4 Complete** - Database cleanup script (90-day retention)
-- [2025-12-25 11:48] **Maintenance Phase 3 Complete** - Daily database backups at 3 AM
-- [2025-12-25 11:42] **Maintenance Phase 2 Complete** - Bot watchdog with auto-restart on crash
-- [2025-12-25 11:30] **Phase 1 Complete** - State files now in `data/state/` (survives reboot)
 
 ## Recent Developments
+- [2025-12-27] **Tier-Correct Fee Modeling**: Implemented 8-tier Alpaca crypto fee structure with 3am ET day bucketing. Dashboard now shows Gross vs Net P&L with fee tier card. Run `python -m src.utils.backfill_fees` to backfill historical trades.
+- [2025-12-26] **Watchdog launchd Migration**: Fixed EPERM errors by moving watchdog scripts to local filesystem. Uses `~/Library/Application Support/BLUEBIRD/` for scripts and durable state. Run `scripts/sync-watchdog-scripts.sh` after editing repo watchdog scripts.
+- [2025-12-26] **Timeout Hardening**: Prevents event loop hangs when Alpaca API is slow. All main loop Alpaca calls wrapped with `run_blocking_with_timeout()` (10-15s). Added `run_sync_with_timeout()` for sync contexts.
+- [2025-12-25] **Phase A Robustness**: Crash loop detection (3 in 30 min = pause), atomic JSON writes, disk monitoring (90% alert)
 - [2025-12-25] Phase 5: Log rotation - `scripts/rotate_logs.sh` daily at 5 AM, 50 MB limit
 - [2025-12-25] Phase 4: Database cleanup - `scripts/cleanup_db.py` with 90-day retention
 - [2025-12-25] Phase 3: Database backup - daily at 3 AM, 7-day retention, integrity check
@@ -34,27 +37,61 @@
 | 4. DB Cleanup | ✅ DONE | Cleanup script with 90-day retention |
 | 5. Log Rotation | ✅ DONE | Daily rotation at 5 AM, 50 MB limit |
 
-## Active Cron Jobs
+## Scheduled Tasks
+
+### LaunchAgents (launchd - for watchdogs)
+| Agent | Interval | Purpose |
+|-------|----------|---------|
+| `com.bluebird.watchdog-bot` | 5 min | Bot auto-restart |
+| `com.bluebird.watchdog-notifier` | 5 min | Notifier auto-restart |
+
+**Note**: Watchdogs use launchd (not cron) because macOS can't execute scripts on external APFS volumes from cron. Scripts live in `~/Library/Application Support/BLUEBIRD/`.
+
+### Cron Jobs (remaining)
 | Schedule | Script | Purpose |
 |----------|--------|---------|
-| `*/5 * * * *` | `check_notifier.sh` | Notifier watchdog |
-| `*/5 * * * *` | `check_bot.sh` | Bot watchdog |
 | `0 3 * * *` | `backup_db.sh` | Database backup |
 | `0 5 * * *` | `rotate_logs.sh` | Log rotation |
 
 ## Monitoring Commands
 ```bash
-tail -f /tmp/bluebird-watchdog.log    # Watchdog logs
+# LaunchAgents status
+launchctl list | grep bluebird
+
+# Watchdog logs
+tail -f /tmp/bluebird-watchdog.log
+
+# Manual watchdog run
+bash "$HOME/Library/Application Support/BLUEBIRD/run-check-bot.sh"
+
+# Reset crash loop pause (after fixing root cause)
+rm "$HOME/Library/Application Support/BLUEBIRD/state/crash-loop-bot.json"
+
+# Sync watchdog scripts (after editing repo scripts)
+bash scripts/sync-watchdog-scripts.sh
+
+# Other logs
 tail -f /tmp/bluebird-backup.log      # Backup logs
 tail -f /tmp/bluebird-logrotate.log   # Rotation logs
 python3 scripts/cleanup_db.py         # DB cleanup (dry run)
 ```
 
-## Key Metrics (Dec 21)
+## Key Metrics (Dec 25)
 | Metric | Value |
 |--------|-------|
-| Daily P/L | +$1,685 (+1.83%) |
-| Grid P/L | +$3,341 (+3.70%) |
-| All-Time P/L | -$6,383 (-6.38%) |
-| Current Equity | $93,617 |
-| Days to Breakeven | ~4 at current pace |
+| Daily P/L | +$2,512 (+2.63%) |
+| Grid P/L | +$7,696 (+8.52%) |
+| All-Time P/L | -$2,028 (-2.03%) |
+| Current Equity | ~$97,972 |
+| Buys Avoided | 452 ($877K notional protected) |
+
+## Robustness Phase A - Complete
+| Feature | Implementation |
+|---------|---------------|
+| Crash Loop Detection | Pause after 3 restarts in 30 min |
+| Atomic JSON Writes | temp file + fsync + os.replace |
+| Disk Monitoring | Alert at 90% capacity |
+| Pending Alerts | Notifier processes on startup |
+
+## Phase B (EUPHORIA Gate) - Deferred
+Designed but not implemented. Would block upward grid rebalances during parabolic pumps (RSI > 75 + momentum > 2.5%). See plan at `/Users/javierrodriguez/.claude/plans/harmonic-herding-brook.md`.

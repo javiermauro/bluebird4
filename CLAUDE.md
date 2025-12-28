@@ -342,18 +342,44 @@ The notifier (`src/notifications/notifier.py`) polls the bot API and sends SMS a
 - **API down**: Circuit breaker opened after 5 consecutive failures
 
 ### Watchdog Setup (Bot + Notifier)
-Both bot and notifier have watchdog scripts that auto-restart on crash:
-```bash
-# Cron jobs (every 5 min) - both run and log to same file
-*/5 * * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_notifier.sh" >> /tmp/bluebird-watchdog.log 2>&1
-*/5 * * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_bot.sh" >> /tmp/bluebird-watchdog.log 2>&1
 
-# Manual checks
-bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_bot.sh"
-bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/check_notifier.sh"
+Both bot and notifier have watchdog scripts that auto-restart on crash. These run via **launchd** (not cron) due to macOS security restrictions on external volumes.
+
+**Architecture:**
+| Component | Location |
+|-----------|----------|
+| Bot watchdog | `~/Library/Application Support/BLUEBIRD/run-check-bot.sh` |
+| Notifier watchdog | `~/Library/Application Support/BLUEBIRD/run-check-notifier.sh` |
+| Bot LaunchAgent | `~/Library/LaunchAgents/com.bluebird.watchdog-bot.plist` |
+| Notifier LaunchAgent | `~/Library/LaunchAgents/com.bluebird.watchdog-notifier.plist` |
+| Durable state | `~/Library/Application Support/BLUEBIRD/state/` |
+| Logs | `/tmp/bluebird-watchdog.log` |
+
+**Why local filesystem?** macOS launchd cannot execute scripts on external APFS volumes with `noowners` flag (EPERM). The local watchdog scripts are full copies that read the database on the external volume but write state locally.
+
+**State files (durable, survives reboot):**
+- `crash-loop-bot.json` - Pauses restarts after 3 crashes in 30 min
+- `crash-loop-notifier.json` - Same for notifier
+- `pending-alerts.txt` - Alerts queued for SMS
+- `disk-alert.json` - Tracks last disk space alert (once per day)
+
+```bash
+# Check LaunchAgents status
+launchctl list | grep bluebird
+
+# Manual checks (run local scripts directly)
+bash "$HOME/Library/Application Support/BLUEBIRD/run-check-bot.sh"
+bash "$HOME/Library/Application Support/BLUEBIRD/run-check-notifier.sh"
 
 # View watchdog log
 tail -f /tmp/bluebird-watchdog.log
+
+# Reset crash loop pause (after fixing root cause)
+rm "$HOME/Library/Application Support/BLUEBIRD/state/crash-loop-bot.json"
+rm "$HOME/Library/Application Support/BLUEBIRD/state/crash-loop-notifier.json"
+
+# Sync local scripts with repo (after editing scripts/check_*.sh)
+bash scripts/sync-watchdog-scripts.sh
 ```
 
 ### Check Service Status

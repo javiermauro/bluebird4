@@ -48,6 +48,7 @@ from src.strategy.grid_trading import (
 from src.strategy.regime_detector import RegimeDetector, MarketRegime
 from src.strategy.feature_calculator import FeatureCalculator
 from src.strategy.risk_overlay import RiskOverlay, RiskMode
+from src.utils.atomic_io import atomic_write_json
 from src.strategy.orchestrator import Orchestrator, OrchestratorContext, OrchestratorMode
 
 from alpaca.data.requests import CryptoBarsRequest
@@ -590,9 +591,17 @@ class GridTradingBot:
             return result
 
         try:
-            # Step 1: Get current open orders from Alpaca (single API call)
-            alpaca_open = await run_blocking(client.get_open_orders, self.symbols)
+            # Step 1: Get current open orders from Alpaca (single API call, with timeout)
+            alpaca_open = await run_blocking_with_timeout(
+                client.get_open_orders, self.symbols,
+                timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                operation_name="fast_fill:get_open_orders",
+                default_on_timeout=[]
+            )
             result['api_calls'] += 1
+
+            if alpaca_open is None:
+                alpaca_open = []
 
             alpaca_open_ids = {o['id'] for o in alpaca_open}
 
@@ -657,8 +666,13 @@ class GridTradingBot:
                 self.fast_fill_stats['orders_checked_count'] += 1
 
                 try:
-                    # Fetch full order details from Alpaca
-                    order = await run_blocking(client.get_order_by_id, order_id)
+                    # Fetch full order details from Alpaca (with timeout)
+                    order = await run_blocking_with_timeout(
+                        client.get_order_by_id, order_id,
+                        timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                        operation_name=f"fast_fill:get_order({order_id[:8]})",
+                        default_on_timeout=None
+                    )
                     result['api_calls'] += 1
 
                     if order is None:
@@ -703,16 +717,17 @@ class GridTradingBot:
 
                             # Apply fill (idempotent via applied_order_ids)
                             # NOTE: Call ONLY apply_filled_order, NOT record_fill
-                            profit = self.grid_strategy.apply_filled_order(
+                            fill_result = self.grid_strategy.apply_filled_order(
                                 symbol=symbol,
                                 side=side,
                                 fill_price=filled_price,
                                 fill_qty=filled_qty,
                                 order_id=order_id,
-                                source=source
+                                source=source,
+                                order_type="limit"
                             )
 
-                            # Record to database (idempotent via unique index)
+                            # Record to database with fee audit fields (idempotent via unique index)
                             try:
                                 database.record_trade(
                                     symbol=symbol,
@@ -720,9 +735,16 @@ class GridTradingBot:
                                     quantity=filled_qty,
                                     price=filled_price,
                                     order_id=order_id,
-                                    profit=profit or 0,
+                                    profit=fill_result.get('profit', 0) if fill_result else 0,
+                                    fees=fill_result.get('fees', 0) if fill_result else 0,
                                     source=source,
-                                    notes="limit_fill_fast"
+                                    notes="limit_fill_fast",
+                                    fee_rate=fill_result.get('fee_rate') if fill_result else None,
+                                    fee_type=fill_result.get('fee_type') if fill_result else None,
+                                    fee_tier=fill_result.get('fee_tier') if fill_result else None,
+                                    rolling_30d_volume=fill_result.get('rolling_30d_volume') if fill_result else None,
+                                    fee_day_bucket=fill_result.get('fee_day_bucket') if fill_result else None,
+                                    fee_conservative=fill_result.get('fee_conservative') if fill_result else None,
                                 )
                             except Exception as e:
                                 logger.warning(f"Failed to log limit fill to database: {e}")
@@ -745,16 +767,17 @@ class GridTradingBot:
                             source = tracked_order.source if tracked_order else "grid"
 
                             # Apply partial (use filled_qty, not original qty!)
-                            profit = self.grid_strategy.apply_filled_order(
+                            fill_result = self.grid_strategy.apply_filled_order(
                                 symbol=symbol,
                                 side=side,
                                 fill_price=filled_price,
                                 fill_qty=filled_qty,  # Use actual filled qty
                                 order_id=order_id,
-                                source=source
+                                source=source,
+                                order_type="limit"
                             )
 
-                            # Record to database (idempotent via unique index)
+                            # Record to database with fee audit fields (idempotent via unique index)
                             try:
                                 database.record_trade(
                                     symbol=symbol,
@@ -762,9 +785,16 @@ class GridTradingBot:
                                     quantity=filled_qty,
                                     price=filled_price,
                                     order_id=order_id,
-                                    profit=profit or 0,
+                                    profit=fill_result.get('profit', 0) if fill_result else 0,
+                                    fees=fill_result.get('fees', 0) if fill_result else 0,
                                     source=source,
-                                    notes="partial_fill_fast"
+                                    notes="partial_fill_fast",
+                                    fee_rate=fill_result.get('fee_rate') if fill_result else None,
+                                    fee_type=fill_result.get('fee_type') if fill_result else None,
+                                    fee_tier=fill_result.get('fee_tier') if fill_result else None,
+                                    rolling_30d_volume=fill_result.get('rolling_30d_volume') if fill_result else None,
+                                    fee_day_bucket=fill_result.get('fee_day_bucket') if fill_result else None,
+                                    fee_conservative=fill_result.get('fee_conservative') if fill_result else None,
                                 )
                             except Exception as e:
                                 logger.warning(f"Failed to log partial fill to database: {e}")
@@ -908,8 +938,7 @@ class GridTradingBot:
                 'grid_starting_date': self.grid_starting_date,
                 'last_updated': datetime.now().isoformat()
             }
-            with open(self.alltime_equity_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(self.alltime_equity_file, data)
         except Exception as e:
             logger.error(f"Could not save all-time equity: {e}")
 
@@ -959,8 +988,7 @@ class GridTradingBot:
                 'stop_losses_triggered': self.stop_loss_triggered,
                 'last_updated': datetime.now().isoformat()
             }
-            with open(self.circuit_breaker_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(self.circuit_breaker_file, data)
             logger.debug("Circuit breaker state saved to disk")
         except Exception as e:
             logger.error(f"Could not save circuit breaker state: {e}")
@@ -1059,7 +1087,16 @@ class GridTradingBot:
     def _get_alpaca_last_equity(self) -> Optional[float]:
         """Get Alpaca's last_equity (previous day's closing equity) for accurate daily P/L."""
         try:
-            account = self.client.trading_client.get_account()
+            # Use sync timeout wrapper to prevent hanging during init if Alpaca is slow
+            account = run_sync_with_timeout(
+                self.client.trading_client.get_account,
+                timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                operation_name="init:get_alpaca_last_equity",
+                default_on_timeout=None
+            )
+            if account is None:
+                logger.debug("Alpaca last_equity timed out or unavailable")
+                return None
             last_equity = float(account.last_equity)
             logger.debug(f"Alpaca last_equity: ${last_equity:,.2f}")
             return last_equity
@@ -1084,8 +1121,7 @@ class GridTradingBot:
             if is_new_day:
                 data['starting_equity'] = equity
 
-            with open(self.daily_equity_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(self.daily_equity_file, data)
         except Exception as e:
             logger.debug(f"Could not save daily equity file: {e}")
 
@@ -1471,8 +1507,7 @@ class GridTradingBot:
                 "transactions": self.windfall_stats["transactions"][-100:],  # Keep last 100
                 "last_updated": datetime.now().isoformat()
             }
-            with open(self.windfall_log_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(self.windfall_log_file, data)
         except Exception as e:
             logger.error(f"Could not save windfall log: {e}")
 
@@ -1916,16 +1951,17 @@ class GridTradingBot:
                     filled_price = float(filled_order.get('filled_avg_price') or 0)
 
                     if filled_qty > 0 and filled_price > 0:
-                        profit = self.grid_strategy.apply_filled_order(
+                        fill_result = self.grid_strategy.apply_filled_order(
                             symbol=tracked.symbol,
                             side=tracked.side,
                             fill_price=filled_price,
                             fill_qty=filled_qty,
                             order_id=order_id,
-                            source=tracked.source
+                            source=tracked.source,
+                            order_type="limit"
                         )
 
-                        # Record to database (idempotent via unique index)
+                        # Record to database with fee audit fields (idempotent via unique index)
                         try:
                             database.record_trade(
                                 symbol=tracked.symbol,
@@ -1933,9 +1969,16 @@ class GridTradingBot:
                                 quantity=filled_qty,
                                 price=filled_price,
                                 order_id=order_id,
-                                profit=profit or 0,
+                                profit=fill_result.get('profit', 0) if fill_result else 0,
+                                fees=fill_result.get('fees', 0) if fill_result else 0,
                                 source=tracked.source,
-                                notes="startup_reconcile"
+                                notes="startup_reconcile",
+                                fee_rate=fill_result.get('fee_rate') if fill_result else None,
+                                fee_type=fill_result.get('fee_type') if fill_result else None,
+                                fee_tier=fill_result.get('fee_tier') if fill_result else None,
+                                rolling_30d_volume=fill_result.get('rolling_30d_volume') if fill_result else None,
+                                fee_day_bucket=fill_result.get('fee_day_bucket') if fill_result else None,
+                                fee_conservative=fill_result.get('fee_conservative') if fill_result else None,
                             )
                         except Exception as e:
                             logger.warning(f"Failed to log reconciled fill to database: {e}")
@@ -2496,15 +2539,33 @@ class GridTradingBot:
         now = datetime.now()
         if not hasattr(self, '_last_equity_snapshot') or (now - self._last_equity_snapshot).seconds >= 60:
             try:
-                # Get account details for full snapshot
-                account = self.client.trading_client.get_account()
+                # Get account details for full snapshot (with timeout to prevent blocking)
+                account = run_sync_with_timeout(
+                    self.client.trading_client.get_account,
+                    timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                    operation_name="equity_snapshot:get_account",
+                    default_on_timeout=None
+                )
+                if account is None:
+                    # Timeout - skip this snapshot, try next minute
+                    logger.debug("[TIMEOUT] Equity snapshot skipped - get_account timed out")
+                    return
                 cash_value = float(account.cash) if account.cash else 0.0
 
-                # Calculate positions_value with fallback
+                # Calculate positions_value with fallback (with timeout)
                 positions_value = 0.0
                 try:
-                    positions = self.client.get_positions()
-                    positions_value = sum(float(p.market_value) for p in positions) if positions else 0.0
+                    positions = run_sync_with_timeout(
+                        self.client.get_positions,
+                        timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                        operation_name="equity_snapshot:get_positions",
+                        default_on_timeout=None
+                    )
+                    if positions is None:
+                        # Timeout - use fallback
+                        positions_value = equity - cash_value if cash_value else 0.0
+                    else:
+                        positions_value = sum(float(p.market_value) for p in positions) if positions else 0.0
                 except Exception as pos_e:
                     # Fallback: derive from equity - cash
                     positions_value = equity - cash_value if cash_value else 0.0
@@ -2679,6 +2740,135 @@ async def run_blocking(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+# ============================================================================
+# ALPACA API TIMEOUT HANDLING
+# ============================================================================
+
+class AlpacaTimeoutStats:
+    """
+    Track Alpaca API timeout statistics for observability.
+    Thread-safe via simple atomic operations on primitives.
+    """
+    def __init__(self):
+        self.timeout_count = 0
+        self.last_timeout_at: Optional[str] = None
+        self.last_timeout_operation: Optional[str] = None
+        self._last_log_time = 0.0  # Rate-limit logging
+
+    def record_timeout(self, operation: str):
+        """Record a timeout event."""
+        import time
+        self.timeout_count += 1
+        self.last_timeout_at = datetime.now().isoformat()
+        self.last_timeout_operation = operation
+
+        # Rate-limit logging: max once per 30 seconds per operation type
+        now = time.time()
+        if now - self._last_log_time > 30:
+            logger.warning(f"[TIMEOUT] Alpaca API timeout: {operation} "
+                          f"(total timeouts: {self.timeout_count})")
+            self._last_log_time = now
+
+    def get_stats(self) -> dict:
+        """Get current timeout statistics."""
+        return {
+            "timeout_count": self.timeout_count,
+            "last_timeout_at": self.last_timeout_at,
+            "last_timeout_operation": self.last_timeout_operation
+        }
+
+
+# Global timeout stats instance
+alpaca_timeout_stats = AlpacaTimeoutStats()
+
+
+async def run_blocking_with_timeout(
+    func,
+    *args,
+    timeout_seconds: float = None,
+    operation_name: str = "alpaca_api",
+    default_on_timeout=None,
+    **kwargs
+):
+    """
+    Run a blocking function in a thread pool with a timeout.
+
+    If the operation times out or fails, returns the default value
+    instead of raising an exception. This ensures the event loop
+    remains responsive even when Alpaca is slow.
+
+    Args:
+        func: The blocking function to call
+        *args: Positional arguments for func
+        timeout_seconds: Timeout in seconds (default: ALPACA_API_TIMEOUT_SECONDS)
+        operation_name: Name for logging/observability
+        default_on_timeout: Value to return on timeout/error (default: None)
+        **kwargs: Keyword arguments for func
+
+    Returns:
+        The function result, or default_on_timeout if timeout/error occurs
+    """
+    if timeout_seconds is None:
+        timeout_seconds = getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        alpaca_timeout_stats.record_timeout(operation_name)
+        return default_on_timeout
+    except Exception as e:
+        # Log but don't crash - return safe default
+        logger.warning(f"[ALPACA] {operation_name} failed: {e}")
+        return default_on_timeout
+
+
+def run_sync_with_timeout(
+    func,
+    *args,
+    timeout_seconds: float = None,
+    operation_name: str = "alpaca_api_sync",
+    default_on_timeout=None,
+    **kwargs
+):
+    """
+    Run a blocking function with a timeout (synchronous version for non-async contexts).
+
+    Uses concurrent.futures.ThreadPoolExecutor to run with bounded timeout.
+    Safe for use during initialization or other sync contexts.
+
+    Args:
+        func: The blocking function to call
+        *args: Positional arguments for func
+        timeout_seconds: Timeout in seconds (default: ALPACA_API_TIMEOUT_SECONDS)
+        operation_name: Name for logging/observability
+        default_on_timeout: Value to return on timeout/error (default: None)
+        **kwargs: Keyword arguments for func
+
+    Returns:
+        The function result, or default_on_timeout if timeout/error occurs
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+    if timeout_seconds is None:
+        timeout_seconds = getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func, *args, **kwargs)
+            return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError:
+        alpaca_timeout_stats.record_timeout(operation_name)
+        logger.warning(f"[TIMEOUT] Sync Alpaca API timeout: {operation_name}")
+        return default_on_timeout
+    except Exception as e:
+        # Log but don't crash - return safe default
+        logger.warning(f"[ALPACA] {operation_name} failed: {e}")
+        return default_on_timeout
+
+
 async def cancel_grid_buy_limits(bot: GridTradingBot, symbols: list, client) -> int:
     """
     Cancel grid-owned BUY limit orders on RISK_OFF entry.
@@ -2693,10 +2883,20 @@ async def cancel_grid_buy_limits(bot: GridTradingBot, symbols: list, client) -> 
     cancelled = 0
     total_notional = 0.0
 
+    cancel_timeout = getattr(config, 'ALPACA_API_TIMEOUT_CANCEL', 8.0)
+
     for symbol in symbols:
         try:
-            # Get Alpaca open orders for this symbol
-            alpaca_orders = await run_blocking(client.get_open_orders, [symbol])
+            # Get Alpaca open orders for this symbol (with timeout)
+            alpaca_orders = await run_blocking_with_timeout(
+                client.get_open_orders, [symbol],
+                timeout_seconds=cancel_timeout,
+                operation_name=f"get_open_orders({symbol})",
+                default_on_timeout=[]
+            )
+
+            if alpaca_orders is None:
+                alpaca_orders = []
 
             for order in alpaca_orders:
                 # Only process BUYs
@@ -2722,9 +2922,18 @@ async def cancel_grid_buy_limits(bot: GridTradingBot, symbols: list, client) -> 
                         break
 
                 if is_grid_owned:
-                    # Cancel the order
+                    # Cancel the order (with timeout - continue to next if this one hangs)
                     try:
-                        await run_blocking(client.trading_client.cancel_order_by_id, order_id)
+                        cancel_result = await run_blocking_with_timeout(
+                            client.trading_client.cancel_order_by_id, order_id,
+                            timeout_seconds=cancel_timeout,
+                            operation_name=f"cancel_order({order_id[:8]})",
+                            default_on_timeout=False
+                        )
+                        if cancel_result is False:
+                            # Timeout or error - skip this order, continue sweep
+                            logger.warning(f"[RISK] Cancel timeout for {order_id[:8]}, skipping")
+                            continue
                         cancelled += 1
 
                         # Calculate notional for telemetry
@@ -2799,7 +3008,15 @@ async def execute_orchestrator_liquidation(bot: GridTradingBot, symbol: str, liq
             time_in_force=TimeInForce.GTC,  # GTC to match existing grid orders
             client_order_id=liq.client_order_id
         )
-        result = await run_blocking(client.trading_client.submit_order, order_request)
+        result = await run_blocking_with_timeout(
+            client.trading_client.submit_order, order_request,
+            timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+            operation_name=f"orch_liquidation({symbol})",
+            default_on_timeout=None
+        )
+        if result is None:
+            logger.warning(f"[ORCH] Liquidation order timed out for {symbol}")
+            return
 
         logger.info(f"[ORCH] Placed liquidation SELL {symbol}: qty={rounded_qty:.6f}, "
                     f"price=${rounded_price:.2f}, reason={liq.reason}, "
@@ -2856,19 +3073,40 @@ async def run_grid_bot(broadcast_update, broadcast_log):
         client = AlpacaClient(config, skip_verify=True)
         bot = GridTradingBot(config, client)
 
-        # Async initialization (moved from constructor to avoid blocking event loop)
+        # Async initialization (with timeout to prevent hung startup)
+        startup_timeout = getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0)
         await broadcast_log("Loading order history from Alpaca...")
-        await run_blocking(bot._load_confirmed_orders_from_alpaca)
-        await run_blocking(bot._run_reconciliation)
+        await run_blocking_with_timeout(
+            bot._load_confirmed_orders_from_alpaca,
+            timeout_seconds=startup_timeout,
+            operation_name="startup:load_orders",
+            default_on_timeout=None
+        )
+        await run_blocking_with_timeout(
+            bot._run_reconciliation,
+            timeout_seconds=startup_timeout,
+            operation_name="startup:reconciliation",
+            default_on_timeout=None
+        )
         await broadcast_log("Order history loaded and reconciled")
 
-        # Get account info (wrapped in run_blocking to avoid freezing event loop)
+        # Get account info (with timeout to prevent hung startup)
         try:
-            account = await run_blocking(client.trading_client.get_account)
-            equity = float(account.equity)
-            buying_power = float(account.buying_power)
-            await broadcast_log(f"Account Equity: ${equity:,.2f}")
-            await broadcast_log(f"Buying Power: ${buying_power:,.2f}")
+            account = await run_blocking_with_timeout(
+                client.trading_client.get_account,
+                timeout_seconds=startup_timeout,
+                operation_name="startup:get_account",
+                default_on_timeout=None
+            )
+            if account:
+                equity = float(account.equity)
+                buying_power = float(account.buying_power)
+                await broadcast_log(f"Account Equity: ${equity:,.2f}")
+                await broadcast_log(f"Buying Power: ${buying_power:,.2f}")
+            else:
+                await broadcast_log("Account fetch timed out, using fallback")
+                equity = 90000
+                buying_power = 180000
         except Exception as e:
             await broadcast_log(f"Failed to get account: {e}")
             equity = 90000  # Fallback
@@ -2955,8 +3193,13 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 return
 
             # Periodic reconciliation check (every 5 minutes)
-            # Run in thread to avoid blocking event loop during Alpaca API calls
-            await run_blocking(bot.check_periodic_reconciliation)
+            # Run in thread with timeout to avoid blocking event loop during Alpaca API calls
+            await run_blocking_with_timeout(
+                bot.check_periodic_reconciliation,
+                timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                operation_name="periodic_reconciliation",
+                default_on_timeout=None
+            )
 
             # === FAST FILL DETECTION (Near Real-Time) ===
             # Check for limit order fills every ~10s (rate-limited internally)
@@ -3055,25 +3298,50 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             if overlay_mode == RiskMode.RISK_OFF:
                 regime_allow_sell = True  # Override regime block on sells
 
-            # Get current positions (run in thread to avoid blocking event loop)
+            # Get current positions (with timeout to prevent event loop hang)
+            # FAIL CLOSED: On timeout, skip trading actions for this cycle
+            positions_timeout = False
             try:
-                positions = await run_blocking(client.get_positions)
+                positions = await run_blocking_with_timeout(
+                    client.get_positions,
+                    timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                    operation_name="main_loop:get_positions",
+                    default_on_timeout=None  # None = timeout occurred
+                )
+                if positions is None:
+                    # Timeout - don't treat as "no positions", skip buys this cycle
+                    positions_timeout = True
+                    positions = []
+                    logger.warning("[TIMEOUT] Positions fetch timed out - skipping buys this cycle")
                 current_positions = {p.symbol: p for p in positions}
                 num_positions = len(positions)
             except:
+                positions_timeout = True
                 current_positions = {}
                 num_positions = 0
 
-            # Get Alpaca open orders (for inventory gating - single API call per bar)
+            # Get Alpaca open orders (with timeout - single API call per bar)
             try:
-                alpaca_open_orders = await run_blocking(client.get_open_orders, symbols)
+                alpaca_open_orders = await run_blocking_with_timeout(
+                    client.get_open_orders, symbols,
+                    timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                    operation_name="main_loop:get_open_orders",
+                    default_on_timeout=None
+                )
+                if alpaca_open_orders is None:
+                    alpaca_open_orders = []
             except:
                 alpaca_open_orders = []
 
-            # Get account (run in thread to avoid blocking event loop)
+            # Get account (with timeout to prevent event loop hang)
             try:
-                account = await run_blocking(client.trading_client.get_account)
-                equity = float(account.equity)
+                account = await run_blocking_with_timeout(
+                    client.trading_client.get_account,
+                    timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                    operation_name="main_loop:get_account",
+                    default_on_timeout=None
+                )
+                equity = float(account.equity) if account else 90000
             except:
                 equity = 90000
 
@@ -3122,70 +3390,83 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             side=OrderSide.SELL,
                             time_in_force=TimeInForce.GTC
                         )
-                        result = await run_blocking(client.trading_client.submit_order, order)
-
-                        # Verify order fill (async version avoids blocking thread pool)
-                        verification = await client.verify_order_fill_async(str(result.id), max_wait_seconds=5)
-
-                        if verification['confirmed']:
-                            fill_price = verification['filled_avg_price']
-                            fill_qty = verification['filled_qty']
-
-                            # Calculate profit (entry to sell price, minus fees)
-                            entry_price = pos_dict['avg_entry_price']
-                            gross_profit = (fill_price - entry_price) * fill_qty
-                            # Windfall sells are market orders (taker fee)
-                            taker_fee = getattr(config, 'TAKER_FEE_PCT', 0.0025)
-                            fee = fill_price * fill_qty * taker_fee
-                            net_profit = gross_profit - fee
-
-                            # Log the windfall transaction
-                            bot.log_windfall_transaction(
-                                symbol=symbol,
-                                qty=fill_qty,
-                                price=fill_price,
-                                profit=net_profit,
-                                trigger_type=trigger_type,
-                                unrealized_pct=unrealized_pct,
-                                rsi=rsi
-                            )
-
-                            # Set cooldown for this symbol
-                            bot.set_windfall_cooldown(symbol)
-
-                            # Add to confirmed orders
-                            verification['windfall'] = True
-                            verification['profit'] = net_profit
-                            bot.add_confirmed_order(verification)
-
-                            windfall_executed = {
-                                'action': 'WINDFALL_SELL',
-                                'symbol': symbol,
-                                'qty': fill_qty,
-                                'price': fill_price,
-                                'profit': net_profit,
-                                'trigger_type': trigger_type,
-                                'unrealized_pct': unrealized_pct,
-                                'rsi': rsi,
-                                'timestamp': datetime.now().isoformat()
-                            }
-
-                            await broadcast_log(f"[WINDFALL] SUCCESS: Sold {fill_qty:.6f} {symbol} @ ${fill_price:,.2f}")
-                            await broadcast_log(f"[WINDFALL] Captured: ${net_profit:+,.2f} profit!")
-
-                            # Update position qty for remaining grid evaluation
-                            position_qty = position_qty - fill_qty
-
+                        result = await run_blocking_with_timeout(
+                            client.trading_client.submit_order, order,
+                            timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                            operation_name=f"windfall_sell({symbol})",
+                            default_on_timeout=None
+                        )
+                        if result is None:
+                            logger.warning(f"[TIMEOUT] Windfall SELL timed out for {symbol}")
+                            # Timeout - skip registration, will retry next bar
                         else:
-                            await broadcast_log(f"[WINDFALL] Order not confirmed: {verification.get('status', 'unknown')}")
+                            # Verify order fill (async version avoids blocking thread pool)
+                            verification = await client.verify_order_fill_async(str(result.id), max_wait_seconds=5)
+
+                            if verification['confirmed']:
+                                fill_price = verification['filled_avg_price']
+                                fill_qty = verification['filled_qty']
+
+                                # Calculate profit (entry to sell price, minus fees)
+                                entry_price = pos_dict['avg_entry_price']
+                                gross_profit = (fill_price - entry_price) * fill_qty
+                                # Windfall sells are market orders (taker fee)
+                                taker_fee = getattr(config, 'TAKER_FEE_PCT', 0.0025)
+                                fee = fill_price * fill_qty * taker_fee
+                                net_profit = gross_profit - fee
+
+                                # Log the windfall transaction
+                                bot.log_windfall_transaction(
+                                    symbol=symbol,
+                                    qty=fill_qty,
+                                    price=fill_price,
+                                    profit=net_profit,
+                                    trigger_type=trigger_type,
+                                    unrealized_pct=unrealized_pct,
+                                    rsi=rsi
+                                )
+
+                                # Set cooldown for this symbol
+                                bot.set_windfall_cooldown(symbol)
+
+                                # Add to confirmed orders
+                                verification['windfall'] = True
+                                verification['profit'] = net_profit
+                                bot.add_confirmed_order(verification)
+
+                                windfall_executed = {
+                                    'action': 'WINDFALL_SELL',
+                                    'symbol': symbol,
+                                    'qty': fill_qty,
+                                    'price': fill_price,
+                                    'profit': net_profit,
+                                    'trigger_type': trigger_type,
+                                    'unrealized_pct': unrealized_pct,
+                                    'rsi': rsi,
+                                    'timestamp': datetime.now().isoformat()
+                                }
+
+                                await broadcast_log(f"[WINDFALL] SUCCESS: Sold {fill_qty:.6f} {symbol} @ ${fill_price:,.2f}")
+                                await broadcast_log(f"[WINDFALL] Captured: ${net_profit:+,.2f} profit!")
+
+                                # Update position qty for remaining grid evaluation
+                                position_qty = position_qty - fill_qty
+
+                            else:
+                                await broadcast_log(f"[WINDFALL] Order not confirmed: {verification.get('status', 'unknown')}")
 
                     except Exception as e:
                         logger.error(f"[WINDFALL] Order failed: {e}")
                         await broadcast_log(f"[WINDFALL] Order failed: {e}")
 
             # === RISK MANAGEMENT CHECKS ===
-            # Update risk state (wrapped to avoid blocking - contains Alpaca API call)
-            await run_blocking(bot.update_risk_state, equity)
+            # Update risk state (with timeout - contains Alpaca API calls that could hang)
+            await run_blocking_with_timeout(
+                bot.update_risk_state, equity,
+                timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                operation_name="update_risk_state",
+                default_on_timeout=None
+            )
 
             # Check circuit breakers (daily loss, max drawdown)
             circuit_status = bot.check_circuit_breakers(equity)
@@ -3210,17 +3491,27 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             side=OrderSide.SELL,
                             time_in_force=TimeInForce.GTC
                         )
-                        result = await run_blocking(client.trading_client.submit_order, order)
-                        await broadcast_log(f"[RISK] STOP-LOSS EXECUTED: Sold {position_qty:.6f} {symbol} @ ${current_price:,.2f}")
+                        result = await run_blocking_with_timeout(
+                            client.trading_client.submit_order, order,
+                            timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                            operation_name=f"stop_loss({symbol})",
+                            default_on_timeout=None
+                        )
+                        if result is None:
+                            await broadcast_log(f"[RISK] STOP-LOSS TIMED OUT for {symbol}")
+                            evaluation = {'action': 'STOP_LOSS_TIMEOUT', 'reason': 'Alpaca API timeout'}
+                            # Timeout - will retry next bar
+                        else:
+                            await broadcast_log(f"[RISK] STOP-LOSS EXECUTED: Sold {position_qty:.6f} {symbol} @ ${current_price:,.2f}")
 
-                        # Record as emergency sell (source="stop_loss" prevents inflating completed_cycles)
-                        bot.record_fill(symbol, "sell", current_price, position_qty, str(result.id), source="stop_loss")
+                            # Record as emergency sell (source="stop_loss" prevents inflating completed_cycles)
+                            bot.record_fill(symbol, "sell", current_price, position_qty, str(result.id), source="stop_loss")
 
-                        evaluation = {
-                            'action': 'STOP_LOSS',
-                            'reason': stop_loss_status['reason'],
-                            'order_details': {'quantity': position_qty, 'price': current_price}
-                        }
+                            evaluation = {
+                                'action': 'STOP_LOSS',
+                                'reason': stop_loss_status['reason'],
+                                'order_details': {'quantity': position_qty, 'price': current_price}
+                            }
                     except Exception as e:
                         await broadcast_log(f"[RISK] STOP-LOSS ORDER FAILED: {e}")
                         evaluation = {'action': 'STOP_LOSS_FAILED', 'reason': str(e)}
@@ -3331,7 +3622,10 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             down_bar_allow, down_bar_count = bot.check_consecutive_down_bars(symbol)
 
                             # Apply filters (regime, momentum, allocation, RISK OVERLAY, ORCHESTRATOR, consecutive down bars)
-                            if not overlay_allow_buy:
+                            # FAIL CLOSED: If positions timed out, skip buys to avoid over-buying
+                            if positions_timeout:
+                                logger.debug(f"[TIMEOUT] Skipping resting BUY {symbol}: positions fetch timed out")
+                            elif not overlay_allow_buy:
                                 # RISK OVERLAY GATE - highest priority
                                 notional = buy_details['quantity'] * buy_details['price']
                                 bot.risk_overlay._record_blocked_buy(symbol, notional, overlay_buy_reason)
@@ -3373,25 +3667,34 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                             time_in_force=TimeInForce.GTC,
                                             limit_price=limit_price
                                         )
-                                        result = await run_blocking(client.trading_client.submit_order, order)
-                                        order_id = str(result.id)
-
-                                        # Register for tracking
-                                        bot.grid_strategy.register_open_limit_order(
-                                            order_id=order_id, symbol=symbol, side="buy",
-                                            level_id=level_id, level_price=grid_price,
-                                            limit_price=limit_price, qty=rounded_qty, source="grid"
+                                        result = await run_blocking_with_timeout(
+                                            client.trading_client.submit_order, order,
+                                            timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                            operation_name=f"submit_buy({symbol})",
+                                            default_on_timeout=None
                                         )
-                                        bot.grid_strategy.register_pending_order(
-                                            order_id=order_id, symbol=symbol, side="buy",
-                                            intended_level_price=grid_price,
-                                            intended_level_id=level_id, source="grid",
-                                            fee_type="maker"  # Limit orders are maker
-                                        )
+                                        if result is None:
+                                            logger.warning(f"[TIMEOUT] BUY order submission timed out for {symbol}")
+                                            # Timeout - skip registration, will retry next bar
+                                        else:
+                                            order_id = str(result.id)
 
-                                        logger.info(f"[BUY] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
-                                        await broadcast_log(f"[GRID] Resting BUY {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
-                                        await broadcast_log(f"  Level: {level_id[:8]}...")
+                                            # Register for tracking
+                                            bot.grid_strategy.register_open_limit_order(
+                                                order_id=order_id, symbol=symbol, side="buy",
+                                                level_id=level_id, level_price=grid_price,
+                                                limit_price=limit_price, qty=rounded_qty, source="grid"
+                                            )
+                                            bot.grid_strategy.register_pending_order(
+                                                order_id=order_id, symbol=symbol, side="buy",
+                                                intended_level_price=grid_price,
+                                                intended_level_id=level_id, source="grid",
+                                                fee_type="maker"  # Limit orders are maker
+                                            )
+
+                                            logger.info(f"[BUY] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
+                                            await broadcast_log(f"[GRID] Resting BUY {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                            await broadcast_log(f"  Level: {level_id[:8]}...")
 
                                 except Exception as e:
                                     logger.error(f"[BUY] Resting LIMIT failed for {symbol}: {e}")
@@ -3454,25 +3757,34 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                             time_in_force=TimeInForce.GTC,
                                             limit_price=limit_price
                                         )
-                                        result = await run_blocking(client.trading_client.submit_order, order)
-                                        order_id = str(result.id)
-
-                                        # Register for tracking
-                                        bot.grid_strategy.register_open_limit_order(
-                                            order_id=order_id, symbol=symbol, side="sell",
-                                            level_id=level_id, level_price=grid_price,
-                                            limit_price=limit_price, qty=rounded_qty, source="grid"
+                                        result = await run_blocking_with_timeout(
+                                            client.trading_client.submit_order, order,
+                                            timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                            operation_name=f"submit_sell({symbol})",
+                                            default_on_timeout=None
                                         )
-                                        bot.grid_strategy.register_pending_order(
-                                            order_id=order_id, symbol=symbol, side="sell",
-                                            intended_level_price=grid_price,
-                                            intended_level_id=level_id, source="grid",
-                                            fee_type="maker"  # Limit orders are maker
-                                        )
+                                        if result is None:
+                                            logger.warning(f"[TIMEOUT] SELL order submission timed out for {symbol}")
+                                            # Timeout - skip registration, will retry next bar
+                                        else:
+                                            order_id = str(result.id)
 
-                                        logger.info(f"[SELL] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
-                                        await broadcast_log(f"[GRID] Resting SELL {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
-                                        await broadcast_log(f"  Level: {level_id[:8]}...")
+                                            # Register for tracking
+                                            bot.grid_strategy.register_open_limit_order(
+                                                order_id=order_id, symbol=symbol, side="sell",
+                                                level_id=level_id, level_price=grid_price,
+                                                limit_price=limit_price, qty=rounded_qty, source="grid"
+                                            )
+                                            bot.grid_strategy.register_pending_order(
+                                                order_id=order_id, symbol=symbol, side="sell",
+                                                intended_level_price=grid_price,
+                                                intended_level_id=level_id, source="grid",
+                                                fee_type="maker"  # Limit orders are maker
+                                            )
+
+                                            logger.info(f"[SELL] Resting LIMIT: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f}")
+                                            await broadcast_log(f"[GRID] Resting SELL {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                            await broadcast_log(f"  Level: {level_id[:8]}...")
 
                                 except Exception as e:
                                     logger.error(f"[SELL] Resting LIMIT failed for {symbol}: {e}")
@@ -3524,10 +3836,19 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 if can_rebalance and not rebalance_blocked:
                                     # Cancel existing open orders for this symbol before rebalancing
                                     cancelled = 0
+                                    cancel_timeout = getattr(config, 'ALPACA_API_TIMEOUT_CANCEL', 8.0)
                                     for key, order in list(bot.grid_strategy.open_limit_orders.items()):
                                         if order.symbol == symbol:
                                             try:
-                                                await run_blocking(client.trading_client.cancel_order_by_id, order.order_id)
+                                                cancel_result = await run_blocking_with_timeout(
+                                                    client.trading_client.cancel_order_by_id, order.order_id,
+                                                    timeout_seconds=cancel_timeout,
+                                                    operation_name=f"rebalance:cancel({order.order_id[:8]})",
+                                                    default_on_timeout=False
+                                                )
+                                                if cancel_result is False:
+                                                    logger.warning(f"[REBALANCE] Cancel timeout for {order.order_id[:8]}, skipping")
+                                                    continue
                                                 bot.grid_strategy.remove_open_limit_order(order.order_id)
                                                 bot.grid_strategy.remove_pending_order(order.order_id)
                                                 cancelled += 1
@@ -3652,38 +3973,47 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                             time_in_force=TimeInForce.GTC,
                                             limit_price=limit_price
                                         )
-                                        result = await run_blocking(client.trading_client.submit_order, order)
-                                        order_id = str(result.id)
-
-                                        # Register open limit order (for duplicate prevention)
-                                        bot.grid_strategy.register_open_limit_order(
-                                            order_id=order_id,
-                                            symbol=symbol,
-                                            side="buy",
-                                            level_id=level_id,
-                                            level_price=grid_price,
-                                            limit_price=limit_price,
-                                            qty=rounded_qty,
-                                            source="grid"
+                                        result = await run_blocking_with_timeout(
+                                            client.trading_client.submit_order, order,
+                                            timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                            operation_name=f"legacy_buy({symbol})",
+                                            default_on_timeout=None
                                         )
+                                        if result is None:
+                                            logger.warning(f"[TIMEOUT] Legacy BUY order timed out for {symbol}")
+                                            # Timeout - skip registration, will retry next bar
+                                        else:
+                                            order_id = str(result.id)
 
-                                        # Register pending order (for reconciliation)
-                                        bot.grid_strategy.register_pending_order(
-                                            order_id=order_id,
-                                            symbol=symbol,
-                                            side="buy",
-                                            intended_level_price=grid_price,
-                                            intended_level_id=level_id,
-                                            source="grid",
-                                            fee_type="maker"  # Limit orders are maker
-                                        )
+                                            # Register open limit order (for duplicate prevention)
+                                            bot.grid_strategy.register_open_limit_order(
+                                                order_id=order_id,
+                                                symbol=symbol,
+                                                side="buy",
+                                                level_id=level_id,
+                                                level_price=grid_price,
+                                                limit_price=limit_price,
+                                                qty=rounded_qty,
+                                                source="grid"
+                                            )
 
-                                        logger.info(f"[BUY] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
-                                        await broadcast_log(f"[GRID] BUY LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
-                                        await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
+                                            # Register pending order (for reconciliation)
+                                            bot.grid_strategy.register_pending_order(
+                                                order_id=order_id,
+                                                symbol=symbol,
+                                                side="buy",
+                                                intended_level_price=grid_price,
+                                                intended_level_id=level_id,
+                                                source="grid",
+                                                fee_type="maker"  # Limit orders are maker
+                                            )
 
-                                        # Note: Don't verify_order_fill for limit orders - they may not fill immediately
-                                        # Fills will be detected via reconciliation
+                                            logger.info(f"[BUY] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
+                                            await broadcast_log(f"[GRID] BUY LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                            await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
+
+                                            # Note: Don't verify_order_fill for limit orders - they may not fill immediately
+                                            # Fills will be detected via reconciliation
 
                                 except Exception as e:
                                     logger.error(f"[BUY] LIMIT order failed for {symbol}: {e}")
@@ -3698,53 +4028,62 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     side=OrderSide.BUY,
                                     time_in_force=TimeInForce.GTC
                                 )
-                                result = await run_blocking(client.trading_client.submit_order, order)
-                                order_id = str(result.id)
-
-                                # Register pending order BEFORE verify (for deterministic matching)
-                                level_price = order_details['price']
-                                bot.grid_strategy.register_pending_order(
-                                    order_id=order_id,
-                                    symbol=symbol,
-                                    side="buy",
-                                    intended_level_price=level_price,
-                                    intended_level_id=level_id,
-                                    source="grid",
-                                    fee_type="maker"  # Limit orders are maker
+                                result = await run_blocking_with_timeout(
+                                    client.trading_client.submit_order, order,
+                                    timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                    operation_name=f"market_buy({symbol})",
+                                    default_on_timeout=None
                                 )
-
-                                # Verify order fill (async version avoids blocking thread pool)
-                                verification = await client.verify_order_fill_async(order_id, max_wait_seconds=5)
-
-                                if verification['confirmed']:
-                                    # Use actual fill price from Alpaca
-                                    fill_price = verification['filled_avg_price']
-                                    fill_qty = verification['filled_qty']
-
-                                    # Record fill with verified data (idempotent - uses apply_filled_order)
-                                    bot.record_fill(symbol, "buy", fill_price, fill_qty, order_id)
-
-                                    # Add to confirmed orders
-                                    bot.add_confirmed_order(verification)
-
-                                    trade_executed = {
-                                        'action': 'BUY',
-                                        'symbol': symbol,
-                                        'price': fill_price,
-                                        'qty': fill_qty,
-                                        'grid_level': order_details.get('grid_level'),
-                                        'timestamp': datetime.now().isoformat(),
-                                        'order_id': order_id,
-                                        'verified': True
-                                    }
-
-                                    logger.info(f"[BUY] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
-                                    await broadcast_log(f"[GRID] BUY {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
-                                    await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
+                                if result is None:
+                                    logger.warning(f"[TIMEOUT] Market BUY order timed out for {symbol}")
+                                    # Timeout - skip registration, will retry next bar
                                 else:
-                                    # Verify timed out - pending order remains for reconciliation
-                                    logger.warning(f"[BUY] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
-                                    await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
+                                    order_id = str(result.id)
+
+                                    # Register pending order BEFORE verify (for deterministic matching)
+                                    level_price = order_details['price']
+                                    bot.grid_strategy.register_pending_order(
+                                        order_id=order_id,
+                                        symbol=symbol,
+                                        side="buy",
+                                        intended_level_price=level_price,
+                                        intended_level_id=level_id,
+                                        source="grid",
+                                        fee_type="maker"  # Limit orders are maker
+                                    )
+
+                                    # Verify order fill (async version avoids blocking thread pool)
+                                    verification = await client.verify_order_fill_async(order_id, max_wait_seconds=5)
+
+                                    if verification['confirmed']:
+                                        # Use actual fill price from Alpaca
+                                        fill_price = verification['filled_avg_price']
+                                        fill_qty = verification['filled_qty']
+
+                                        # Record fill with verified data (idempotent - uses apply_filled_order)
+                                        bot.record_fill(symbol, "buy", fill_price, fill_qty, order_id)
+
+                                        # Add to confirmed orders
+                                        bot.add_confirmed_order(verification)
+
+                                        trade_executed = {
+                                            'action': 'BUY',
+                                            'symbol': symbol,
+                                            'price': fill_price,
+                                            'qty': fill_qty,
+                                            'grid_level': order_details.get('grid_level'),
+                                            'timestamp': datetime.now().isoformat(),
+                                            'order_id': order_id,
+                                            'verified': True
+                                        }
+
+                                        logger.info(f"[BUY] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
+                                        await broadcast_log(f"[GRID] BUY {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
+                                        await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
+                                    else:
+                                        # Verify timed out - pending order remains for reconciliation
+                                        logger.warning(f"[BUY] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
+                                        await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
 
                             except Exception as e:
                                 logger.error(f"[BUY ERROR] {symbol}: {e}")
@@ -3797,38 +4136,47 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         time_in_force=TimeInForce.GTC,
                                         limit_price=limit_price
                                     )
-                                    result = await run_blocking(client.trading_client.submit_order, order)
-                                    order_id = str(result.id)
-
-                                    # Register open limit order (for duplicate prevention)
-                                    bot.grid_strategy.register_open_limit_order(
-                                        order_id=order_id,
-                                        symbol=symbol,
-                                        side="sell",
-                                        level_id=level_id,
-                                        level_price=grid_price,
-                                        limit_price=limit_price,
-                                        qty=rounded_qty,
-                                        source="grid"
+                                    result = await run_blocking_with_timeout(
+                                        client.trading_client.submit_order, order,
+                                        timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                        operation_name=f"legacy_sell({symbol})",
+                                        default_on_timeout=None
                                     )
+                                    if result is None:
+                                        logger.warning(f"[TIMEOUT] Legacy SELL order timed out for {symbol}")
+                                        # Timeout - skip registration, will retry next bar
+                                    else:
+                                        order_id = str(result.id)
 
-                                    # Register pending order (for reconciliation)
-                                    bot.grid_strategy.register_pending_order(
-                                        order_id=order_id,
-                                        symbol=symbol,
-                                        side="sell",
-                                        intended_level_price=grid_price,
-                                        intended_level_id=level_id,
-                                        source="grid",
-                                        fee_type="maker"  # Limit orders are maker
-                                    )
+                                        # Register open limit order (for duplicate prevention)
+                                        bot.grid_strategy.register_open_limit_order(
+                                            order_id=order_id,
+                                            symbol=symbol,
+                                            side="sell",
+                                            level_id=level_id,
+                                            level_price=grid_price,
+                                            limit_price=limit_price,
+                                            qty=rounded_qty,
+                                            source="grid"
+                                        )
 
-                                    logger.info(f"[SELL] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
-                                    await broadcast_log(f"[GRID] SELL LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
-                                    await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
+                                        # Register pending order (for reconciliation)
+                                        bot.grid_strategy.register_pending_order(
+                                            order_id=order_id,
+                                            symbol=symbol,
+                                            side="sell",
+                                            intended_level_price=grid_price,
+                                            intended_level_id=level_id,
+                                            source="grid",
+                                            fee_type="maker"  # Limit orders are maker
+                                        )
 
-                                    # Note: Don't verify_order_fill for limit orders - they may not fill immediately
-                                    # Fills will be detected via reconciliation
+                                        logger.info(f"[SELL] LIMIT order: {rounded_qty:.6f} {symbol} @ ${limit_price:,.2f} (grid: ${grid_price:,.2f})")
+                                        await broadcast_log(f"[GRID] SELL LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
+                                        await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
+
+                                        # Note: Don't verify_order_fill for limit orders - they may not fill immediately
+                                        # Fills will be detected via reconciliation
 
                             except Exception as e:
                                 logger.error(f"[SELL] LIMIT order failed for {symbol}: {e}")
@@ -3843,63 +4191,72 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 side=OrderSide.SELL,
                                 time_in_force=TimeInForce.GTC
                             )
-                            result = await run_blocking(client.trading_client.submit_order, order)
-                            order_id = str(result.id)
-
-                            # Register pending order BEFORE verify (for deterministic matching)
-                            level_price = order_details['price']
-                            bot.grid_strategy.register_pending_order(
-                                order_id=order_id,
-                                symbol=symbol,
-                                side="sell",
-                                intended_level_price=level_price,
-                                intended_level_id=level_id,
-                                source="grid",
-                                fee_type="maker"  # Limit orders are maker
+                            result = await run_blocking_with_timeout(
+                                client.trading_client.submit_order, order,
+                                timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                operation_name=f"market_sell({symbol})",
+                                default_on_timeout=None
                             )
-
-                            # Verify order fill (async version avoids blocking thread pool)
-                            verification = await client.verify_order_fill_async(order_id, max_wait_seconds=5)
-
-                            if verification['confirmed']:
-                                # Use actual fill price from Alpaca
-                                fill_price = verification['filled_avg_price']
-                                fill_qty = verification['filled_qty']
-
-                                # Record fill and get profit with verified data (idempotent)
-                                profit = bot.record_fill(symbol, "sell", fill_price, fill_qty, order_id)
-
-                                # Add to confirmed orders (include profit)
-                                verification['profit'] = profit
-                                bot.add_confirmed_order(verification)
-
-                                # Track performance by hour
-                                if profit:
-                                    bot.track_trade_performance(symbol, profit, current_hour)
-
-                                trade_executed = {
-                                    'action': 'SELL',
-                                    'symbol': symbol,
-                                    'price': fill_price,
-                                    'qty': fill_qty,
-                                    'profit': profit,
-                                    'grid_level': order_details.get('grid_level'),
-                                    'timestamp': datetime.now().isoformat(),
-                                    'time_quality': time_quality,
-                                    'corr_adjustment': corr_adjustment,
-                                    'order_id': order_id,
-                                    'verified': True
-                                }
-
-                                logger.info(f"[SELL] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
-                                await broadcast_log(f"[GRID] SELL {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
-                                if profit:
-                                    await broadcast_log(f"  Profit: ${profit:.2f} (Hour {current_hour}:00 UTC)")
-                                await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
+                            if result is None:
+                                logger.warning(f"[TIMEOUT] Market SELL order timed out for {symbol}")
+                                # Timeout - skip registration, will retry next bar
                             else:
-                                # Verify timed out - pending order remains for reconciliation
-                                logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
-                                await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
+                                order_id = str(result.id)
+
+                                # Register pending order BEFORE verify (for deterministic matching)
+                                level_price = order_details['price']
+                                bot.grid_strategy.register_pending_order(
+                                    order_id=order_id,
+                                    symbol=symbol,
+                                    side="sell",
+                                    intended_level_price=level_price,
+                                    intended_level_id=level_id,
+                                    source="grid",
+                                    fee_type="maker"  # Limit orders are maker
+                                )
+
+                                # Verify order fill (async version avoids blocking thread pool)
+                                verification = await client.verify_order_fill_async(order_id, max_wait_seconds=5)
+
+                                if verification['confirmed']:
+                                    # Use actual fill price from Alpaca
+                                    fill_price = verification['filled_avg_price']
+                                    fill_qty = verification['filled_qty']
+
+                                    # Record fill and get profit with verified data (idempotent)
+                                    profit = bot.record_fill(symbol, "sell", fill_price, fill_qty, order_id)
+
+                                    # Add to confirmed orders (include profit)
+                                    verification['profit'] = profit
+                                    bot.add_confirmed_order(verification)
+
+                                    # Track performance by hour
+                                    if profit:
+                                        bot.track_trade_performance(symbol, profit, current_hour)
+
+                                    trade_executed = {
+                                        'action': 'SELL',
+                                        'symbol': symbol,
+                                        'price': fill_price,
+                                        'qty': fill_qty,
+                                        'profit': profit,
+                                        'grid_level': order_details.get('grid_level'),
+                                        'timestamp': datetime.now().isoformat(),
+                                        'time_quality': time_quality,
+                                        'corr_adjustment': corr_adjustment,
+                                        'order_id': order_id,
+                                        'verified': True
+                                    }
+
+                                    logger.info(f"[SELL] {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f} [VERIFIED]")
+                                    await broadcast_log(f"[GRID] SELL {symbol}: {fill_qty:.4f} @ ${fill_price:,.2f}")
+                                    if profit:
+                                        await broadcast_log(f"  Profit: ${profit:.2f} (Hour {current_hour}:00 UTC)")
+                                    await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
+                                else:
+                                    # Verify timed out - pending order remains for reconciliation
+                                    logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
+                                    await broadcast_log(f"[GRID] Order not confirmed: {verification.get('status', 'pending')} - will reconcile later")
 
                         except Exception as e:
                             logger.error(f"[SELL ERROR] {symbol}: {e}")

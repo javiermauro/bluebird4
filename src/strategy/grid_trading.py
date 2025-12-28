@@ -28,6 +28,15 @@ from datetime import datetime
 from enum import Enum
 
 import config_ultra as config
+from src.utils.atomic_io import atomic_write_json
+from src.utils.crypto_fee_tiers import (
+    get_fee_tier,
+    get_fee_day_bucket,
+    calculate_fee,
+    determine_fee_type,
+    get_fallback_rates,
+)
+from src.database import db as database
 
 # Project root for persistent state files (survives reboot, unlike /tmp)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -355,8 +364,8 @@ class GridTradingStrategy:
                 # NEW: Persist open limit orders
                 'open_limit_orders': {key: o.to_dict() for key, o in self.open_limit_orders.items()}
             }
-            with open(GRID_STATE_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
+            # Use atomic write to prevent corruption on power loss
+            atomic_write_json(GRID_STATE_FILE, data)
             logger.debug(f"Grid state saved for {len(self.grids)} symbols")
 
             # Also save to DB for long-term persistence (survives date changes)
@@ -791,10 +800,11 @@ class GridTradingStrategy:
         fill_price: float,
         fill_qty: float,
         order_id: str,
-        source: str = "reconcile"
-    ) -> Optional[float]:
+        source: str = "reconcile",
+        order_type: str = "limit"
+    ) -> Optional[Dict]:
         """
-        Single entry point for applying fills. Returns profit for sells.
+        Single entry point for applying fills. Returns result dict with profit and fee info.
 
         This is the deterministic, idempotent fill matching algorithm.
 
@@ -810,9 +820,20 @@ class GridTradingStrategy:
             fill_qty: Fill quantity
             order_id: Alpaca order ID
             source: "grid" | "reconcile" | "stop_loss" | "windfall"
+            order_type: "market" or "limit" (for maker/taker determination)
 
         Returns:
-            Profit from this trade (if grid sell), else None
+            Dict with profit and fee info, or None if skipped/error:
+            {
+                'profit': float,           # Realized profit (0 for buys)
+                'fees': float,             # Expected fee (tier-correct)
+                'fee_conservative': float, # Worst-case fee (taker rate)
+                'fee_rate': float,         # Applied rate
+                'fee_type': str,           # 'maker', 'taker', or 'maker_assumed'
+                'fee_tier': str,           # 'Tier 1', etc.
+                'rolling_30d_volume': float,
+                'fee_day_bucket': str,     # '2025-12-10'
+            }
         """
         symbol = normalize_symbol(symbol)
         side = normalize_side(side)
@@ -947,14 +968,46 @@ class GridTradingStrategy:
             sell_price = fill_price + state.config.grid_spacing
             if sell_price <= state.config.upper_price:
                 # Get buy fee type from pending order (for accurate sell-side profit calc)
-                buy_fee_type = pending.fee_type if pending else "taker"
+                buy_fee_type_for_level = pending.fee_type if pending else determine_fee_type(order_type)
                 self._add_sell_level(
                     state,
                     sell_price,
                     fill_qty,
                     origin_buy_price=fill_price,
-                    origin_buy_fee_type=buy_fee_type
+                    origin_buy_fee_type=buy_fee_type_for_level
                 )
+
+            # Calculate fee info for this buy (for database recording)
+            try:
+                rolling_30d_volume = database.get_rolling_30d_volume(datetime.now())
+            except Exception as e:
+                logger.warning(f"Could not get rolling 30d volume: {e}")
+                rolling_30d_volume = 0.0
+
+            tier = get_fee_tier(rolling_30d_volume)
+            fee_day_bucket = get_fee_day_bucket(datetime.now())
+
+            # Determine fee type for this buy
+            buy_fee_type = pending.fee_type if pending else determine_fee_type(order_type)
+            buy_fee_rate = tier['maker'] if buy_fee_type in ("maker", "maker_assumed") else tier['taker']
+
+            # Calculate fee for this buy leg only
+            notional = fill_price * fill_qty
+            fees = notional * buy_fee_rate
+            fees_conservative = notional * tier['taker']
+
+            result = {
+                'profit': 0.0,  # Buys don't have profit
+                'fees': fees,
+                'fee_conservative': fees_conservative,
+                'fee_rate': buy_fee_rate,
+                'fee_type': buy_fee_type,
+                'fee_tier': tier['name'],
+                'rolling_30d_volume': rolling_30d_volume,
+                'fee_day_bucket': fee_day_bucket,
+            }
+            self.save_state()
+            return result
 
         else:  # sell
             state.total_sells += 1
@@ -968,13 +1021,21 @@ class GridTradingStrategy:
             if source == "grid":
                 state.completed_cycles += 1
 
-            # Calculate profit using two-notional fee model
-            # Get fee rates from config (with fallback defaults)
-            maker_fee = getattr(config, 'MAKER_FEE_PCT', 0.0015)
-            taker_fee = getattr(config, 'TAKER_FEE_PCT', 0.0025)
+            # Calculate profit using two-notional fee model with tier-correct rates
+            # Get rolling 30-day volume for tier calculation
+            try:
+                rolling_30d_volume = database.get_rolling_30d_volume(datetime.now())
+            except Exception as e:
+                logger.warning(f"Could not get rolling 30d volume: {e}")
+                rolling_30d_volume = 0.0
+
+            tier = get_fee_tier(rolling_30d_volume)
+            maker_fee = tier['maker']
+            taker_fee = tier['taker']
+            fee_day_bucket = get_fee_day_bucket(datetime.now())
 
             # Get sell fee type from pending order (local var holds ref even after dict removal)
-            sell_fee_type = pending.fee_type if pending else "taker"
+            sell_fee_type = pending.fee_type if pending else determine_fee_type(order_type)
             sell_fee_rate = maker_fee if sell_fee_type == "maker" else taker_fee
 
             # Get buy fee type/price from matched SELL level's origin fields
@@ -990,16 +1051,19 @@ class GridTradingStrategy:
             else:
                 # Fallback: estimate buy price from grid spacing (initial grid sells, etc.)
                 buy_price = fill_price - state.config.grid_spacing
-                buy_fee_type = "taker"  # Conservative default for untracked buys
+                buy_fee_type = "maker_assumed"  # Assumed maker for limit orders
                 state.fee_origin_estimated_count += 1
 
-            buy_fee_rate = maker_fee if buy_fee_type == "maker" else taker_fee
+            buy_fee_rate = maker_fee if buy_fee_type in ("maker", "maker_assumed") else taker_fee
 
             # Compute fees using BOTH notionals (buy leg + sell leg)
             sell_price = fill_price
             buy_fee_usd = buy_price * fill_qty * buy_fee_rate
             sell_fee_usd = sell_price * fill_qty * sell_fee_rate
             fees = buy_fee_usd + sell_fee_usd
+
+            # Conservative fees (assume taker for all)
+            fees_conservative = (buy_price * fill_qty * taker_fee) + (sell_price * fill_qty * taker_fee)
 
             # Gross profit is price difference * quantity
             if has_paired_origin:
@@ -1015,7 +1079,7 @@ class GridTradingStrategy:
                 logger.info(
                     f"[PROFIT] {symbol}: +${profit:.2f} "
                     f"(buy=${buy_price:.2f}, sell=${sell_price:.2f}, qty={fill_qty:.4f}, "
-                    f"fees=${fees:.2f} [{cycle_fee_type}])"
+                    f"fees=${fees:.2f} [{cycle_fee_type}] {tier['name']})"
                 )
             else:
                 logger.warning(f"[PROFIT] {symbol}: Negative profit ${profit:.2f} - possibly forced sell")
@@ -1026,8 +1090,19 @@ class GridTradingStrategy:
             if new_buy_price >= state.config.lower_price:
                 self._add_buy_level(state, new_buy_price, fill_qty)
 
-        self.save_state()
-        return profit if profit and profit > 0 else None
+            # Build result with all fee audit info
+            result = {
+                'profit': profit if profit > 0 else 0.0,
+                'fees': fees,
+                'fee_conservative': fees_conservative,
+                'fee_rate': sell_fee_rate,  # Rate for this sell leg
+                'fee_type': sell_fee_type,
+                'fee_tier': tier['name'],
+                'rolling_30d_volume': rolling_30d_volume,
+                'fee_day_bucket': fee_day_bucket,
+            }
+            self.save_state()
+            return result
 
     def create_grid(self, config: GridConfig, current_price: float) -> GridState:
         """

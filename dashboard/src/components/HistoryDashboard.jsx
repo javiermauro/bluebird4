@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Line } from 'react-chartjs-2';
 
-// API endpoints
-const API_BASE = 'http://localhost:8000';
+// Backend connection settings (same pattern as App.jsx)
+const API_HOST = import.meta.env.VITE_API_HOST || window.location.hostname;
+const API_PORT = import.meta.env.VITE_API_PORT || '8000';
+const API_BASE = `${window.location.protocol}//${API_HOST}:${API_PORT}`;
 
 function HistoryDashboard() {
   const [loading, setLoading] = useState(true);
@@ -20,8 +22,22 @@ function HistoryDashboard() {
     current: 0,
     starting: 100000,
     recovery_pct: 0,
-    total_return_pct: 0
+    total_return_pct: 0,
+    current_fee_tier: null,
   });
+
+  // State for profitability report (fees, net P&L)
+  const [profitability, setProfitability] = useState({
+    fees: { expected: 0, conservative: 0, uncertain_count: 0 },
+    pnl: { gross: 0, net_expected: 0, net_conservative: 0 },
+    current_tier: 'Tier 1',
+    current_rates: { maker: 0.0015, taker: 0.0025 },
+    rolling_30d_volume: 0,
+    tier_progression: null,
+  });
+
+  // Paper trading warning dismissal
+  const [showWarning, setShowWarning] = useState(true);
 
   // State for realized P/L
   const [pnl, setPnl] = useState({
@@ -53,19 +69,22 @@ function HistoryDashboard() {
     try {
       setLoading(true);
 
-      const [equityRes, pnlRes, tradesRes] = await Promise.all([
+      const [equityRes, pnlRes, tradesRes, profitRes] = await Promise.all([
         fetch(`${API_BASE}/api/history/equity?period=${periodFilter}`),
         fetch(`${API_BASE}/api/history/realized-pnl?days=30`),
-        fetch(`${API_BASE}/api/history/trades?days=7&limit=100`)
+        fetch(`${API_BASE}/api/history/trades?days=7&limit=100`),
+        fetch(`${API_BASE}/api/profitability-report`)
       ]);
 
       const equityData = await equityRes.json();
       const pnlData = await pnlRes.json();
       const tradesData = await tradesRes.json();
+      const profitData = await profitRes.json();
 
       if (!equityData.error) setEquity(equityData);
       if (!pnlData.error) setPnl(pnlData);
       if (!tradesData.error) setTrades(tradesData);
+      if (!profitData.error) setProfitability(profitData);
 
       setLastUpdate(new Date());
       setError(null);
@@ -96,19 +115,41 @@ function HistoryDashboard() {
     return `${sign}${value.toFixed(1)}%`;
   };
 
-  // Chart configuration for equity curve
+  // Chart configuration for equity curve (3 series: Gross, Net Expected, Net Conservative)
   const equityChartData = {
     labels: equity.dates,
     datasets: [
       {
-        label: 'Equity',
+        label: 'Gross (Alpaca)',
         data: equity.equity,
         borderColor: '#d4af37',
         backgroundColor: 'rgba(212, 175, 55, 0.1)',
         tension: 0.4,
         pointRadius: 0,
-        fill: true,
-        borderWidth: 2
+        fill: false,
+        borderWidth: 2.5
+      },
+      {
+        label: 'Net (Est.)',
+        data: equity.equity_fee_adjusted || equity.equity,
+        borderColor: '#50c878',
+        backgroundColor: 'transparent',
+        tension: 0.4,
+        pointRadius: 0,
+        fill: false,
+        borderWidth: 1.5,
+        borderDash: [5, 5]
+      },
+      {
+        label: 'Net (Worst)',
+        data: equity.equity_fee_adjusted_conservative || equity.equity,
+        borderColor: '#e8a87c',
+        backgroundColor: 'transparent',
+        tension: 0.4,
+        pointRadius: 0,
+        fill: false,
+        borderWidth: 1.5,
+        borderDash: [2, 3]
       }
     ]
   };
@@ -118,7 +159,17 @@ function HistoryDashboard() {
     maintainAspectRatio: false,
     plugins: {
       legend: {
-        display: false
+        display: true,
+        position: 'top',
+        align: 'end',
+        labels: {
+          color: '#6b7a94',
+          font: { size: 11 },
+          boxWidth: 20,
+          padding: 15,
+          usePointStyle: true,
+          pointStyle: 'line'
+        }
       },
       tooltip: {
         mode: 'index',
@@ -130,7 +181,9 @@ function HistoryDashboard() {
         borderWidth: 1,
         callbacks: {
           label: function(context) {
-            return `$${context.parsed.y.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+            const label = context.dataset.label || '';
+            const value = context.parsed.y;
+            return `${label}: $${value.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
           }
         }
       }
@@ -198,32 +251,105 @@ function HistoryDashboard() {
         </div>
       )}
 
+      {/* Paper Trading Warning Banner */}
+      {showWarning && (
+        <div className="paper-trading-warning">
+          <div className="warning-content">
+            <span className="warning-icon">&#9888;</span>
+            <span className="warning-text">
+              <strong>Paper Trading:</strong> Equity shown does not reflect real trading costs.
+              Actual results may differ due to fees, slippage, and order queue effects.
+            </span>
+            <a
+              href="https://docs.alpaca.markets/docs/paper-trading"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="warning-link"
+            >
+              Learn more
+            </a>
+          </div>
+          <button
+            className="warning-dismiss"
+            onClick={() => setShowWarning(false)}
+            title="Dismiss"
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
+      {/* Fee Tier Info Card */}
+      <div className="fee-tier-card">
+        <div className="fee-tier-header">
+          <span className="tier-badge">{profitability.current_tier || 'Tier 1'}</span>
+          <div className="fee-rates">
+            <span>Maker: {((profitability.current_rates?.maker || 0.0015) * 100).toFixed(2)}%</span>
+            <span className="rate-divider">|</span>
+            <span>Taker: {((profitability.current_rates?.taker || 0.0025) * 100).toFixed(2)}%</span>
+          </div>
+        </div>
+        <div className="fee-tier-details">
+          <div className="volume-info">
+            <span className="volume-label">30d Volume:</span>
+            <span className="volume-value">{formatCurrency(profitability.rolling_30d_volume || 0, 0)}</span>
+          </div>
+          {profitability.tier_progression && (
+            <div className="tier-progress">
+              <div className="progress-bar">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${profitability.tier_progression.progress_pct || 0}%` }}
+                />
+              </div>
+              <span className="progress-label">
+                {formatCurrency(profitability.tier_progression.volume_needed || 0, 0)} to next tier
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="estimated-fees">
+          <div className="fee-row">
+            <span className="fee-label">Est. Fees (since Dec 1):</span>
+            <span className="fee-value negative">-{formatCurrency(profitability.fees?.expected || 0)}</span>
+          </div>
+          <div className="fee-row conservative">
+            <span className="fee-label">Conservative:</span>
+            <span className="fee-value negative">-{formatCurrency(profitability.fees?.conservative || 0)}</span>
+          </div>
+          {profitability.fees?.uncertain_count > 0 && (
+            <div className="fee-uncertain">
+              <span className="uncertain-icon">?</span>
+              <span>{profitability.fees.uncertain_count} orders with uncertain maker/taker classification</span>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Key Metrics Row */}
       <div className="history-metrics-grid">
         <div className="history-metric-card">
-          <div className="metric-label">REALIZED P/L</div>
-          <div className={`metric-value ${pnl.total >= 0 ? 'positive' : 'negative'}`}>
-            {formatCurrency(pnl.total)}
+          <div className="metric-label">GROSS P/L</div>
+          <div className={`metric-value ${profitability.pnl?.gross >= 0 ? 'positive' : 'negative'}`}>
+            {formatCurrency(profitability.pnl?.gross || 0)}
           </div>
-          <div className="metric-sublabel">Last 30 Days</div>
+          <div className="metric-sublabel">Alpaca (before fees)</div>
         </div>
 
         <div className="history-metric-card">
-          <div className="metric-label">WIN RATE</div>
-          <div className="metric-value">
-            {pnl.metrics.win_rate}%
+          <div className="metric-label">NET P/L (EST.)</div>
+          <div className={`metric-value ${profitability.pnl?.net_expected >= 0 ? 'positive' : 'negative'}`}>
+            {formatCurrency(profitability.pnl?.net_expected || 0)}
           </div>
-          <div className="metric-sublabel">
-            {pnl.metrics.total_trades} symbols traded
-          </div>
+          <div className="metric-sublabel">After {formatCurrency(profitability.fees?.expected || 0)} fees</div>
         </div>
 
-        <div className="history-metric-card">
-          <div className="metric-label">TOTAL RETURN</div>
-          <div className={`metric-value ${equity.total_return_pct >= 0 ? 'positive' : 'negative'}`}>
-            {formatPercent(equity.total_return_pct)}
+        <div className="history-metric-card net-conservative">
+          <div className="metric-label">NET (CONSERVATIVE)</div>
+          <div className={`metric-value ${profitability.pnl?.net_conservative >= 0 ? 'positive' : 'negative'}`}>
+            {formatCurrency(profitability.pnl?.net_conservative || 0)}
           </div>
-          <div className="metric-sublabel">From $100,000 start</div>
+          <div className="metric-sublabel">Worst-case fees</div>
         </div>
 
         <div className="history-metric-card">

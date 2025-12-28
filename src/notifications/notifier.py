@@ -45,6 +45,13 @@ sys.path.insert(0, PROJECT_ROOT)
 # Persistent state directory (survives reboot, unlike /tmp)
 STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
 
+# Pending alerts file (written by watchdog scripts for crash loop / disk alerts)
+# Note: Watchdog scripts run via launchd and write to LOCAL filesystem because
+# macOS launchd cannot write to external APFS volumes with 'noowners' flag (EPERM).
+PENDING_ALERTS_STATE_DIR = os.path.expanduser("~/Library/Application Support/BLUEBIRD/state")
+PENDING_ALERTS_FILE = os.path.join(PENDING_ALERTS_STATE_DIR, "pending-alerts.txt")
+PENDING_ALERTS_PROCESSING = os.path.join(PENDING_ALERTS_STATE_DIR, "pending-alerts.processing.txt")
+
 from src.notifications.config import NotificationConfig
 from src.notifications import templates
 from src.database.db import (
@@ -305,6 +312,75 @@ class NotificationService:
             except Exception as e:
                 logger.warning(f"Queued SMS retry failed: {e}")
                 update_queued_sms(item['id'], success=False, error_message=str(e))
+
+    def _process_pending_alerts(self) -> None:
+        """
+        Process pending alerts written by watchdog scripts.
+
+        The watchdog scripts write alerts to pending-alerts.txt for:
+        - Crash loop detection (bot/notifier restarting too often)
+        - Disk space warnings (>= 90% usage)
+
+        This method:
+        1. Atomically renames the file to avoid races with launchd
+        2. Reads and sends each alert as SMS
+        3. Cleans up after successful sends
+
+        Note: Watchdog scripts write to local filesystem (~/Library/Application Support/BLUEBIRD/state/)
+        because macOS launchd cannot write to external volumes.
+        """
+        self._process_pending_alerts_from_path(PENDING_ALERTS_FILE, PENDING_ALERTS_PROCESSING)
+
+    def _process_pending_alerts_from_path(self, alerts_file: str, processing_file: str) -> None:
+        """Process pending alerts from a specific file path."""
+        try:
+            # Check if pending alerts file exists
+            if not os.path.exists(alerts_file):
+                return
+
+            # Check file size (don't process empty files)
+            if os.path.getsize(alerts_file) == 0:
+                return
+
+            # Atomically rename to prevent races with launchd writing to the file
+            try:
+                os.rename(alerts_file, processing_file)
+            except OSError as e:
+                logger.debug(f"Could not rename pending alerts file {alerts_file}: {e}")
+                return
+
+            # Read and process alerts
+            alerts_sent = 0
+            alerts_failed = 0
+
+            with open(processing_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    logger.info(f"Processing pending alert: {line[:50]}...")
+
+                    # Format as SMS
+                    message = f"⚠️ BLUEBIRD SYSTEM ALERT\n\n{line}"
+
+                    # Send with force=True (these are critical alerts)
+                    if self.send_sms(message, force=True, sms_type="alert"):
+                        alerts_sent += 1
+                    else:
+                        alerts_failed += 1
+
+            # Clean up processing file
+            try:
+                os.remove(processing_file)
+            except OSError as e:
+                logger.warning(f"Could not remove processing file: {e}")
+
+            if alerts_sent > 0:
+                logger.info(f"Processed {alerts_sent} pending alerts from {alerts_file} ({alerts_failed} failed)")
+
+        except Exception as e:
+            logger.error(f"Error processing pending alerts from {alerts_file}: {e}")
 
     def fetch_stats(self) -> Optional[Dict[str, Any]]:
         """Fetch current stats from the bot's API with exponential backoff and circuit breaker."""
@@ -653,6 +729,10 @@ class NotificationService:
             ), sms_type="startup")
             self._record_startup_sms()
 
+        # Process any pending alerts from watchdog scripts (on startup)
+        if self.config.is_configured():
+            self._process_pending_alerts()
+
         # Track cycles for periodic tasks
         cycle_count = 0
 
@@ -677,9 +757,10 @@ class NotificationService:
                     self.check_daily_summary(stats)
                     self.check_stale_data(stats)
 
-                # Retry any queued SMS (every cycle)
+                # Retry any queued SMS and process pending alerts (every cycle)
                 if self.config.is_configured():
                     self._retry_queued_sms()
+                    self._process_pending_alerts()
 
                 # Periodic cleanup (every 60 cycles = ~1 hour at 60s poll)
                 if cycle_count % 60 == 0:

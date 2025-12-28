@@ -1,6 +1,10 @@
 # Progress — Status & History
 
 ## Current Status
+- [2025-12-27] **Tier-Correct Fee Modeling Complete**: Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
+- [2025-12-26 06:35] **Watchdog launchd Migration Complete**: Fixed EPERM on external volume
+- [2025-12-26 01:45] **Timeout Hardening Complete**: All main loop Alpaca calls bounded with timeouts
+- [2025-12-25 18:30] **Phase A Robustness Complete**: Crash loop detection, atomic writes, disk monitoring
 - [2025-12-25 11:55] System healthy, NORMAL mode, all protection layers active
 - [2025-12-25 11:55] **ALL 5 MAINTENANCE PHASES COMPLETE**
 - [2025-12-25 11:55] **Phase 5 Maintenance Complete**: Log rotation daily at 5 AM
@@ -10,6 +14,165 @@
 - [2025-12-25 11:30] **Phase 1 Maintenance Complete**: State files moved to persistent storage
 
 ## Recent Work (High Signal)
+
+### Dec 27, 2025 — Tier-Correct Alpaca Crypto Fee Modeling
+- **Goal**: Implement volume-based fee tier calculation and expose Gross vs Net equity/P&L
+- **Problem**: Fees were not being persisted (`trades.fees` always 0), only Tier 1 rates hardcoded
+- **Solution**: Full fee tier engine with dual-band tracking (expected vs conservative)
+
+**Alpaca Fee Tier Table** (8 tiers based on 30-day rolling volume):
+| Tier | 30D Volume | Maker | Taker |
+|------|------------|-------|-------|
+| 1 | $0-100K | 0.15% | 0.25% |
+| 2 | $100K-500K | 0.12% | 0.22% |
+| 3-8 | ... | ... | ... |
+
+**Key Features**:
+- **3am ET tier boundary**: Fee day runs 03:00:00 ET to 02:59:59 ET next day
+- **Dual-band tracking**: Expected (maker for limits) and Conservative (taker for all)
+- **Maker/Taker determination**: Market orders = taker, Limit orders = `maker_assumed`
+- **Uncertain classification count**: Tracks how many orders are `maker_assumed`
+
+**Files Created**:
+1. `src/utils/crypto_fee_tiers.py` - Fee tier engine with 8-tier table
+   - `get_fee_tier(volume_30d_usd)` - Get tier info from volume
+   - `get_fee_day_bucket(ts)` - Convert timestamp to 3am ET fee day
+   - `calculate_fee()` - Calculate both expected and conservative fees
+   - `determine_fee_type()` - Market=taker, Limit=maker_assumed
+
+2. `src/utils/backfill_fees.py` - Backfill historical fees since Dec 1, 2025
+   - Fetches filled orders from Alpaca (bulk pagination)
+   - Upserts into orders table
+   - Creates trade records if missing
+   - Recomputes fees chronologically using tier engine
+   - Usage: `python -m src.utils.backfill_fees [--dry-run]`
+
+**Database Changes** (6 new columns in trades table):
+- `fee_rate` (REAL) - Applied rate (0.0015 for maker)
+- `fee_type` (TEXT) - 'maker', 'taker', or 'maker_assumed'
+- `fee_tier` (TEXT) - 'Tier 1', 'Tier 2', etc.
+- `rolling_30d_volume` (REAL) - Volume at time of fill
+- `fee_day_bucket` (TEXT) - '2025-12-10' (ET date)
+- `fee_conservative` (REAL) - Worst-case taker fee
+
+**API Changes**:
+1. `GET /api/profitability-report` - NEW endpoint
+   - Returns Gross P&L, Net P&L (expected + conservative)
+   - Current tier, rates, rolling volume, tier progression
+   - Fee stats by tier
+
+2. `GET /api/history/equity` - Added `current_fee_tier` object
+   - Tier info, rates, rolling volume, fee totals
+
+**Dashboard Changes** (`HistoryDashboard.jsx`):
+1. **Paper Trading Warning Banner** - Dismissible warning about fee/slippage differences
+2. **Fee Tier Info Card** - Current tier, maker/taker rates, 30d volume, tier progression bar
+3. **Updated Metrics Row** - Gross P/L, Net P/L (expected), Net P/L (conservative), Recovery
+4. **CSS Styles** - Paper trading warning (amber), fee tier card, progress bars
+
+**Code Flow**:
+1. `grid_trading.py:apply_filled_order()` now returns dict with all fee fields
+2. `bot_grid.py:record_trade()` calls pass fee fields to database
+3. `db.py:record_trade()` accepts and stores all fee audit columns
+4. `db.py:get_fee_stats()` aggregates fees for reporting
+
+**Testing**:
+- Run `python -m src.utils.backfill_fees --dry-run` to preview backfill
+- Run `python -m src.utils.backfill_fees` to execute backfill
+- `GET /api/profitability-report` should return fee data
+- Dashboard History tab should show fee tier card and net P&L metrics
+
+**Fallback**: `config_ultra.py` MAKER_FEE_PCT/TAKER_FEE_PCT kept as Tier 1 fallback
+
+### Dec 26, 2025 — Watchdog launchd Migration (EPERM Fix)
+- **Root Cause**: Cron couldn't execute scripts on external APFS volume (`/Volumes/DOCK`) due to macOS security restrictions (`noowners` mount flag + `com.apple.provenance` xattr).
+- **Error**: `Operation not permitted` when cron ran `check_bot.sh` or `check_notifier.sh`
+- **Solution**: Migrate from cron to launchd with full script copies on local filesystem.
+- **Architecture**:
+  - **Local scripts**: `~/Library/Application Support/BLUEBIRD/run-check-{bot|notifier}.sh`
+  - **LaunchAgents**: `~/Library/LaunchAgents/com.bluebird.watchdog-{bot|notifier}.plist`
+  - **Durable state**: `~/Library/Application Support/BLUEBIRD/state/` (survives reboot)
+  - **State files**: `crash-loop-*.json`, `pending-alerts.txt`, `disk-alert.json`
+- **Changes**:
+  1. **Created sync script** (`scripts/sync-watchdog-scripts.sh`):
+     - Copies repo scripts to local path with path transformations
+     - Idempotent - run after editing repo watchdog scripts
+  2. **Updated CLAUDE.md** with new watchdog architecture and commands
+  3. **Simplified notifier** (`src/notifications/notifier.py`):
+     - Pending alerts now only from local path (watchdogs can't write to external volume)
+     - Removed dual-path check (eliminates double-send risk)
+  4. **Removed cron entries** for watchdog jobs
+- **Validation**:
+  - Both local watchdog scripts execute successfully
+  - Bot and notifier report healthy
+  - LaunchAgents scheduled every 5 minutes
+- **Exception Note**: Watchdog state is the ONLY state that lives outside `data/state/` due to macOS launchd restrictions.
+
+### Dec 26, 2025 — Timeout Hardening for Alpaca API Calls
+- **Root Cause**: Bot hung when Alpaca API was slow during RISK_OFF transition. Event loop blocked on synchronous API calls.
+- **Solution**: Wrapped all Alpaca API calls with bounded timeouts to prevent event loop hangs.
+- **Changes**:
+  1. **Added `run_blocking_with_timeout()`** (async wrapper):
+     - Uses `asyncio.wait_for(asyncio.to_thread(...), timeout=...)`
+     - Default timeout: 10s, Critical (orders): 15s, Cancel: 8s
+     - Returns safe default on timeout instead of crashing
+  2. **Added `run_sync_with_timeout()`** (sync wrapper):
+     - Uses `concurrent.futures.ThreadPoolExecutor` with timeout
+     - For initialization and other sync contexts
+  3. **Added `AlpacaTimeoutStats`** observability class:
+     - Tracks timeout count, last timeout time/operation
+     - Endpoint: `GET /api/alpaca/timeout-stats`
+  4. **Config constants** added to `config_ultra.py`:
+     - `ALPACA_API_TIMEOUT_SECONDS = 10.0`
+     - `ALPACA_API_TIMEOUT_CRITICAL = 15.0`
+     - `ALPACA_API_TIMEOUT_CANCEL = 8.0`
+- **Calls Wrapped** (main loop - fully protected):
+  - `get_positions` - with fail-closed pattern (skip buys on timeout)
+  - `get_open_orders`
+  - `get_account`
+  - `update_risk_state` (outer call)
+  - `check_periodic_reconciliation`
+  - All `submit_order` calls (8 locations)
+  - All `cancel_order` calls
+- **Internal calls wrapped** (inside update_risk_state):
+  - `equity_snapshot:get_account`
+  - `equity_snapshot:get_positions`
+- **Startup calls wrapped**:
+  - `init:get_alpaca_last_equity`
+  - `startup:load_orders`
+  - `startup:reconciliation`
+  - `startup:get_account`
+- **Fixed 8 SyntaxErrors**: Invalid `continue` statements inside `handle_bar()` callback (not a loop). Fixed by wrapping success paths in `else:` blocks.
+- **Remaining Gap**: Startup grid rebuild path (`_cancel_symbol_orders`) - rare, startup-only, watchdog provides safety net.
+- **Files Modified**: `src/execution/bot_grid.py`, `src/api/server.py`, `config_ultra.py`
+
+### Dec 25, 2025 — Phase A Robustness Improvements
+- **Goal**: Improve system resilience against crash loops, state corruption, and disk exhaustion
+- **Market Scenario Analysis**: Identified gaps in protection (parabolic pumps, crash loops, atomic writes, disk monitoring)
+- **Changes**:
+  1. **Crash Loop Detection** (both watchdog scripts):
+     - Track restarts in `data/state/crash-loop-{bot|notifier}.json`
+     - Pause after 3 restarts in 30 minutes
+     - Write pending alerts to `data/state/pending-alerts.txt`
+     - Manual clear: `rm data/state/crash-loop-*.json`
+  2. **Atomic JSON Writes** (new utility + 4 modules):
+     - Created `src/utils/atomic_io.py` with `atomic_write_json()`
+     - Uses temp file + fsync + os.replace pattern
+     - Failures log loudly but NEVER crash trading loop
+     - Updated: `grid_trading.py`, `risk_overlay.py`, `orchestrator.py`, `bot_grid.py`
+  3. **Disk Space Monitoring** (both watchdog scripts):
+     - Alert when disk >= 90% capacity
+     - Once-per-day limit (tracked in `data/state/disk-alert.json`)
+  4. **Pending Alerts Processing** (notifier):
+     - Processes `data/state/pending-alerts.txt` on startup and each poll
+     - Atomic rename to `.processing.txt` before sending
+- **State Files Added**:
+  - `data/state/crash-loop-bot.json`
+  - `data/state/crash-loop-notifier.json`
+  - `data/state/pending-alerts.txt`
+  - `data/state/disk-alert.json`
+- **Phase B (EUPHORIA gate)**: Designed but deferred - would block upward rebalances in parabolic pumps
+- **Plan Document**: `/Users/javierrodriguez/.claude/plans/harmonic-herding-brook.md`
 
 ### Dec 25, 2025 — Maintenance Phase 5: Log Rotation
 - **Goal**: Prevent unbounded log file growth

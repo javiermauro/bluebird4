@@ -1261,6 +1261,23 @@ async def manual_restart_notifier():
     }
 
 
+@app.get("/api/alpaca/timeout-stats")
+async def get_alpaca_timeout_stats():
+    """Get Alpaca API timeout statistics for observability."""
+    try:
+        from src.execution.bot_grid import alpaca_timeout_stats
+        return {
+            "stats": alpaca_timeout_stats.get_stats(),
+            "config": {
+                "default_timeout": getattr(config, 'ALPACA_API_TIMEOUT_SECONDS', 10.0),
+                "critical_timeout": getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                "cancel_timeout": getattr(config, 'ALPACA_API_TIMEOUT_CANCEL', 8.0)
+            }
+        }
+    except Exception as e:
+        return {"error": str(e), "stats": None}
+
+
 # === CIRCUIT BREAKER RESET ===
 
 @app.get("/api/risk/status")
@@ -1938,6 +1955,54 @@ async def get_equity_history(period: str = "1M"):
         from src.execution.alpaca_client import AlpacaClient
         from config_ultra import UltraConfig
         from src.database import db as database
+        from src.utils.crypto_fee_tiers import get_fee_tier, get_next_tier_info
+
+        # Helper to get current fee tier info
+        def get_fee_info():
+            try:
+                rolling_vol = database.get_rolling_30d_volume()
+                tier = get_fee_tier(rolling_vol)
+                progression = get_next_tier_info(rolling_vol)
+                fee_stats = database.get_fee_stats(since_date="2025-12-01")
+                return {
+                    "tier": tier.get('name', 'Tier 1'),
+                    "maker_rate": tier.get('maker', 0.0015),
+                    "taker_rate": tier.get('taker', 0.0025),
+                    "rolling_30d_volume": round(rolling_vol, 2),
+                    "next_tier_at": progression.get('next_tier_at') if progression else None,
+                    "progress_pct": progression.get('progress_pct', 100) if progression else 100,
+                    "total_fees_expected": round(fee_stats.get('total_fees_expected', 0), 2),
+                    "total_fees_conservative": round(fee_stats.get('total_fees_conservative', 0), 2),
+                    "uncertain_count": fee_stats.get('uncertain_count', 0),
+                }
+            except Exception:
+                return None
+
+        # Helper to get cumulative fees up to each date
+        def get_cumulative_fees_by_date(dates_list):
+            """Get cumulative fees (expected and conservative) up to each date."""
+            cumulative_expected = []
+            cumulative_conservative = []
+            try:
+                with database.get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    for date_str in dates_list:
+                        # Get cumulative fees up to end of this date
+                        cursor.execute("""
+                            SELECT
+                                COALESCE(SUM(fees), 0) as total_expected,
+                                COALESCE(SUM(COALESCE(fee_conservative, fees)), 0) as total_conservative
+                            FROM trades
+                            WHERE timestamp <= ?
+                        """, (f"{date_str}T23:59:59",))
+                        row = cursor.fetchone()
+                        cumulative_expected.append(round(row[0], 2) if row else 0)
+                        cumulative_conservative.append(round(row[1], 2) if row else 0)
+            except Exception:
+                # Return zeros if fee data not available
+                cumulative_expected = [0] * len(dates_list)
+                cumulative_conservative = [0] * len(dates_list)
+            return cumulative_expected, cumulative_conservative
 
         # Map period to days
         period_days = {'1W': 7, '1M': 30, '3M': 90, '1A': 365, 'all': 9999}
@@ -1980,9 +2045,18 @@ async def get_equity_history(period: str = "1M"):
 
                 total_return_pct = ((current_equity - starting) / starting) * 100
 
+                # Compute fee-adjusted equity series
+                cumulative_fees_exp, cumulative_fees_cons = get_cumulative_fees_by_date(dates)
+                equity_fee_adjusted = [round(eq - fee, 2) for eq, fee in zip(equity, cumulative_fees_exp)]
+                equity_fee_adjusted_conservative = [round(eq - fee, 2) for eq, fee in zip(equity, cumulative_fees_cons)]
+
                 return {
                     "dates": dates,
                     "equity": equity,
+                    "equity_fee_adjusted": equity_fee_adjusted,
+                    "equity_fee_adjusted_conservative": equity_fee_adjusted_conservative,
+                    "cumulative_fees": cumulative_fees_exp,
+                    "cumulative_fees_conservative": cumulative_fees_cons,
                     "peak": peak,
                     "peak_date": db_stats.get('peak_date', '')[:10] if db_stats.get('peak_date') else None,
                     "trough": trough,
@@ -1991,7 +2065,8 @@ async def get_equity_history(period: str = "1M"):
                     "starting": starting,
                     "recovery_pct": round(recovery_pct, 2),
                     "total_return_pct": round(total_return_pct, 2),
-                    "source": "database"
+                    "source": "database",
+                    "current_fee_tier": get_fee_info(),
                 }
         except Exception as db_err:
             logger.warning(f"Database query failed, falling back to Alpaca: {db_err}")
@@ -2049,9 +2124,18 @@ async def get_equity_history(period: str = "1M"):
 
                     total_return_pct = ((current_equity - starting) / starting) * 100
 
+                    # Compute fee-adjusted equity series
+                    cumulative_fees_exp, cumulative_fees_cons = get_cumulative_fees_by_date(dates)
+                    equity_fee_adjusted = [round(eq - fee, 2) for eq, fee in zip(equity, cumulative_fees_exp)]
+                    equity_fee_adjusted_conservative = [round(eq - fee, 2) for eq, fee in zip(equity, cumulative_fees_cons)]
+
                     return {
                         "dates": dates,
                         "equity": equity,
+                        "equity_fee_adjusted": equity_fee_adjusted,
+                        "equity_fee_adjusted_conservative": equity_fee_adjusted_conservative,
+                        "cumulative_fees": cumulative_fees_exp,
+                        "cumulative_fees_conservative": cumulative_fees_cons,
                         "peak": peak,
                         "peak_date": peak_date,
                         "trough": trough,
@@ -2059,7 +2143,8 @@ async def get_equity_history(period: str = "1M"):
                         "current": current_equity,
                         "starting": starting,
                         "recovery_pct": round(recovery_pct, 2),
-                        "total_return_pct": round(total_return_pct, 2)
+                        "total_return_pct": round(total_return_pct, 2),
+                        "current_fee_tier": get_fee_info(),
                     }
         except Exception as hist_err:
             logger.warning(f"Portfolio history unavailable: {hist_err}")
@@ -2086,9 +2171,18 @@ async def get_equity_history(period: str = "1M"):
 
         total_return_pct = ((current_equity - starting) / starting) * 100
 
+        # Compute fee-adjusted equity for single point
+        cumulative_fees_exp, cumulative_fees_cons = get_cumulative_fees_by_date([today])
+        equity_fee_adjusted = [round(current_equity - cumulative_fees_exp[0], 2)]
+        equity_fee_adjusted_conservative = [round(current_equity - cumulative_fees_cons[0], 2)]
+
         return {
             "dates": [today],
             "equity": [current_equity],
+            "equity_fee_adjusted": equity_fee_adjusted,
+            "equity_fee_adjusted_conservative": equity_fee_adjusted_conservative,
+            "cumulative_fees": cumulative_fees_exp,
+            "cumulative_fees_conservative": cumulative_fees_cons,
             "peak": peak,
             "peak_date": today if current_equity >= starting else None,
             "trough": trough,
@@ -2096,7 +2190,8 @@ async def get_equity_history(period: str = "1M"):
             "current": current_equity,
             "starting": starting,
             "recovery_pct": round(recovery_pct, 2),
-            "total_return_pct": round(total_return_pct, 2)
+            "total_return_pct": round(total_return_pct, 2),
+            "current_fee_tier": get_fee_info(),
         }
 
     except Exception as e:
@@ -2113,6 +2208,110 @@ async def get_equity_history(period: str = "1M"):
             "starting": 100000,
             "recovery_pct": 0,
             "total_return_pct": 0
+        }
+
+
+@app.get("/api/profitability-report")
+async def get_profitability_report():
+    """
+    Get comprehensive profitability report with tier-correct fees.
+
+    Returns:
+        Gross/Net P&L, fee breakdown, current tier info, tier progression
+    """
+    try:
+        from src.execution.alpaca_client import AlpacaClient
+        from config_ultra import UltraConfig
+        from src.database import db as database
+        from src.utils.crypto_fee_tiers import get_fee_tier, get_next_tier_info
+
+        config = UltraConfig()
+        client = AlpacaClient(config)
+
+        # Get current account equity
+        account = client.trading_client.get_account()
+        current_equity = float(account.equity)
+
+        # Get actual Dec 1 equity from database (not hardcoded $100k)
+        start_date = "2025-12-01"
+        try:
+            with database.get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT equity FROM equity_snapshots
+                    WHERE timestamp >= ? AND timestamp < ?
+                    ORDER BY timestamp ASC LIMIT 1
+                """, (f"{start_date}T00:00:00", f"{start_date}T23:59:59"))
+                row = cursor.fetchone()
+                starting_equity = float(row[0]) if row else 100000.0
+        except Exception:
+            starting_equity = 100000.0  # Fallback if no Dec 1 data
+
+        # Get fee stats since Dec 1, 2025
+        fee_stats = database.get_fee_stats(since_date=start_date)
+
+        # Get rolling 30-day volume for current tier
+        rolling_30d_volume = database.get_rolling_30d_volume()
+        current_tier = get_fee_tier(rolling_30d_volume)
+        tier_progression = get_next_tier_info(rolling_30d_volume)
+
+        # Calculate P&L
+        pnl_gross = current_equity - starting_equity
+        fees_expected = fee_stats.get('total_fees_expected', 0)
+        fees_conservative = fee_stats.get('total_fees_conservative', 0)
+
+        # Self-check: warn if fees_expected is 0 but by_tier shows non-zero
+        by_tier = fee_stats.get('by_tier', {})
+        tier_fees_sum = sum(t.get('fees_expected', 0) for t in by_tier.values())
+        if fees_expected == 0 and tier_fees_sum > 0:
+            logger.warning(f"Fee mismatch: total_fees_expected=0 but by_tier sum={tier_fees_sum:.2f}")
+
+        pnl_net_expected = pnl_gross - fees_expected
+        pnl_net_conservative = pnl_gross - fees_conservative
+
+        return {
+            "start_date": start_date,
+            "start_equity": round(starting_equity, 2),
+            "current_equity_gross": round(current_equity, 2),
+            "total_notional_traded": fee_stats.get('total_notional', 0),
+            "fees": {
+                "expected": round(fees_expected, 2),
+                "conservative": round(fees_conservative, 2),
+                "uncertain_count": fee_stats.get('uncertain_count', 0),
+            },
+            "pnl": {
+                "gross": round(pnl_gross, 2),
+                "net_expected": round(pnl_net_expected, 2),
+                "net_conservative": round(pnl_net_conservative, 2),
+            },
+            "rolling_30d_volume": round(rolling_30d_volume, 2),
+            "current_tier": current_tier.get('name', 'Tier 1'),
+            "current_rates": {
+                "maker": current_tier.get('maker', 0.0015),
+                "taker": current_tier.get('taker', 0.0025),
+            },
+            "tier_progression": {
+                "current_volume": round(rolling_30d_volume, 2),
+                "next_tier_at": tier_progression.get('next_tier_at') if tier_progression else None,
+                "progress_pct": tier_progression.get('progress_pct', 100) if tier_progression else 100,
+                "volume_needed": round(tier_progression.get('volume_needed', 0), 2) if tier_progression else 0,
+            } if tier_progression else None,
+            "fee_stats_by_tier": fee_stats.get('by_tier', {}),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get profitability report: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": str(e),
+            "start_date": "2025-12-01",
+            "start_equity": 100000,
+            "current_equity_gross": 0,
+            "fees": {"expected": 0, "conservative": 0, "uncertain_count": 0},
+            "pnl": {"gross": 0, "net_expected": 0, "net_conservative": 0},
+            "rolling_30d_volume": 0,
+            "current_tier": "Tier 1",
         }
 
 
