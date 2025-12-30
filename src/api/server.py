@@ -1282,8 +1282,11 @@ async def get_alpaca_timeout_stats():
 
 @app.get("/api/risk/status")
 async def get_risk_status():
-    """Get current circuit breaker status and file state."""
+    """Get current circuit breaker status, file state, and fee info."""
     import json
+    from src.database import db as database
+    from src.utils.crypto_fee_tiers import get_fee_tier
+
     file_state = {}
     try:
         circuit_file = os.path.join(STATE_DIR, "circuit-breaker.json")
@@ -1293,9 +1296,47 @@ async def get_risk_status():
     except Exception as e:
         file_state = {"error": str(e)}
 
+    # Get fee information
+    fee_info = {}
+    current_fee_tier = {}
+    try:
+        fee_stats = database.get_fee_stats()
+        fee_info = {
+            "since_dec1_expected": fee_stats.get('total_fees_expected', 0),
+            "since_dec1_conservative": fee_stats.get('total_fees_conservative', 0),
+            "uncertain_classifications": fee_stats.get('uncertain_count', 0),
+        }
+
+        # Get current tier based on rolling 30d volume
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        rolling_vol = database.get_rolling_30d_volume(datetime.now(ZoneInfo("UTC")))
+        tier = get_fee_tier(rolling_vol)
+
+        # Calculate next tier threshold
+        next_tier_thresholds = [100_000, 500_000, 1_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]
+        next_tier_at = None
+        for threshold in next_tier_thresholds:
+            if rolling_vol < threshold:
+                next_tier_at = threshold
+                break
+
+        current_fee_tier = {
+            "tier": tier['tier'],
+            "name": tier['name'],
+            "maker_rate": tier['maker'],
+            "taker_rate": tier['taker'],
+            "rolling_30d_volume": rolling_vol,
+            "next_tier_at": next_tier_at,
+        }
+    except Exception as e:
+        logger.warning(f"Error getting fee info for risk/status: {e}")
+
     return {
         "from_api": system_state.get("risk", {}),
         "from_file": file_state,
+        "fees": fee_info,
+        "current_fee_tier": current_fee_tier,
         "message": "Use POST /api/risk/reset to clear circuit breakers"
     }
 

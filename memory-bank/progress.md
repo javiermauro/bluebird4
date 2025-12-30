@@ -1,8 +1,18 @@
 # Progress — Status & History
 
 ## Current Status
+- [2025-12-30 00:00] **BOT LAUNCHAGENT CREATED**: Created `com.bluebird.bot.plist` with `RunAtLoad=true` and `KeepAlive=true`. Bot now managed directly by launchd for reliable auto-restart after reboot/power outage. Watchdog serves as backup monitor.
+- [2025-12-29 23:45] **Watchdog lsof Bug Fixed**: Changed `lsof -ti :8000` to `lsof -ti TCP:8000 -sTCP:LISTEN` to only kill LISTENING processes (bot), not processes with outgoing connections (notifier).
+- [2025-12-28] **Fee Modeling Tested & Verified**: 25/25 tests pass, all endpoints working
 - [2025-12-27] **Tier-Correct Fee Modeling Complete**: Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
 - [2025-12-26 06:35] **Watchdog launchd Migration Complete**: Fixed EPERM on external volume
+- [2025-12-30 02:10] **Launchd DB Access Hardening**: Added `BLUEBIRD_DB_PATH` override (run DB on internal disk), watchdog per-machine config `~/Library/Application Support/BLUEBIRD/config.env`, notifier watchdog fallback when DB unreadable to prevent restart flapping
+- [2025-12-30 02:20] **Ops Realtime Monitor Added**: `scripts/monitor_services.sh` provides realtime status and exits once bot+dashboard+notifier are up
+- [2025-12-29 22:18] **DOCK → INTERNAL FINAL SYNC + CLEAN RESTART**: rsync into `~/BLUEBIRD/bluebird/`, watchdog scripts/config re-synced, bot restarted from internal; `/health` OK and monitor reports READY
+- [2025-12-29 22:36] **Watchdogs sped up**: LaunchAgents interval set to 60s (was 300s) and watchdog stale threshold set to 120s (was 300s) for faster unattended recovery after reboot
+- [2025-12-29 22:48] **Bot watchdog anti-flap fix**: `/health` is now primary; restart if `/health` is unreachable even if heartbeat timestamp is recent; heartbeat threshold reset to 300s to avoid self-inflicted restarts
+- [2025-12-29 23:05] **Monitor script redesigned**: `scripts/monitor_services.sh` now shows one line per component with clear YES/NO and a waiting list; supports `--once --no-clear` snapshots
+- [2025-12-29 23:08] **Monitor runs automatically after reboot**: added `scripts/sync-monitor-scripts.sh` which installs `com.bluebird.monitor-status` (60s snapshots to `/tmp/bluebird-monitor-status.log`)
 - [2025-12-26 01:45] **Timeout Hardening Complete**: All main loop Alpaca calls bounded with timeouts
 - [2025-12-25 18:30] **Phase A Robustness Complete**: Crash loop detection, atomic writes, disk monitoring
 - [2025-12-25 11:55] System healthy, NORMAL mode, all protection layers active

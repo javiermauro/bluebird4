@@ -47,6 +47,11 @@ class UltraConfig:
     API_KEY = os.getenv("ALPACA_API_KEY")
     SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
     BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+    # Alpaca API timeout settings (prevents hung event loop)
+    ALPACA_API_TIMEOUT_SECONDS = 10.0       # Default timeout for most API calls
+    ALPACA_API_TIMEOUT_CRITICAL = 15.0      # Timeout for critical ops (order submission)
+    ALPACA_API_TIMEOUT_CANCEL = 8.0         # Timeout for cancel operations (fail fast)
     
     # =========================================
     # TRADING SETTINGS

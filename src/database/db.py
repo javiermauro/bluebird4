@@ -18,9 +18,12 @@ import json
 
 logger = logging.getLogger("BlueBirdDB")
 
-# Database location - use project directory for persistence
+# Database location
+# - Default: <repo_root>/data/bluebird.db
+# - Override: set env var BLUEBIRD_DB_PATH to place DB on an internal disk for launchd reliability
 DB_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DB_PATH = os.path.join(DB_DIR, "data", "bluebird.db")
+DEFAULT_DB_PATH = os.path.join(DB_DIR, "data", "bluebird.db")
+DB_PATH = os.environ.get("BLUEBIRD_DB_PATH", DEFAULT_DB_PATH)
 
 
 def ensure_db_dir():

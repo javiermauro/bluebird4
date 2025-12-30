@@ -18,14 +18,33 @@
 
 set -e
 
+# ----------------------------------------------------------------------------
+# Path configuration (supports unattended launchd + relocations)
+#
+# Priority:
+# 1) Source per-machine config: ~/Library/Application Support/BLUEBIRD/config.env
+# 2) Env overrides: BLUEBIRD_PROJECT_DIR / BLUEBIRD_DB_PATH
+# 3) Repo-relative default (when running from repo): <repo_root>
+# 4) Last-resort hardcoded default (legacy)
+# ----------------------------------------------------------------------------
+
+CONFIG_ENV="$HOME/Library/Application Support/BLUEBIRD/config.env"
+if [ -f "$CONFIG_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_ENV"
+fi
+
 # Configuration
-PROJECT_DIR="/Volumes/DOCK/BLUEBIRD 4.0"
-DB_PATH="${PROJECT_DIR}/data/bluebird.db"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_GUESS="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd || true)"
+
+PROJECT_DIR="${BLUEBIRD_PROJECT_DIR:-${PROJECT_DIR:-${REPO_GUESS:-/Volumes/DOCK/BLUEBIRD 4.0}}}"
+DB_PATH="${BLUEBIRD_DB_PATH:-${DB_PATH:-${PROJECT_DIR}/data/bluebird.db}}"
 STATE_DIR="${PROJECT_DIR}/data/state"
 CRASH_STATE="${STATE_DIR}/crash-loop-notifier.json"
 DISK_ALERT_STATE="${STATE_DIR}/disk-alert.json"
 PENDING_ALERTS="${STATE_DIR}/pending-alerts.txt"
-MAX_AGE_SECONDS=300  # 5 minutes
+MAX_AGE_SECONDS=120  # 2 minutes (faster unattended recovery)
 MAX_CRASHES=3
 WINDOW_MINUTES=30
 DISK_THRESHOLD=90
@@ -157,8 +176,25 @@ if [ ! -f "$DB_PATH" ]; then
     exit 1
 fi
 
-# Query the heartbeat from database
-HEARTBEAT=$(sqlite3 "$DB_PATH" "SELECT last_heartbeat FROM notifier_status WHERE id = 1" 2>/dev/null || echo "")
+# Query the heartbeat from database.
+# Use a sqlite timeout to reduce false negatives when the DB is briefly locked.
+HEARTBEAT_QUERY_OUT=$(sqlite3 -cmd ".timeout 5000" "$DB_PATH" "SELECT last_heartbeat FROM notifier_status WHERE id = 1" 2>&1) || SQLITE_RC=$?
+SQLITE_RC=${SQLITE_RC:-0}
+if [ "$SQLITE_RC" -ne 0 ]; then
+    echo "${LOG_PREFIX} WARNING: sqlite heartbeat query failed (rc=${SQLITE_RC})."
+    echo "${LOG_PREFIX} sqlite3 output: ${HEARTBEAT_QUERY_OUT}"
+
+    # Fallback: if notifier process appears to be running, do not restart.
+    if pgrep -f "src\\.notifications\\.notifier" >/dev/null 2>&1; then
+        echo "${LOG_PREFIX} OK: notifier process detected (skipping restart despite DB read failure)"
+        exit 0
+    fi
+
+    echo "${LOG_PREFIX} ALERT: notifier process not detected and DB unreadable - attempting restart"
+    HEARTBEAT=""
+else
+    HEARTBEAT="$HEARTBEAT_QUERY_OUT"
+fi
 
 if [ -z "$HEARTBEAT" ]; then
     echo "${LOG_PREFIX} WARNING: No heartbeat record found in database"
@@ -172,6 +208,10 @@ if [ -z "$HEARTBEAT" ]; then
     fi
 
     cd "$PROJECT_DIR"
+    # Propagate DB override to the notifier process (if configured)
+    if [ -n "${BLUEBIRD_DB_PATH:-}" ]; then
+        export BLUEBIRD_DB_PATH
+    fi
     nohup caffeinate -i python3 -m src.notifications.notifier > /tmp/bluebird-notifier.log 2>&1 &
     NEW_PID=$!
     echo "${LOG_PREFIX} Started notifier with PID: $NEW_PID"
@@ -212,6 +252,10 @@ if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
 
     # Restart the notifier
     cd "$PROJECT_DIR"
+    # Propagate DB override to the notifier process (if configured)
+    if [ -n "${BLUEBIRD_DB_PATH:-}" ]; then
+        export BLUEBIRD_DB_PATH
+    fi
     nohup caffeinate -i python3 -m src.notifications.notifier > /tmp/bluebird-notifier.log 2>&1 &
     NEW_PID=$!
 

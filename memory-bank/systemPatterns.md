@@ -76,23 +76,37 @@ When deciding whether to buy:
 - Prediction-first bots under `archive/old_bots/` are considered legacy
 - Current system is grid-first with protection layers
 
-## Maintenance Infrastructure (Dec 25, 2025)
+## Maintenance Infrastructure (Dec 25-30, 2025)
 
-### Watchdog Pattern
-- Bot and notifier write heartbeat to DB every 60 seconds
-- Cron runs watchdog scripts every 5 minutes
-- If heartbeat stale > 5 min, watchdog kills and restarts service
+### LaunchAgents (Auto-Start After Reboot)
+All services managed by launchd for reliable auto-restart:
 
-### Active Cron Jobs
+| LaunchAgent | Purpose | KeepAlive |
+|-------------|---------|-----------|
+| `com.bluebird.bot` | Grid trading bot | Yes |
+| `com.bluebird.notifier` | SMS notifications | Yes |
+| `com.bluebird.dashboard` | Static dashboard server | No |
+| `com.bluebird.watchdog-bot` | Backup bot health monitor (60s) | No |
+| `com.bluebird.watchdog-notifier` | Backup notifier health monitor (60s) | No |
+| `com.bluebird.monitor` | Opens Terminal with status monitor | No |
+
+### Watchdog Pattern (Backup)
+- Watchdogs run every 60 seconds via launchd (not cron - macOS security)
+- Primary liveness signal: `/health` HTTP endpoint
+- Secondary signal: DB heartbeat (written every 60s)
+- If `/health` unreachable, watchdog restarts bot (with crash loop protection)
+- Scripts live in `~/Library/Application Support/BLUEBIRD/`
+
+### Cron Jobs (Maintenance Only)
 | Schedule | Script | Purpose |
 |----------|--------|---------|
-| `*/5 * * * *` | `check_notifier.sh` | Notifier watchdog |
-| `*/5 * * * *` | `check_bot.sh` | Bot watchdog |
 | `0 3 * * *` | `backup_db.sh` | Daily DB backup |
 | `0 5 * * *` | `rotate_logs.sh` | Daily log rotation |
 
 ### Maintenance Scripts (in `scripts/`)
-- `check_bot.sh` / `check_notifier.sh` - Watchdogs
+- `sync-watchdog-scripts.sh` - Sync repo scripts to local LaunchAgent paths
+- `check_bot.sh` / `check_notifier.sh` - Watchdogs (run from local copy)
 - `backup_db.sh` - SQLite backup, 7-day retention
 - `rotate_logs.sh` - Log rotation, 50 MB limit
 - `cleanup_db.py` - Manual DB cleanup (90-day retention)
+- `monitor_services.sh` - Real-time status display

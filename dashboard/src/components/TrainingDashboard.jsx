@@ -5,8 +5,12 @@ import { Line } from 'react-chartjs-2';
 // TRAINING SUITE - Model Training Interface
 // ═══════════════════════════════════════════════════════════════════════════
 
-const TRAINING_WS_URL = 'ws://localhost:8001/ws';
-const TRAINING_API_URL = 'http://localhost:8001/api/state';
+// Training backend connection settings
+const TRAINING_API_HOST = import.meta.env.VITE_TRAINING_API_HOST || window.location.hostname;
+const TRAINING_API_PORT = import.meta.env.VITE_TRAINING_API_PORT || '8001';
+const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
+const TRAINING_WS_URL = `${WS_PROTOCOL}://${TRAINING_API_HOST}:${TRAINING_API_PORT}/ws`;
+const TRAINING_API_URL = `${window.location.protocol}//${TRAINING_API_HOST}:${TRAINING_API_PORT}/api/state`;
 
 function TrainingDashboard() {
   const [connected, setConnected] = useState(false);

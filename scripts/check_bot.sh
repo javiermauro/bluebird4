@@ -18,14 +18,42 @@
 
 set -e
 
+# launchd can run with a minimal PATH. Make command resolution explicit/reliable.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Use absolute paths for critical binaries (avoid PATH issues under launchd).
+NOHUP_BIN="/usr/bin/nohup"
+CAFFEINATE_BIN="/usr/bin/caffeinate"
+PYTHON_BIN="/usr/bin/python3"
+BOT_LOG="/tmp/bluebird-bot.log"
+
+# ----------------------------------------------------------------------------
+# Path configuration (supports unattended launchd + relocations)
+#
+# Priority:
+# 1) Source per-machine config: ~/Library/Application Support/BLUEBIRD/config.env
+# 2) Env overrides: BLUEBIRD_PROJECT_DIR / BLUEBIRD_DB_PATH
+# 3) Repo-relative default (when running from repo): <repo_root>
+# 4) Last-resort hardcoded default (legacy)
+# ----------------------------------------------------------------------------
+
+CONFIG_ENV="$HOME/Library/Application Support/BLUEBIRD/config.env"
+if [ -f "$CONFIG_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_ENV"
+fi
+
 # Configuration
-PROJECT_DIR="/Volumes/DOCK/BLUEBIRD 4.0"
-DB_PATH="${PROJECT_DIR}/data/bluebird.db"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_GUESS="$(cd "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd || true)"
+
+PROJECT_DIR="${BLUEBIRD_PROJECT_DIR:-${PROJECT_DIR:-${REPO_GUESS:-/Volumes/DOCK/BLUEBIRD 4.0}}}"
+DB_PATH="${BLUEBIRD_DB_PATH:-${DB_PATH:-${PROJECT_DIR}/data/bluebird.db}}"
 STATE_DIR="${PROJECT_DIR}/data/state"
 CRASH_STATE="${STATE_DIR}/crash-loop-bot.json"
 DISK_ALERT_STATE="${STATE_DIR}/disk-alert.json"
 PENDING_ALERTS="${STATE_DIR}/pending-alerts.txt"
-MAX_AGE_SECONDS=300  # 5 minutes
+MAX_AGE_SECONDS=300  # 5 minutes (heartbeat is secondary; /health is primary for fast recovery)
 MAX_CRASHES=3
 WINDOW_MINUTES=30
 DISK_THRESHOLD=90
@@ -151,18 +179,50 @@ EOF
 # MAIN WATCHDOG LOGIC
 # ============================================================================
 
+# Fast path: if the bot HTTP health endpoint is reachable, do not restart.
+# Heartbeat can lag or be blocked by brief DB contention; /health is the more direct liveness signal.
+if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+    echo "${LOG_PREFIX} OK: /health reachable"
+    exit 0
+fi
+
 # Check if database exists
 if [ ! -f "$DB_PATH" ]; then
     echo "${LOG_PREFIX} ERROR: Database not found at $DB_PATH"
     exit 1
 fi
 
-# Query the heartbeat from database
-HEARTBEAT=$(sqlite3 "$DB_PATH" "SELECT last_heartbeat FROM bot_status WHERE id = 1" 2>/dev/null || echo "")
+# Query the heartbeat from database.
+# Use a sqlite timeout to reduce false negatives when the DB is briefly locked.
+# IMPORTANT: If sqlite errors (locked/corrupt), do NOT treat it as "no heartbeat" (that causes flapping).
+HEARTBEAT_QUERY_OUT=$(sqlite3 -cmd ".timeout 5000" "$DB_PATH" "SELECT last_heartbeat FROM bot_status WHERE id = 1" 2>&1) || SQLITE_RC=$?
+SQLITE_RC=${SQLITE_RC:-0}
+if [ "$SQLITE_RC" -ne 0 ]; then
+    echo "${LOG_PREFIX} WARNING: sqlite heartbeat query failed (rc=${SQLITE_RC})."
+    echo "${LOG_PREFIX} sqlite3 output: ${HEARTBEAT_QUERY_OUT}"
+
+    # Fallback health check (preferred in environments where launchd cannot read DB on external volumes)
+    if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+        echo "${LOG_PREFIX} OK: /health reachable (skipping restart despite DB read failure)"
+        exit 0
+    fi
+
+    echo "${LOG_PREFIX} ALERT: /health unreachable and DB unreadable - attempting restart"
+    HEARTBEAT=""
+fi
+
+HEARTBEAT="$HEARTBEAT_QUERY_OUT"
 
 if [ -z "$HEARTBEAT" ]; then
     echo "${LOG_PREFIX} WARNING: No heartbeat record found in database"
     echo "${LOG_PREFIX} Bot may have never started with heartbeat enabled - attempting to start..."
+
+    # If /health is reachable, treat the bot as healthy even if DB heartbeat is missing.
+    # This avoids restart flapping during DB contention or early-startup timing.
+    if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+        echo "${LOG_PREFIX} OK: /health reachable (skipping start despite missing heartbeat)"
+        exit 0
+    fi
 
     # Check crash loop before restarting
     CRASH_RESULT=$(check_crash_loop)
@@ -178,9 +238,32 @@ if [ -z "$HEARTBEAT" ]; then
     rm -f /tmp/bluebird/bluebird-bot.lock 2>/dev/null || true
 
     # Start the bot
-    nohup caffeinate -i python3 -m src.api.server > /tmp/bluebird-bot.log 2>&1 &
+    # Propagate DB override to the bot process (if configured)
+    if [ -n "${BLUEBIRD_DB_PATH:-}" ]; then
+        export BLUEBIRD_DB_PATH
+    fi
+
+    # Ensure log path exists so failures are visible even if the bot exits immediately.
+    mkdir -p /tmp/bluebird 2>/dev/null || true
+    : > "$BOT_LOG" 2>/dev/null || true
+
+    "$NOHUP_BIN" "$CAFFEINATE_BIN" -i "$PYTHON_BIN" -m src.api.server > "$BOT_LOG" 2>&1 &
     NEW_PID=$!
     echo "${LOG_PREFIX} Started bot with PID: $NEW_PID"
+
+    # Post-start sanity check (best-effort): launch can take a few seconds after reboot.
+    # Keep it fast, but avoid false negatives.
+    for attempt in 1 2 3; do
+        sleep 2
+        if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+            echo "${LOG_PREFIX} OK: /health reachable after start (attempt ${attempt})"
+            exit 0
+        fi
+    done
+
+    echo "${LOG_PREFIX} WARNING: /health not reachable after start (bot may still be starting or may have crashed)"
+    echo "${LOG_PREFIX} Bot log tail:"
+    tail -n 60 "$BOT_LOG" 2>/dev/null || true
     exit 0
 fi
 
@@ -194,6 +277,13 @@ echo "${LOG_PREFIX} Heartbeat age: ${AGE}s (max: ${MAX_AGE_SECONDS}s)"
 
 if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
     echo "${LOG_PREFIX} ALERT: Bot heartbeat is STALE (${AGE}s > ${MAX_AGE_SECONDS}s)"
+
+    # If /health is reachable, do NOT restart. Heartbeat can lag briefly (startup/DB contention),
+    # and restarting a healthy bot creates self-inflicted downtime.
+    if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+        echo "${LOG_PREFIX} OK: /health reachable (skipping restart despite stale heartbeat)"
+        exit 0
+    fi
 
     # Check crash loop before restarting
     CRASH_RESULT=$(check_crash_loop)
@@ -223,20 +313,118 @@ if [ "$AGE" -gt "$MAX_AGE_SECONDS" ]; then
     rm -f /tmp/bluebird/bluebird-bot.pid 2>/dev/null || true
     rm -f /tmp/bluebird/bluebird-bot.lock 2>/dev/null || true
 
-    # Also kill any process holding port 8000
-    PORT_PID=$(lsof -ti :8000 2>/dev/null || echo "")
+    # Also kill any process LISTENING on port 8000 (not outgoing connections)
+    # Using -sTCP:LISTEN to avoid killing notifier/monitor with outgoing connections
+    PORT_PID=$(lsof -ti TCP:8000 -sTCP:LISTEN 2>/dev/null || echo "")
     if [ -n "$PORT_PID" ]; then
-        echo "${LOG_PREFIX} Killing process on port 8000 (PID: $PORT_PID)"
+        echo "${LOG_PREFIX} Killing process listening on port 8000 (PID: $PORT_PID)"
         kill -9 "$PORT_PID" 2>/dev/null || true
         sleep 2
     fi
 
     # Restart the bot
     cd "$PROJECT_DIR"
-    nohup caffeinate -i python3 -m src.api.server > /tmp/bluebird-bot.log 2>&1 &
+    # Propagate DB override to the bot process (if configured)
+    if [ -n "${BLUEBIRD_DB_PATH:-}" ]; then
+        export BLUEBIRD_DB_PATH
+    fi
+
+    # Ensure log path exists so failures are visible even if the bot exits immediately.
+    mkdir -p /tmp/bluebird 2>/dev/null || true
+    : > "$BOT_LOG" 2>/dev/null || true
+
+    "$NOHUP_BIN" "$CAFFEINATE_BIN" -i "$PYTHON_BIN" -m src.api.server > "$BOT_LOG" 2>&1 &
     NEW_PID=$!
 
     echo "${LOG_PREFIX} Restarted bot with PID: $NEW_PID"
+
+    # Post-start sanity check (best-effort): launch can take a few seconds after reboot.
+    # Keep it fast, but avoid false negatives.
+    for attempt in 1 2 3; do
+        sleep 2
+        if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+            echo "${LOG_PREFIX} OK: /health reachable after restart (attempt ${attempt})"
+            exit 0
+        fi
+    done
+
+    echo "${LOG_PREFIX} WARNING: /health not reachable after restart (bot may still be starting or may have crashed)"
+    echo "${LOG_PREFIX} Bot log tail:"
+    tail -n 60 "$BOT_LOG" 2>/dev/null || true
 else
-    echo "${LOG_PREFIX} OK: Bot is healthy"
+    # Heartbeat looks fresh, but if /health is down, restart anyway.
+    # This can happen if the bot died shortly after writing a heartbeat.
+    if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+        echo "${LOG_PREFIX} OK: Bot is healthy"
+        exit 0
+    fi
+
+    echo "${LOG_PREFIX} ALERT: /health unreachable despite recent heartbeat - attempting restart"
+
+    # Check crash loop before restarting
+    CRASH_RESULT=$(check_crash_loop)
+    if [[ "$CRASH_RESULT" == CRASH_LOOP_DETECTED* ]]; then
+        echo "${LOG_PREFIX} CRASH LOOP DETECTED - NOT RESTARTING"
+        exit 0
+    fi
+
+    # Get the PID from database
+    OLD_PID=$(sqlite3 "$DB_PATH" "SELECT pid FROM bot_status WHERE id = 1" 2>/dev/null || echo "")
+
+    # Kill old process if still running
+    if [ -n "$OLD_PID" ] && ps -p "$OLD_PID" > /dev/null 2>&1; then
+        echo "${LOG_PREFIX} Killing stale bot process (PID: $OLD_PID)"
+        kill "$OLD_PID" 2>/dev/null || true
+        sleep 3
+
+        # Force kill if still running
+        if ps -p "$OLD_PID" > /dev/null 2>&1; then
+            echo "${LOG_PREFIX} Force killing bot process (PID: $OLD_PID)"
+            kill -9 "$OLD_PID" 2>/dev/null || true
+            sleep 2
+        fi
+    fi
+
+    # Clean up stale lock files
+    rm -f /tmp/bluebird/bluebird-bot.pid 2>/dev/null || true
+    rm -f /tmp/bluebird/bluebird-bot.lock 2>/dev/null || true
+
+    # Also kill any process LISTENING on port 8000 (not outgoing connections)
+    # Using -sTCP:LISTEN to avoid killing notifier/monitor with outgoing connections
+    PORT_PID=$(lsof -ti TCP:8000 -sTCP:LISTEN 2>/dev/null || echo "")
+    if [ -n "$PORT_PID" ]; then
+        echo "${LOG_PREFIX} Killing process listening on port 8000 (PID: $PORT_PID)"
+        kill -9 "$PORT_PID" 2>/dev/null || true
+        sleep 2
+    fi
+
+    # Restart the bot
+    cd "$PROJECT_DIR"
+    # Propagate DB override to the bot process (if configured)
+    if [ -n "${BLUEBIRD_DB_PATH:-}" ]; then
+        export BLUEBIRD_DB_PATH
+    fi
+
+    # Ensure log path exists so failures are visible even if the bot exits immediately.
+    mkdir -p /tmp/bluebird 2>/dev/null || true
+    : > "$BOT_LOG" 2>/dev/null || true
+
+    "$NOHUP_BIN" "$CAFFEINATE_BIN" -i "$PYTHON_BIN" -m src.api.server > "$BOT_LOG" 2>&1 &
+    NEW_PID=$!
+
+    echo "${LOG_PREFIX} Restarted bot with PID: $NEW_PID"
+
+    # Post-start sanity check (best-effort): launch can take a few seconds after reboot.
+    # Keep it fast, but avoid false negatives.
+    for attempt in 1 2 3; do
+        sleep 2
+        if curl -fsS --max-time 2 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+            echo "${LOG_PREFIX} OK: /health reachable after restart (attempt ${attempt})"
+            exit 0
+        fi
+    done
+
+    echo "${LOG_PREFIX} WARNING: /health not reachable after restart (bot may still be starting or may have crashed)"
+    echo "${LOG_PREFIX} Bot log tail:"
+    tail -n 60 "$BOT_LOG" 2>/dev/null || true
 fi
