@@ -22,7 +22,7 @@ import asyncio
 import logging
 import os
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Project root for persistent state files (survives reboot, unlike /tmp)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -3122,7 +3122,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 req = CryptoBarsRequest(
                     symbol_or_symbols=[symbol],
                     timeframe=TimeFrame.Minute,
-                    start=datetime.now() - timedelta(minutes=100),
+                    start=datetime.now(timezone.utc) - timedelta(minutes=100),
                     limit=100
                 )
                 # Wrap in run_blocking to avoid freezing event loop during warmup

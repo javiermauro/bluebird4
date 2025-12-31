@@ -3,7 +3,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.live.crypto import CryptoDataStream
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import asyncio
 import time
@@ -396,7 +396,7 @@ class AlpacaClient:
             # Build request
             request_params = GetOrdersRequest(
                 status=query_status,
-                after=datetime.now() - timedelta(days=days),
+                after=datetime.now(timezone.utc) - timedelta(days=days),
                 limit=500
             )
 
@@ -526,7 +526,7 @@ class AlpacaClient:
 
         try:
             all_orders = []
-            after_date = datetime.now() - timedelta(days=days)
+            after_date = datetime.now(timezone.utc) - timedelta(days=days)
 
             # Fetch in batches
             request_params = GetOrdersRequest(

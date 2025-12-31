@@ -38,7 +38,7 @@ class DataLoader:
 
         request_params = CryptoBarsRequest(
             symbol_or_symbols=[target_symbol],
-            timeframe=TimeFrame.Minute, # Matching config.TIMEFRAME logic
+            timeframe=TimeFrame.Minute,  # 1-minute bars
             start=start_time,
             end=end_time
         )

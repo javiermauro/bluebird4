@@ -68,9 +68,9 @@ class UltraConfig:
     ]
     MAX_EXPOSURE_PER_ASSET = 0.35  # Max 35% equity in any single asset (BTC)
     
-    # Timeframe: 5-minute bars are optimal balance of signal vs noise
-    # 1-min = too noisy, 15-min = too slow for scalping
-    TIMEFRAME = "5Min"
+    # Timeframe: Grid bot uses 1-minute bars from Alpaca websocket stream
+    # (Alpaca's subscribe_bars() defaults to 1-min bars)
+    TIMEFRAME = "1Min"
     
     # Mock mode for testing
     USE_MOCK = False

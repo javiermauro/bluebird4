@@ -23,6 +23,10 @@ STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# Single config instance - validates once at startup, reused everywhere
+from config_ultra import UltraConfig
+CONFIG = UltraConfig()
+
 
 def convert_numpy_types(obj):
     """
@@ -251,8 +255,7 @@ async def health_check():
     """Health check endpoint with stream health monitoring."""
     # Check if grid trading mode is active
     try:
-        from config_ultra import UltraConfig
-        config = UltraConfig()
+        config = CONFIG
         is_grid = getattr(config, 'USE_GRID_TRADING', False)
     except:
         is_grid = False
@@ -386,10 +389,9 @@ async def get_positions():
 
     # Otherwise fetch directly from Alpaca
     try:
-        from config_ultra import UltraConfig
         from src.execution.alpaca_client import AlpacaClient
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
         positions = client.get_positions()
 
@@ -457,11 +459,10 @@ async def get_order_stats():
 
     # Otherwise fetch directly from Alpaca
     try:
-        from config_ultra import UltraConfig
         from src.execution.alpaca_client import AlpacaClient
         from datetime import datetime, timedelta
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
 
         # Get orders from last 7 days
@@ -560,10 +561,9 @@ async def get_grid_status():
     if alpaca_stats.get("total_confirmed", 0) == 0:
         # Fetch directly if system_state is empty
         try:
-            from config_ultra import UltraConfig
             from src.execution.alpaca_client import AlpacaClient
 
-            config = UltraConfig()
+            config = CONFIG
             client = AlpacaClient(config)
             orders = client.get_order_history(days=7, status='filled')
 
@@ -1838,9 +1838,8 @@ async def get_alpaca_history(days: int = 7):
     """
     try:
         from src.execution.alpaca_client import AlpacaClient
-        from config_ultra import UltraConfig
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
         orders = client.get_order_history(days=days, status='all')
 
@@ -1994,7 +1993,6 @@ async def get_equity_history(period: str = "1M"):
     """
     try:
         from src.execution.alpaca_client import AlpacaClient
-        from config_ultra import UltraConfig
         from src.database import db as database
         from src.utils.crypto_fee_tiers import get_fee_tier, get_next_tier_info
 
@@ -2049,7 +2047,7 @@ async def get_equity_history(period: str = "1M"):
         period_days = {'1W': 7, '1M': 30, '3M': 90, '1A': 365, 'all': 9999}
         days = period_days.get(period, 30)
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
 
         # Get current account data
@@ -2262,11 +2260,10 @@ async def get_profitability_report():
     """
     try:
         from src.execution.alpaca_client import AlpacaClient
-        from config_ultra import UltraConfig
         from src.database import db as database
         from src.utils.crypto_fee_tiers import get_fee_tier, get_next_tier_info
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
 
         # Get current account equity
@@ -2371,9 +2368,8 @@ async def get_realized_pnl(days: int = 30):
 
     try:
         from src.execution.alpaca_client import AlpacaClient
-        from config_ultra import UltraConfig
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
         orders = client.get_all_filled_orders(days=days)
 
@@ -2511,9 +2507,8 @@ async def get_trade_history(symbol: str = None, days: int = 7, limit: int = 100)
 
     try:
         from src.execution.alpaca_client import AlpacaClient
-        from config_ultra import UltraConfig
 
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
         orders = client.get_all_filled_orders(days=days)
 
@@ -2624,8 +2619,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # Import bot runner - Grid Trading is now the default
 try:
-    from config_ultra import UltraConfig
-    config = UltraConfig()
+    config = CONFIG
     USE_GRID = getattr(config, 'USE_GRID_TRADING', True)
 except:
     USE_GRID = True
@@ -2859,10 +2853,9 @@ async def reconcile_database():
     """
     from src.database import db as database
     from src.execution.alpaca_client import AlpacaClient
-    from config_ultra import UltraConfig
 
     try:
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
 
         # Get recent orders from Alpaca (last 30 days)
@@ -2913,7 +2906,6 @@ async def backfill_database():
     """
     from src.database import db as database
     from src.execution.alpaca_client import AlpacaClient
-    from config_ultra import UltraConfig
 
     results = {
         "orders_backfilled": 0,
@@ -2922,7 +2914,7 @@ async def backfill_database():
     }
 
     try:
-        config = UltraConfig()
+        config = CONFIG
         client = AlpacaClient(config)
 
         # Backfill orders - get all filled orders
