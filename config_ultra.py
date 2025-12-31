@@ -56,17 +56,16 @@ class UltraConfig:
     # =========================================
     # TRADING SETTINGS
     # =========================================
-    SYMBOL = "BTC/USD"  # Primary symbol
-    
+    SYMBOL = "SOL/USD"  # Primary symbol (best performer)
+
     # Multi-asset diversification (reduces single-asset risk)
-    # Top 4 most liquid Alpaca crypto pairs for diversification
+    # Top 3 altcoins - removed BTC due to low volatility underperformance
     SYMBOLS = [
-        "BTC/USD",   # Bitcoin - King, most liquid (35% allocation)
-        "SOL/USD",   # Solana - Fast L1, good volume (30% allocation)
-        "LTC/USD",   # Litecoin - Payment narrative, lower correlation (20% allocation)
-        "AVAX/USD",  # Avalanche - Lowest BTC correlation 0.738 (15% allocation)
+        "SOL/USD",   # Solana - Best performer (40% allocation)
+        "LTC/USD",   # Litecoin - Good volume (30% allocation)
+        "AVAX/USD",  # Avalanche - Low BTC correlation (30% allocation)
     ]
-    MAX_EXPOSURE_PER_ASSET = 0.35  # Max 35% equity in any single asset (BTC)
+    MAX_EXPOSURE_PER_ASSET = 0.40  # Max 40% equity in any single asset (SOL)
     
     # Timeframe: Grid bot uses 1-minute bars from Alpaca websocket stream
     # (Alpaca's subscribe_bars() defaults to 1-min bars)
@@ -81,8 +80,8 @@ class UltraConfig:
     # =========================================
     
     # Maximum positions at once
-    # 4 positions = good diversification without over-trading
-    MAX_POSITIONS = 4  # 4 positions across different assets
+    # 3 positions = good diversification without over-trading
+    MAX_POSITIONS = 3  # 3 positions across different assets
     
     # Maximum risk per trade (% of equity)
     # Kelly Criterion will adjust this, but never exceed
@@ -256,25 +255,20 @@ class UltraConfig:
     # OPTIMIZED FOR MORE TRADES & FASTER RECOVERY (Dec 9, 2025)
     # Tighter ranges = more grid completions = more profits
     GRID_CONFIGS = {
-        "BTC/USD": {
-            "num_grids": 5,        # 5 grids = 6 levels, ~1.25% spacing (was 4 grids)
-            "range_pct": 0.0625,   # 6.25% range for 1.25% per grid
-            "investment_ratio": 0.30  # 30% - reduced from 35%, still largest
-        },
         "SOL/USD": {
-            "num_grids": 5,        # 5 grids = 6 levels, ~1.30% spacing (was 4 grids)
+            "num_grids": 5,        # 5 grids = 6 levels, ~1.30% spacing
             "range_pct": 0.065,    # 6.5% range for 1.30% per grid
-            "investment_ratio": 0.25  # 25% - reduced from 30%, less concentration
+            "investment_ratio": 0.40  # 40% - best performer, increased from 25%
         },
         "LTC/USD": {
-            "num_grids": 6,        # 6 grids = 7 levels, ~1.40% spacing (was 5 grids, 1.69%)
-            "range_pct": 0.084,    # 8.4% range for 1.40% per grid - TIGHTENED
-            "investment_ratio": 0.25  # INCREASED: 25% - best performer!
+            "num_grids": 6,        # 6 grids = 7 levels, ~1.40% spacing
+            "range_pct": 0.084,    # 8.4% range for 1.40% per grid
+            "investment_ratio": 0.30  # 30% - increased from 25%
         },
         "AVAX/USD": {
-            "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing (was 5 grids, 1.68%)
-            "range_pct": 0.087,    # 8.7% range for 1.45% per grid - TIGHTENED
-            "investment_ratio": 0.20  # INCREASED: 20% - second best performer!
+            "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing
+            "range_pct": 0.087,    # 8.7% range for 1.45% per grid
+            "investment_ratio": 0.30  # 30% - increased from 20%
         }
     }
 
