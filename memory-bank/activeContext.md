@@ -1,6 +1,8 @@
 # Active Context — Current Focus
 
 ## Now
+- [2025-12-31 16:40] **BTC/USD REMOVED FROM GRID TRADING** - BTC underperformed by 5.7x ($763 vs $4,363 SOL). Removed from SYMBOLS/GRID_CONFIGS. New allocation: SOL 40%, LTC 30%, AVAX 30%. MAX_POSITIONS restored to 4.
+- [2025-12-31 16:00] **TIMEZONE + CONFIG BUGS FIXED** - Fixed naive datetime in warmup (5-hour offset). Fixed UltraConfig instantiation spam (12 per request → singleton). Fixed TIMEFRAME config "5Min" → "1Min".
 - [2025-12-30 00:00] **BOT LAUNCHAGENT CREATED** - Created `com.bluebird.bot.plist` with `RunAtLoad=true` and `KeepAlive=true`. This is the proper macOS way to manage the bot daemon. The watchdog-started bot was dying due to shell signal propagation issues when the watchdog script exited. Now launchd directly manages the bot, and the watchdog serves as a backup health monitor.
 - [2025-12-29 23:45] **WATCHDOG LSOF BUG FIX** - Fixed `lsof -ti :8000` killing notifier (had outgoing connections to bot). Changed to `lsof -ti TCP:8000 -sTCP:LISTEN` to only kill processes LISTENING on port 8000.
 - [2025-12-27] **TIER-CORRECT FEE MODELING COMPLETE** - Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
@@ -84,6 +86,15 @@ tail -f /tmp/bluebird-backup.log      # Backup logs
 tail -f /tmp/bluebird-logrotate.log   # Rotation logs
 python3 scripts/cleanup_db.py         # DB cleanup (dry run)
 ```
+
+## Current Configuration (Dec 31)
+| Setting | Value |
+|---------|-------|
+| **Symbols** | SOL/USD, LTC/USD, AVAX/USD |
+| **Allocation** | SOL 40%, LTC 30%, AVAX 30% |
+| **MAX_POSITIONS** | 4 |
+| **TIMEFRAME** | 1Min |
+| **BTC/USD** | REMOVED (5.7x underperformer) |
 
 ## Key Metrics (Dec 28 - Updated)
 | Metric | Value |

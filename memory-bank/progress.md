@@ -1,6 +1,8 @@
 # Progress — Status & History
 
 ## Current Status
+- [2025-12-31 16:40] **BTC/USD REMOVED**: Underperformed 5.7x vs altcoins. New allocation: SOL 40%, LTC 30%, AVAX 30%. MAX_POSITIONS=4.
+- [2025-12-31 16:00] **BUG FIXES**: Timezone (naive→UTC), config spam (singleton), TIMEFRAME ("5Min"→"1Min").
 - [2025-12-30 00:00] **BOT LAUNCHAGENT CREATED**: Created `com.bluebird.bot.plist` with `RunAtLoad=true` and `KeepAlive=true`. Bot now managed directly by launchd for reliable auto-restart after reboot/power outage. Watchdog serves as backup monitor.
 - [2025-12-29 23:45] **Watchdog lsof Bug Fixed**: Changed `lsof -ti :8000` to `lsof -ti TCP:8000 -sTCP:LISTEN` to only kill LISTENING processes (bot), not processes with outgoing connections (notifier).
 - [2025-12-28] **Fee Modeling Tested & Verified**: 25/25 tests pass, all endpoints working
@@ -24,6 +26,21 @@
 - [2025-12-25 11:30] **Phase 1 Maintenance Complete**: State files moved to persistent storage
 
 ## Recent Work (High Signal)
+
+### Dec 31, 2025 — BTC Removal + Bug Fixes
+- **BTC/USD Removed from Grid Trading**: Analysis showed BTC underperformed altcoins by 5.7x ($763 profit vs $4,363 for SOL). Grid trading profits from volatility - BTC is too stable compared to altcoins.
+- **New Allocation**: SOL 40%, LTC 30%, AVAX 30% (was BTC 30%, SOL 25%, LTC 25%, AVAX 20%)
+- **MAX_POSITIONS**: Restored to 4 (allows multiple positions per symbol)
+- **Commits**:
+  - `6ad5dbe` - fix: timezone bugs + config validation spam + correct TIMEFRAME setting
+  - `eee2700` - feat: remove BTC/USD from grid trading, reallocate to altcoins
+  - `ac63b4e` - config: restore MAX_POSITIONS to 4
+- **Bug Fixes**:
+  1. **Timezone Bug**: Warmup used `datetime.now()` (naive/local), Alpaca interprets as UTC → 5-hour offset. Fixed with `datetime.now(timezone.utc)` in `bot_grid.py:3125` and `alpaca_client.py:399,529`.
+  2. **Config Spam**: `UltraConfig()` instantiated 12+ times per request (prints validation each time). Fixed with singleton pattern in `server.py:26-28`.
+  3. **TIMEFRAME Mismatch**: Config said "5Min" but Alpaca's `subscribe_bars()` defaults to 1-min. Fixed config to match reality: `TIMEFRAME = "1Min"`.
+- **Dashboard Updated**: Removed BTC from symbol lists, changed default to SOL/USD.
+- **Files Modified**: `config_ultra.py`, `src/execution/bot_grid.py`, `src/execution/alpaca_client.py`, `src/api/server.py`, `dashboard/src/App.jsx`
 
 ### Dec 27, 2025 — Tier-Correct Alpaca Crypto Fee Modeling
 - **Goal**: Implement volume-based fee tier calculation and expose Gross vs Net equity/P&L
