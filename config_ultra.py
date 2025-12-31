@@ -80,8 +80,8 @@ class UltraConfig:
     # =========================================
     
     # Maximum positions at once
-    # 3 positions = good diversification without over-trading
-    MAX_POSITIONS = 3  # 3 positions across different assets
+    # 4 positions = allows multiple positions per symbol or flexibility for 4th symbol
+    MAX_POSITIONS = 4  # Can have multiple positions across 3 symbols
     
     # Maximum risk per trade (% of equity)
     # Kelly Criterion will adjust this, but never exceed
