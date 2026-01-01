@@ -59,13 +59,14 @@ class UltraConfig:
     SYMBOL = "SOL/USD"  # Primary symbol (best performer)
 
     # Multi-asset diversification (reduces single-asset risk)
-    # Top 3 altcoins - removed BTC due to low volatility underperformance
+    # Top altcoins - removed BTC due to low volatility underperformance
     SYMBOLS = [
-        "SOL/USD",   # Solana - Best performer (40% allocation)
-        "LTC/USD",   # Litecoin - Good volume (30% allocation)
-        "AVAX/USD",  # Avalanche - Low BTC correlation (30% allocation)
+        "SOL/USD",   # Solana - Best performer (35% allocation)
+        "LTC/USD",   # Litecoin - Good volume (25% allocation)
+        "AVAX/USD",  # Avalanche - High volatility (25% allocation)
+        "DOGE/USD",  # Dogecoin - Highest volatility (15% allocation) - Added Dec 31
     ]
-    MAX_EXPOSURE_PER_ASSET = 0.40  # Max 40% equity in any single asset (SOL)
+    MAX_EXPOSURE_PER_ASSET = 0.35  # Max 35% equity in any single asset (SOL)
     
     # Timeframe: Grid bot uses 1-minute bars from Alpaca websocket stream
     # (Alpaca's subscribe_bars() defaults to 1-min bars)
@@ -258,17 +259,22 @@ class UltraConfig:
         "SOL/USD": {
             "num_grids": 5,        # 5 grids = 6 levels, ~1.30% spacing
             "range_pct": 0.065,    # 6.5% range for 1.30% per grid
-            "investment_ratio": 0.40  # 40% - best performer, increased from 25%
+            "investment_ratio": 0.35  # 35% - best performer
         },
         "LTC/USD": {
             "num_grids": 6,        # 6 grids = 7 levels, ~1.40% spacing
             "range_pct": 0.084,    # 8.4% range for 1.40% per grid
-            "investment_ratio": 0.30  # 30% - increased from 25%
+            "investment_ratio": 0.25  # 25%
         },
         "AVAX/USD": {
             "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing
             "range_pct": 0.087,    # 8.7% range for 1.45% per grid
-            "investment_ratio": 0.30  # 30% - increased from 20%
+            "investment_ratio": 0.25  # 25%
+        },
+        "DOGE/USD": {
+            "num_grids": 6,        # 6 grids = 7 levels, ~1.67% spacing
+            "range_pct": 0.10,     # 10% range - highest volatility coin
+            "investment_ratio": 0.15  # 15% - conservative for meme coin
         }
     }
 

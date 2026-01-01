@@ -109,12 +109,12 @@ function App() {
   const [data, setData] = useState({});
 
   // Symbol selector state
-  const [selectedSymbol, setSelectedSymbol] = useState('BTC/USD');
+  const [selectedSymbol, setSelectedSymbol] = useState('SOL/USD');
   const [symbolPrices, setSymbolPrices] = useState({
-    'BTC/USD': { price: 0, change: 0, changePercent: 0, history: [] },
     'SOL/USD': { price: 0, change: 0, changePercent: 0, history: [] },
     'LTC/USD': { price: 0, change: 0, changePercent: 0, history: [] },
-    'AVAX/USD': { price: 0, change: 0, changePercent: 0, history: [] }
+    'AVAX/USD': { price: 0, change: 0, changePercent: 0, history: [] },
+    'DOGE/USD': { price: 0, change: 0, changePercent: 0, history: [] }
   });
 
   const [ai, setAi] = useState({
@@ -378,10 +378,10 @@ function App() {
 
   // Per-symbol chart data storage
   const [symbolChartData, setSymbolChartData] = useState({
-    'BTC/USD': { labels: [], data: [] },
     'SOL/USD': { labels: [], data: [] },
     'LTC/USD': { labels: [], data: [] },
-    'AVAX/USD': { labels: [], data: [] }
+    'AVAX/USD': { labels: [], data: [] },
+    'DOGE/USD': { labels: [], data: [] }
   });
 
   // Computed chart data based on selected symbol
@@ -573,7 +573,7 @@ function App() {
       const updated = { ...prev };
 
       // Update active symbol from stream
-      const activeSymbol = symbol || 'BTC/USD';
+      const activeSymbol = symbol || 'SOL/USD';
       if (updated[activeSymbol] && price) {
         const newLabels = [...updated[activeSymbol].labels, timeLabel];
         const newData = [...updated[activeSymbol].data, price];
@@ -2726,16 +2726,16 @@ function App() {
                   {/* Symbol Selector - Luxury Ticker Strip */}
                   <div className="px-4 py-3 border-b border-[rgba(255,255,255,0.04)]">
                     <div className="flex gap-2">
-                      {['BTC/USD', 'SOL/USD', 'LTC/USD', 'AVAX/USD'].map((sym) => {
+                      {['SOL/USD', 'LTC/USD', 'AVAX/USD', 'DOGE/USD'].map((sym) => {
                         const isSelected = selectedSymbol === sym;
                         const symData = symbolPrices[sym] || { price: 0, changePercent: 0 };
                         const hasPosition = positions.some(p => p.symbol?.includes(sym.split('/')[0]));
                         const isPositive = symData.changePercent >= 0;
                         const cryptoIcons = {
-                          'BTC/USD': '₿',
                           'SOL/USD': '◎',
                           'LTC/USD': 'Ł',
-                          'AVAX/USD': 'A'
+                          'AVAX/USD': 'A',
+                          'DOGE/USD': 'Ð'
                         };
 
                         return (
