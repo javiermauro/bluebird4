@@ -1,11 +1,12 @@
 # Active Context — Current Focus
 
 ## Now
+- [2026-01-01 17:20] **ALL 9 PROTECTION SYSTEMS VERIFIED** - Comprehensive verification: Windfall (20 captures, $864.52), Limit Orders (active), Fast Fill (10s checks), Time Filters, Grid Rebalancing, Consecutive Down Bars, Developing Downtrend, Risk Overlay (NORMAL), Orchestrator (LTC at GRID_REDUCED 111%).
+- [2026-01-01 15:42] **SYSTEM CRASH RECOVERED** - Mac crashed, bot died at 15:42. Restarted successfully. All services healthy on ports 8000, 5173.
+- [2026-01-01 15:17] **WINDFALL CAPTURED $368.07** - AVAX/USD windfall sell triggered at 9.78% unrealized. Total windfall profit today: $368.09.
+- [2026-01-01 14:00] **DOGE DISPLAY FIX** - Fixed DOGE not appearing in dashboard orchestrator. Added pre-registration of all config symbols in orchestrator.py and multi_asset initialization in server.py. Commit: `ee3fbc3`.
 - [2026-01-01 10:50] **DOGE/USD ADDED TO GRID TRADING** - Highest volatility (10.3% 7D range, 2.6% daily vol). Conservative 15% allocation for meme coin. New allocation: SOL 35%, LTC 25%, AVAX 25%, DOGE 15%.
 - [2025-12-31 16:40] **BTC/USD REMOVED FROM GRID TRADING** - BTC underperformed by 5.7x ($763 vs $4,363 SOL). Removed from SYMBOLS/GRID_CONFIGS.
-- [2025-12-31 16:00] **TIMEZONE + CONFIG BUGS FIXED** - Fixed naive datetime in warmup (5-hour offset). Fixed UltraConfig instantiation spam (12 per request → singleton). Fixed TIMEFRAME config "5Min" → "1Min".
-- [2025-12-30 00:00] **BOT LAUNCHAGENT CREATED** - Created `com.bluebird.bot.plist` with `RunAtLoad=true` and `KeepAlive=true`. This is the proper macOS way to manage the bot daemon. The watchdog-started bot was dying due to shell signal propagation issues when the watchdog script exited. Now launchd directly manages the bot, and the watchdog serves as a backup health monitor.
-- [2025-12-29 23:45] **WATCHDOG LSOF BUG FIX** - Fixed `lsof -ti :8000` killing notifier (had outgoing connections to bot). Changed to `lsof -ti TCP:8000 -sTCP:LISTEN` to only kill processes LISTENING on port 8000.
 - [2025-12-27] **TIER-CORRECT FEE MODELING COMPLETE** - Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
 - [2025-12-26 06:35] **WATCHDOG LAUNCHD MIGRATION COMPLETE** - Fixed EPERM on external volume, durable local state
 - [2025-12-26 01:45] **TIMEOUT HARDENING COMPLETE** - All main loop Alpaca calls bounded with 10-15s timeouts
@@ -34,11 +35,13 @@
 - [2025-12-21] First real RISK_OFF trigger observed and handled correctly
 
 ## System Health
-- **Bot**: Healthy, NORMAL mode, 100% position size, heartbeat updating every 60s
-- **Notifier**: Running (PID in DB), heartbeat updating every 60s, watchdog active
-- **Orchestrator**: ENFORCING, liquidation enabled, all symbols GRID_FULL
-- **State Files**: Now persistent in `data/state/` (survives reboot)
-- **Database Backup**: Daily at 3 AM, 7-day retention, first backup created (994 MB)
+- **Bot**: Healthy, NORMAL mode, running on port 8000
+- **Dashboard**: Running on port 5173
+- **Notifier**: Running, watchdog active
+- **Orchestrator**: ENFORCING, LTC/USD at GRID_REDUCED (111% inventory), others GRID_FULL
+- **Risk Overlay**: NORMAL mode, all triggers inactive
+- **State Files**: Persistent in `data/state/` (survives reboot)
+- **Database**: Healthy, reconciled with Alpaca
 
 ## Maintenance Plan (5 Phases) - ALL COMPLETE
 | Phase | Status | Description |
@@ -98,19 +101,16 @@ python3 scripts/cleanup_db.py         # DB cleanup (dry run)
 | **BTC/USD** | REMOVED Dec 31 (5.7x underperformer) |
 | **DOGE/USD** | ADDED Jan 1 (highest volatility) |
 
-## Key Metrics (Dec 28 - Updated)
+## Key Metrics (Jan 1, 2026 - Updated)
 | Metric | Value |
 |--------|-------|
 | Start Equity (Dec 1) | $90,457.58 |
-| Current Equity (Gross) | $99,879.30 |
-| Gross P/L | +$9,421.72 (+10.4%) |
-| Fees Expected | $1,210.48 |
-| Fees Conservative | $2,312.21 |
-| **Net P/L (Expected)** | **+$8,211.24 (+9.1%)** |
-| **Net P/L (Conservative)** | **+$7,109.47 (+7.9%)** |
-| 30-Day Volume | $1,095,209 |
-| Current Fee Tier | Tier 4 (0.08%/0.18%) |
-| **Test Status** | **25/25 PASS** |
+| Current Equity | ~$103,000 |
+| Grid Profit (All-Time) | +$12,555.74 |
+| Windfall Captures | 20 captures, $864.52 |
+| **Current Positions** | LTC/USD (111% inv), others minimal |
+| **Protection Systems** | 9/9 verified working |
+| **Test Status** | **101/101 PASS** |
 
 ## Fee Modeling - Live
 | Component | Status |

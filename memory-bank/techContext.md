@@ -41,13 +41,23 @@
 
 
 
-## Maintenance Scripts (added Dec 25, 2025)
-All scripts in `scripts/` directory:
-- `check_bot.sh` - Bot watchdog (cron every 5 min)
-- `check_notifier.sh` - Notifier watchdog (cron every 5 min)
+## Maintenance Scripts (in `scripts/`)
+- `check_bot.sh` - Bot watchdog
+- `check_notifier.sh` - Notifier watchdog
 - `backup_db.sh` - Database backup (cron daily 3 AM)
 - `rotate_logs.sh` - Log rotation (cron daily 5 AM)
 - `cleanup_db.py` - Database cleanup (manual, use `--execute`)
+- `sync-watchdog-scripts.sh` - Sync repo scripts to local LaunchAgent paths
+- `monitor_services.sh` - Real-time service status display
+
+## LaunchAgents (Auto-Start)
+| LaunchAgent | Purpose | KeepAlive |
+|-------------|---------|-----------|
+| `com.bluebird.bot` | Grid trading bot | Yes |
+| `com.bluebird.notifier` | SMS notifications | Yes |
+| `com.bluebird.dashboard` | Static dashboard server | No |
+| `com.bluebird.watchdog-bot` | Backup bot monitor (60s) | No |
+| `com.bluebird.watchdog-notifier` | Backup notifier monitor (60s) | No |
 
 ## Backup Storage
 - `data/backups/` - Database backups (7-day retention)
