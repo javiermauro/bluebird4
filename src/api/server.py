@@ -129,6 +129,7 @@ system_state = {
     # Multi-asset state
     "multi_asset": {
         "symbols": [],
+        "allocations": {},
         "signals": {},
         "confidences": {},
         "active_symbol": ""
@@ -2652,6 +2653,20 @@ async def startup_event():
     logger.info("=" * 50)
     logger.info("BlueBird ULTRA API Starting...")
     logger.info("=" * 50)
+
+    # Initialize multi_asset symbols from config
+    try:
+        symbols = getattr(CONFIG, 'SYMBOLS', [])
+        system_state["multi_asset"]["symbols"] = symbols
+        # Initialize allocations from GRID_CONFIGS
+        grid_configs = getattr(CONFIG, 'GRID_CONFIGS', {})
+        system_state["multi_asset"]["allocations"] = {
+            sym: grid_configs.get(sym, {}).get("investment_ratio", 0)
+            for sym in symbols
+        }
+        logger.info(f"Initialized multi_asset with symbols: {symbols}")
+    except Exception as e:
+        logger.warning(f"Could not initialize multi_asset symbols: {e}")
 
     # Log lock status (lock is acquired in main.py before server starts)
     try:

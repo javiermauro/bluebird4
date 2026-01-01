@@ -143,6 +143,20 @@ class Orchestrator:
         self._state_dirty = False
 
         self._load_state()
+
+        # Pre-register all symbols from config so they appear in dashboard immediately
+        symbols = getattr(config, 'SYMBOLS', [])
+        for sym in symbols:
+            if sym not in self.last_mode:
+                self.last_mode[sym] = OrchestratorMode.GRID_FULL
+                self._state_dirty = True
+                logger.info(f"[ORCH] Pre-registered symbol: {sym}")
+
+        # Save if any new symbols were pre-registered
+        if self._state_dirty:
+            self._save_state()
+            self._state_dirty = False
+
         logger.info(f"Orchestrator initialized: enabled={self.enabled}, enforce={self.enforce}, "
                     f"liquidation={self.liquidation_enabled}")
 
