@@ -1,7 +1,8 @@
 # Progress — Status & History
 
 ## Current Status
-- [2025-12-31 16:40] **BTC/USD REMOVED**: Underperformed 5.7x vs altcoins. New allocation: SOL 40%, LTC 30%, AVAX 30%. MAX_POSITIONS=4.
+- [2026-01-01 10:50] **DOGE/USD ADDED**: Highest volatility coin (10.3% 7D range). 15% allocation. New: SOL 35%, LTC 25%, AVAX 25%, DOGE 15%.
+- [2025-12-31 16:40] **BTC/USD REMOVED**: Underperformed 5.7x vs altcoins.
 - [2025-12-31 16:00] **BUG FIXES**: Timezone (naive→UTC), config spam (singleton), TIMEFRAME ("5Min"→"1Min").
 - [2025-12-30 00:00] **BOT LAUNCHAGENT CREATED**: Created `com.bluebird.bot.plist` with `RunAtLoad=true` and `KeepAlive=true`. Bot now managed directly by launchd for reliable auto-restart after reboot/power outage. Watchdog serves as backup monitor.
 - [2025-12-29 23:45] **Watchdog lsof Bug Fixed**: Changed `lsof -ti :8000` to `lsof -ti TCP:8000 -sTCP:LISTEN` to only kill LISTENING processes (bot), not processes with outgoing connections (notifier).
@@ -27,9 +28,16 @@
 
 ## Recent Work (High Signal)
 
+### Jan 1, 2026 — DOGE/USD Added
+- **DOGE/USD Added to Grid Trading**: Highest volatility of all symbols (10.3% 7D range, 2.6% daily vol). Added with conservative 15% allocation since it's a meme coin.
+- **New Allocation**: SOL 35%, LTC 25%, AVAX 25%, DOGE 15%
+- **DOGE Grid Config**: 6 grids (7 levels), 10% range, ~1.67% spacing
+- **Commit**: `bcb1811` - feat: add DOGE/USD to grid trading (15% allocation)
+- **Dashboard Updated**: Added DOGE to symbol selector with Ð icon
+
 ### Dec 31, 2025 — BTC Removal + Bug Fixes
 - **BTC/USD Removed from Grid Trading**: Analysis showed BTC underperformed altcoins by 5.7x ($763 profit vs $4,363 for SOL). Grid trading profits from volatility - BTC is too stable compared to altcoins.
-- **New Allocation**: SOL 40%, LTC 30%, AVAX 30% (was BTC 30%, SOL 25%, LTC 25%, AVAX 20%)
+- **Allocation After BTC Removal**: SOL 40%, LTC 30%, AVAX 30%
 - **MAX_POSITIONS**: Restored to 4 (allows multiple positions per symbol)
 - **Commits**:
   - `6ad5dbe` - fix: timezone bugs + config validation spam + correct TIMEFRAME setting

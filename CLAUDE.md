@@ -125,7 +125,7 @@ ls /tmp/bluebird/*.pid                     # Running services
 ## Configuration
 
 All settings in `config_ultra.py`:
-- `SYMBOLS`: Trading pairs (SOL/USD 40%, LTC/USD 30%, AVAX/USD 30%) - BTC removed Dec 31
+- `SYMBOLS`: Trading pairs (SOL 35%, LTC 25%, AVAX 25%, DOGE 15%) - BTC removed Dec 31, DOGE added Jan 1
 - `GRID_CONFIGS`: Per-symbol grid settings (levels, spacing, size)
 - Risk limits: `MAX_RISK_PER_TRADE=1.5%`, `DAILY_LOSS_LIMIT=5%`, `MAX_DRAWDOWN=10%`
 
