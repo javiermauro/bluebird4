@@ -1,12 +1,12 @@
 # Active Context — Current Focus
 
 ## Now
-- [2026-01-01 17:20] **ALL 9 PROTECTION SYSTEMS VERIFIED** - Comprehensive verification: Windfall (20 captures, $864.52), Limit Orders (active), Fast Fill (10s checks), Time Filters, Grid Rebalancing, Consecutive Down Bars, Developing Downtrend, Risk Overlay (NORMAL), Orchestrator (LTC at GRID_REDUCED 111%).
-- [2026-01-01 15:42] **SYSTEM CRASH RECOVERED** - Mac crashed, bot died at 15:42. Restarted successfully. All services healthy on ports 8000, 5173.
-- [2026-01-01 15:17] **WINDFALL CAPTURED $368.07** - AVAX/USD windfall sell triggered at 9.78% unrealized. Total windfall profit today: $368.09.
-- [2026-01-01 14:00] **DOGE DISPLAY FIX** - Fixed DOGE not appearing in dashboard orchestrator. Added pre-registration of all config symbols in orchestrator.py and multi_asset initialization in server.py. Commit: `ee3fbc3`.
-- [2026-01-01 10:50] **DOGE/USD ADDED TO GRID TRADING** - Highest volatility (10.3% 7D range, 2.6% daily vol). Conservative 15% allocation for meme coin. New allocation: SOL 35%, LTC 25%, AVAX 25%, DOGE 15%.
-- [2025-12-31 16:40] **BTC/USD REMOVED FROM GRID TRADING** - BTC underperformed by 5.7x ($763 vs $4,363 SOL). Removed from SYMBOLS/GRID_CONFIGS.
+- [2026-01-01 22:30] **🏆 BEST DAY EVER: +$6,283 (+6.2%)** - Peak equity $107,138.56. Grid sold into rally perfectly. All 4 symbols cycling. 30D grid profit now +$16,862 (+18.7%). Trusted the system — it delivered.
+- [2026-01-01 17:20] **ALL 9 PROTECTION SYSTEMS VERIFIED** - Comprehensive verification passed. All systems working.
+- [2026-01-01 15:42] **SYSTEM CRASH RECOVERED** - Mac crashed, bot died. Restarted successfully.
+- [2026-01-01 14:00] **DOGE DISPLAY FIX** - Commit `ee3fbc3`.
+- [2026-01-01 10:50] **DOGE/USD ADDED** - 15% allocation. First day: accumulated 112K DOGE, +$334 unrealized.
+- [2025-12-31 16:40] **BTC/USD REMOVED** - Underperformed 5.7x vs altcoins.
 - [2025-12-27] **TIER-CORRECT FEE MODELING COMPLETE** - Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
 - [2025-12-26 06:35] **WATCHDOG LAUNCHD MIGRATION COMPLETE** - Fixed EPERM on external volume, durable local state
 - [2025-12-26 01:45] **TIMEOUT HARDENING COMPLETE** - All main loop Alpaca calls bounded with 10-15s timeouts
@@ -35,13 +35,12 @@
 - [2025-12-21] First real RISK_OFF trigger observed and handled correctly
 
 ## System Health
-- **Bot**: Healthy, NORMAL mode, running on port 8000
-- **Dashboard**: Running on port 5173
+- **Bot**: Healthy, NORMAL mode, port 8000
+- **Dashboard**: Running, port 5173
 - **Notifier**: Running, watchdog active
-- **Orchestrator**: ENFORCING, LTC/USD at GRID_REDUCED (111% inventory), others GRID_FULL
-- **Risk Overlay**: NORMAL mode, all triggers inactive
-- **State Files**: Persistent in `data/state/` (survives reboot)
-- **Database**: Healthy, reconciled with Alpaca
+- **Risk Overlay**: NORMAL, all triggers inactive
+- **Orchestrator**: ENFORCING, all symbols GRID_FULL after profit-taking
+- **Performance**: +$6,283 daily, +$16,862 monthly, $107K equity
 
 ## Maintenance Plan (5 Phases) - ALL COMPLETE
 | Phase | Status | Description |
@@ -101,15 +100,15 @@ python3 scripts/cleanup_db.py         # DB cleanup (dry run)
 | **BTC/USD** | REMOVED Dec 31 (5.7x underperformer) |
 | **DOGE/USD** | ADDED Jan 1 (highest volatility) |
 
-## Key Metrics (Jan 1, 2026 - Updated)
+## Key Metrics (Jan 1, 2026 - End of Day)
 | Metric | Value |
 |--------|-------|
-| Start Equity (Dec 1) | $90,457.58 |
-| Current Equity | ~$103,000 |
-| Grid Profit (All-Time) | +$12,555.74 |
+| **Peak Equity** | **$107,138.56** |
+| **Daily P/L** | **+$6,283.63 (+6.2%)** |
+| **Grid Profit (30 days)** | **+$16,862.30 (+18.7%)** |
+| 30D Volume | $1,874,740 |
+| Fee Tier | Tier 4 (0.08%/0.18%) |
 | Windfall Captures | 20 captures, $864.52 |
-| **Current Positions** | LTC/USD (111% inv), others minimal |
-| **Protection Systems** | 9/9 verified working |
 | **Test Status** | **101/101 PASS** |
 
 ## Fee Modeling - Live
