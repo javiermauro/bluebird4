@@ -693,7 +693,10 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         if (data.stream_health) {
-          setStreamHealth(data.stream_health);
+          setStreamHealth({
+            status: data.stream_health.status,
+            secondsSinceBar: data.stream_health.seconds_since_bar || 0
+          });
         }
       }
     } catch (error) {
