@@ -655,8 +655,9 @@ async def trigger_reconciliation():
 
 # === NOTIFIER CONTROL ENDPOINTS ===
 
-PID_FILE = "/tmp/bluebird-notifier.pid"
-SMS_COUNT_FILE = "/tmp/bluebird-notifier-count.json"
+# LIVE INSTANCE: Uses -live- prefix to avoid collision with paper
+PID_FILE = "/tmp/bluebird-live-notifier.pid"
+SMS_COUNT_FILE = "/tmp/bluebird-live-notifier-count.json"
 
 
 def get_notifier_status() -> dict:
@@ -790,7 +791,7 @@ async def start_notifier():
         process = subprocess.Popen(
             ["caffeinate", "-i", "--", "python3", notifier_script],
             cwd=project_root,
-            stdout=open("/tmp/bluebird-notifier.log", "a"),
+            stdout=open("/tmp/bluebird-live-notifier.log", "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True  # Detach from parent
         )
@@ -1166,7 +1167,7 @@ async def restart_notifier_internal():
         process = subprocess.Popen(
             ["caffeinate", "-i", "--", "python3", notifier_script],
             cwd=project_root,
-            stdout=open("/tmp/bluebird-notifier.log", "a"),
+            stdout=open("/tmp/bluebird-live-notifier.log", "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True
         )
@@ -1823,6 +1824,58 @@ async def get_orchestrator_telemetry():
         "mode_transitions": 0,
         "source": "default",
         "note": "No telemetry data yet"
+    }
+
+
+# ============================================================================
+# SMART GRID ADVISOR ENDPOINTS (Grid Drift Monitoring)
+# ============================================================================
+
+@app.get("/api/smartgrid/status")
+async def get_smartgrid_status():
+    """
+    Get Smart Grid Advisor status and recommendations.
+
+    Returns current drift metrics, fill rates, and recenter recommendations
+    for all trading symbols. Phase 1 is advisory-only (shadow mode).
+
+    Returns:
+        Dict with enabled, enforce, symbols data, and config
+    """
+    # Try live data from system_state first
+    smartgrid_data = system_state.get("smartgrid")
+    if smartgrid_data and smartgrid_data.get("symbols"):
+        return {
+            "enabled": True,
+            "enforce": False,  # Phase 1: shadow mode
+            "symbols": smartgrid_data.get("symbols", {}),
+            "last_update": smartgrid_data.get("last_update"),
+            "source": "system_state"
+        }
+
+    # Fallback to state file
+    SMARTGRID_STATE_FILE = os.path.join(STATE_DIR, "smart-grid-advisor.json")
+    if os.path.exists(SMARTGRID_STATE_FILE):
+        try:
+            with open(SMARTGRID_STATE_FILE, 'r') as f:
+                state = json.load(f)
+            return {
+                "enabled": True,
+                "enforce": False,
+                "symbols": state.get("symbols", {}),
+                "atr_history_symbols": list(state.get("atr_history", {}).keys()),
+                "last_saved": state.get("saved_at"),
+                "source": "state_file"
+            }
+        except Exception as e:
+            logger.error(f"Failed to read smartgrid state: {e}")
+
+    # Default response when no data
+    return {
+        "enabled": False,
+        "reason": "no_data_yet",
+        "source": "default",
+        "note": "SmartGrid Advisor not yet evaluated or disabled"
     }
 
 
@@ -3008,4 +3061,4 @@ if __name__ == "__main__":
     lock = acquire_bot_lock()
     print(f"Process lock acquired (PID: {os.getpid()})")
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

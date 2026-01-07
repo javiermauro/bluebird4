@@ -50,6 +50,7 @@ from src.strategy.feature_calculator import FeatureCalculator
 from src.strategy.risk_overlay import RiskOverlay, RiskMode
 from src.utils.atomic_io import atomic_write_json
 from src.strategy.orchestrator import Orchestrator, OrchestratorContext, OrchestratorMode
+from src.strategy.smart_grid_advisor import SmartGridAdvisor
 
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -218,6 +219,20 @@ class GridTradingBot:
         logger.info(f"  Orchestrator: {'ENABLED' if self.orchestrator.enabled else 'DISABLED'} "
                     f"(enforce={'Yes' if self.orchestrator.enforce else 'Shadow'}, "
                     f"liquidation={'Yes' if self.orchestrator.liquidation_enabled else 'No'})")
+
+        # === SMART GRID ADVISOR (Shadow Mode Grid Monitoring) ===
+        # Monitors grid drift and recommends recentering - Phase 1 is advisory only
+        if getattr(config, 'SMART_GRID_ENABLED', False):
+            self.smart_grid_advisor = SmartGridAdvisor(
+                config=config,
+                grid_strategy=self.grid_strategy,
+                risk_overlay=self.risk_overlay,
+                orchestrator=self.orchestrator
+            )
+            logger.info(f"  SmartGridAdvisor: ENABLED (enforce={'Yes' if getattr(config, 'SMART_GRID_ENFORCE', False) else 'Shadow'})")
+        else:
+            self.smart_grid_advisor = None
+            logger.info(f"  SmartGridAdvisor: DISABLED")
 
         # === LIMIT ORDER SETTINGS (Maker Fee Optimization) ===
         self.use_limit_orders = getattr(config, 'GRID_USE_LIMIT_ORDERS', True)
@@ -1045,34 +1060,49 @@ class GridTradingBot:
         return result
 
     def _load_daily_equity(self) -> None:
-        """Load daily equity using Alpaca's last_equity for true daily P/L tracking."""
+        """Load daily equity using database's last equity snapshot for true daily P/L tracking.
+
+        NOTE: We use the database instead of Alpaca's last_equity because:
+        - Alpaca's last_equity doesn't update properly for 24/7 crypto trading
+        - The database has accurate minute-by-minute equity snapshots
+        - This gives us true previous-day-close for daily P/L calculation
+        """
         import json
         try:
-            # First, try to get Alpaca's last_equity (previous day's close)
-            # This is the most accurate source for true daily P/L
-            alpaca_last_equity = self._get_alpaca_last_equity()
+            today = datetime.now().strftime('%Y-%m-%d')
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
-            if alpaca_last_equity and alpaca_last_equity > 0:
-                self.daily_start_equity = alpaca_last_equity
+            # First, try to get yesterday's closing equity from database
+            # This is the most accurate source for 24/7 crypto trading
+            db_last_equity = self._get_db_previous_day_equity(yesterday)
+
+            if db_last_equity and db_last_equity > 0:
+                self.daily_start_equity = db_last_equity
                 self.last_trading_day = datetime.now().date()
-                logger.info(f"Using Alpaca last_equity for daily P/L: ${self.daily_start_equity:,.2f}")
+                logger.info(f"Using DB previous day close for daily P/L: ${self.daily_start_equity:,.2f}")
 
                 # Also load peak equity from file if available
                 if os.path.exists(self.daily_equity_file):
                     with open(self.daily_equity_file, 'r') as f:
                         data = json.load(f)
                         saved_date = data.get('date')
-                        today = datetime.now().strftime('%Y-%m-%d')
                         if saved_date == today:
                             self.peak_equity = data.get('peak_equity', self.daily_start_equity)
                 return
 
-            # Fallback to file-based tracking if Alpaca unavailable
+            # Fallback to Alpaca's last_equity if database unavailable
+            alpaca_last_equity = self._get_alpaca_last_equity()
+            if alpaca_last_equity and alpaca_last_equity > 0:
+                self.daily_start_equity = alpaca_last_equity
+                self.last_trading_day = datetime.now().date()
+                logger.info(f"Fallback to Alpaca last_equity for daily P/L: ${self.daily_start_equity:,.2f}")
+                return
+
+            # Final fallback to file-based tracking
             if os.path.exists(self.daily_equity_file):
                 with open(self.daily_equity_file, 'r') as f:
                     data = json.load(f)
                     saved_date = data.get('date')
-                    today = datetime.now().strftime('%Y-%m-%d')
 
                     if saved_date == today:
                         self.daily_start_equity = data.get('starting_equity', 0)
@@ -1085,7 +1115,10 @@ class GridTradingBot:
             logger.debug(f"Could not load daily equity: {e}")
 
     def _get_alpaca_last_equity(self) -> Optional[float]:
-        """Get Alpaca's last_equity (previous day's closing equity) for accurate daily P/L."""
+        """Get Alpaca's last_equity (previous day's closing equity) - FALLBACK ONLY.
+
+        NOTE: This is unreliable for 24/7 crypto trading. Use _get_db_previous_day_equity instead.
+        """
         try:
             # Use sync timeout wrapper to prevent hanging during init if Alpaca is slow
             account = run_sync_with_timeout(
@@ -1102,6 +1135,44 @@ class GridTradingBot:
             return last_equity
         except Exception as e:
             logger.debug(f"Could not fetch Alpaca last_equity: {e}")
+            return None
+
+    def _get_db_previous_day_equity(self, date_str: str) -> Optional[float]:
+        """Get the last equity snapshot from a specific date (for previous day close).
+
+        This is the preferred method for daily P/L calculation because:
+        - Database has minute-by-minute snapshots
+        - Works correctly for 24/7 crypto trading
+        - Not affected by Alpaca's stale last_equity bug
+
+        Args:
+            date_str: Date in YYYY-MM-DD format (e.g., yesterday's date)
+
+        Returns:
+            The last equity value from that date, or None if not found
+        """
+        try:
+            from src.database import db as database
+
+            with database.get_db_connection() as conn:
+                cursor = conn.cursor()
+                # Get the last equity snapshot from the specified date
+                cursor.execute("""
+                    SELECT equity FROM equity_snapshots
+                    WHERE substr(timestamp, 1, 10) = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """, (date_str,))
+                row = cursor.fetchone()
+
+                if row and row['equity']:
+                    equity = float(row['equity'])
+                    logger.debug(f"DB previous day ({date_str}) close: ${equity:,.2f}")
+                    return equity
+
+            return None
+        except Exception as e:
+            logger.debug(f"Could not fetch DB previous day equity: {e}")
             return None
 
     def _save_daily_equity(self, equity: float, is_new_day: bool = False) -> None:
@@ -2507,14 +2578,22 @@ class GridTradingBot:
             self.last_trading_day = today
             self.daily_limit_hit = False
 
-            # Use Alpaca's last_equity for true daily P/L (previous day's close)
-            alpaca_last_equity = self._get_alpaca_last_equity()
-            if alpaca_last_equity and alpaca_last_equity > 0:
-                self.daily_start_equity = alpaca_last_equity
-                logger.info(f"New trading day - using Alpaca last_equity: ${self.daily_start_equity:,.2f}")
+            # Use database's last equity snapshot for true daily P/L (previous day's close)
+            # NOTE: Alpaca's last_equity is unreliable for 24/7 crypto trading
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            db_last_equity = self._get_db_previous_day_equity(yesterday)
+            if db_last_equity and db_last_equity > 0:
+                self.daily_start_equity = db_last_equity
+                logger.info(f"New trading day - using DB previous day close: ${self.daily_start_equity:,.2f}")
             else:
-                self.daily_start_equity = equity
-                logger.info(f"New trading day - using current equity: ${self.daily_start_equity:,.2f}")
+                # Fallback to Alpaca if database unavailable
+                alpaca_last_equity = self._get_alpaca_last_equity()
+                if alpaca_last_equity and alpaca_last_equity > 0:
+                    self.daily_start_equity = alpaca_last_equity
+                    logger.info(f"New trading day - fallback to Alpaca last_equity: ${self.daily_start_equity:,.2f}")
+                else:
+                    self.daily_start_equity = equity
+                    logger.info(f"New trading day - using current equity: ${self.daily_start_equity:,.2f}")
 
             self._save_daily_equity(equity, is_new_day=True)  # Persist for tracking
 
@@ -3297,6 +3376,35 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             # In RISK_OFF: override other filters to ALLOW sells (exit opportunities)
             if overlay_mode == RiskMode.RISK_OFF:
                 regime_allow_sell = True  # Override regime block on sells
+
+            # === SMART GRID ADVISOR EVALUATION ===
+            # Evaluate grid drift and log recommendations (Phase 1: shadow mode only)
+            if bot.smart_grid_advisor:
+                try:
+                    # Get ATR% from regime metrics for volatility tracking
+                    atr_pct = regime_status.get('atr_pct', 0)
+
+                    advisor_result = bot.smart_grid_advisor.evaluate(
+                        symbol=symbol,
+                        current_price=current_price,
+                        regime_metrics={
+                            'regime': current_regime,
+                            'adx': regime_adx,
+                            'atr_pct': atr_pct,
+                            'correlation': max_corr
+                        },
+                        bot=bot
+                    )
+
+                    # Log recommendations
+                    if advisor_result.get('action') == 'RECOMMEND_RECENTER':
+                        drift_info = advisor_result.get('drift', {})
+                        await broadcast_log(
+                            f"[SMARTGRID] {symbol}: Recommends recenter "
+                            f"(drift={drift_info.get('drift_pct', 0):.1%} {drift_info.get('direction', '')})"
+                        )
+                except Exception as e:
+                    logger.error(f"[SMARTGRID] Error evaluating {symbol}: {e}")
 
             # Get current positions (with timeout to prevent event loop hang)
             # FAIL CLOSED: On timeout, skip trading actions for this cycle
@@ -4479,6 +4587,40 @@ async def run_grid_bot(broadcast_update, broadcast_log):
         # Start health check task
         health_task = asyncio.create_task(order_health_check())
         await broadcast_log("[HEALTH] Order tracking monitor started (5 min interval)")
+
+        # SmartGrid Advisor periodic task - runs every 300s to evaluate drift even during WS stalls
+        SMARTGRID_INTERVAL_SECONDS = getattr(bot.config, 'SMART_GRID_EVAL_INTERVAL_SECONDS', 300)
+
+        def _get_last_known_price(symbol: str):
+            """Get last known price from bar cache."""
+            # Primary: bot's bar cache (most recent close)
+            if hasattr(bot, 'bars') and symbol in bot.bars and len(bot.bars[symbol]) > 0:
+                return bot.bars[symbol][-1].close
+            return None
+
+        async def smartgrid_periodic_task():
+            """Background task to evaluate SmartGridAdvisor even when WS bars stall."""
+            while True:
+                await asyncio.sleep(SMARTGRID_INTERVAL_SECONDS)
+                if bot.smart_grid_advisor:
+                    for symbol in bot.symbols:
+                        if symbol in bot.grid_strategy.grids:
+                            price = _get_last_known_price(symbol)
+                            if price and price > 0:
+                                try:
+                                    result = bot.smart_grid_advisor.evaluate_background(symbol, price)
+                                    if result.get('action') not in ['SKIP', 'NONE']:
+                                        logger.info(f"[SMARTGRID] Periodic eval {symbol}: {result.get('action')}")
+                                        await broadcast_log(f"[SMARTGRID] Periodic: {symbol} {result.get('action')}")
+                                except Exception as e:
+                                    logger.error(f"[SMARTGRID] Periodic eval error for {symbol}: {e}")
+                            else:
+                                logger.debug(f"[SMARTGRID] {symbol}: no_price_yet - skipping periodic eval")
+
+        # Start SmartGrid advisor task (if enabled)
+        if bot.smart_grid_advisor:
+            smartgrid_task = asyncio.create_task(smartgrid_periodic_task())
+            await broadcast_log(f"[SMARTGRID] Periodic advisor started ({SMARTGRID_INTERVAL_SECONDS}s interval)")
 
         # Run stream with reconnection and proper cleanup
         backoff = 1

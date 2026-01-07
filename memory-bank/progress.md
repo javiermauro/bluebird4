@@ -1,6 +1,8 @@
 # Progress — Status & History
 
 ## Current Status
+- [2026-01-07 16:30] **DASHBOARD THEME OVERHAUL**: Replaced harsh red/crimson "Control Room Alert" theme with calming teal/slate "Deep Ocean" theme. New fonts (IBM Plex Sans/Mono), new color palette, softer on the eyes. Added SmartGrid Advisor panel to dashboard with drift status per symbol.
+- [2026-01-07 16:00] **SMART GRID ADVISOR (Phase 1) IMPLEMENTED (LIVE INSTANCE)**: Added `src/strategy/smart_grid_advisor.py` (shadow-mode only) with drift detection + hysteresis (55% trigger / 40% clear), DB-backed fill-rate sampling, and ATR percentile ring buffer stored in `data/state/smart-grid-advisor.json`. Wired into `src/execution/bot_grid.py` (evaluate in `handle_bar()` + periodic task for WS stall resilience). Added API `GET /api/smartgrid/status` (state-file backed).
 - [2026-01-01 17:20] **ALL 9 SYSTEMS VERIFIED**: Windfall, Limit Orders, Fast Fill, Time Filters, Rebalancing, Consecutive Down Bars, Developing Downtrend, Risk Overlay, Orchestrator - ALL working.
 - [2026-01-01 15:42] **SYSTEM CRASH RECOVERED**: Mac crashed, bot died. Restarted successfully, all services healthy.
 - [2026-01-01 14:00] **DOGE DISPLAY FIX**: Fixed DOGE not appearing in dashboard orchestrator. Commit: `ee3fbc3`.
@@ -30,6 +32,32 @@
 - [2025-12-25 11:30] **Phase 1 Maintenance Complete**: State files moved to persistent storage
 
 ## Recent Work (High Signal)
+
+### Jan 7, 2026 — SmartGrid Advisor + Dashboard Theme
+**SmartGrid Advisor (Phase 1 - Shadow Mode)**:
+- Created `src/strategy/smart_grid_advisor.py` (~500 lines)
+- Drift detection with hysteresis: 55% trigger / 40% clear / 60min cooldown
+- DB-backed fill-rate sampling, ATR percentile ring buffer
+- State persisted to `data/state/smart-grid-advisor.json`
+- Background task for WS stall resilience (evaluates every 300s)
+- API endpoint `GET /api/smartgrid/status`
+- Gates: Risk Overlay must be NORMAL, Orchestrator not DEFENSIVE, not strong downtrend
+- Respects existing rebalance mechanisms (won't compete)
+
+**Dashboard Theme Overhaul**:
+- Replaced harsh red/crimson "Control Room Alert" with calm teal/slate "Deep Ocean"
+- New fonts: IBM Plex Sans (body) + IBM Plex Mono (data)
+- Color palette: `--gold-primary: #14b8a6` (teal), `--gold-light: #2dd4bf`
+- Added SmartGrid Advisor panel showing drift status per symbol
+- Chart colors updated from amber to teal gradient
+
+**Files Modified**:
+- `src/strategy/smart_grid_advisor.py` (NEW)
+- `config_ultra.py` (added SMART_GRID_* settings)
+- `src/execution/bot_grid.py` (import, init, background task, handle_bar)
+- `src/api/server.py` (added /api/smartgrid/status endpoint)
+- `dashboard/src/index.css` (complete theme overhaul)
+- `dashboard/src/App.jsx` (SmartGrid state, fetch, panel)
 
 ### Jan 1, 2026 — 🏆 BEST DAY EVER (+$6,283, +6.2%)
 - **Peak Equity**: $107,138.56 (broke $107K!)

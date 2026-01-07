@@ -374,20 +374,36 @@ function App() {
     error: null
   });
 
+  // SmartGrid Advisor state (grid drift monitoring)
+  const [smartGrid, setSmartGrid] = useState({
+    enabled: false,
+    enforce: false,
+    symbols: {},
+    atr_history_symbols: [],
+    last_saved: null,
+    source: 'unknown'
+  });
+  const [smartGridExpanded, setSmartGridExpanded] = useState(false);
+  const [smartGridFetch, setSmartGridFetch] = useState({
+    status: 'init',
+    lastFetchedAt: null,
+    error: null
+  });
+
   // Per-symbol chart data storage - LIVE INSTANCE: AVAX + LTC only
   const [symbolChartData, setSymbolChartData] = useState({
     'AVAX/USD': { labels: [], data: [] },
     'LTC/USD': { labels: [], data: [] }
   });
 
-  // Computed chart data based on selected symbol - LIVE uses amber/crimson
+  // Computed chart data based on selected symbol - calming teal theme
   const chartData = {
     labels: symbolChartData[selectedSymbol]?.labels || [],
     datasets: [{
       label: selectedSymbol,
       data: symbolChartData[selectedSymbol]?.data || [],
-      borderColor: '#f59e0b',
-      backgroundColor: 'rgba(245, 158, 11, 0.1)',
+      borderColor: '#14b8a6',
+      backgroundColor: 'rgba(20, 184, 166, 0.1)',
       tension: 0.4,
       fill: true,
       pointRadius: 0,
@@ -751,6 +767,31 @@ function App() {
     }
   };
 
+  // Fetch SmartGrid Advisor status
+  const fetchSmartGrid = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/smartgrid/status`);
+      if (response.ok) {
+        const data = await response.json();
+        setSmartGrid(data);
+        setSmartGridFetch({ status: 'ok', lastFetchedAt: Date.now(), error: null });
+      } else {
+        setSmartGridFetch(prev => ({
+          status: 'error',
+          lastFetchedAt: prev.lastFetchedAt,
+          error: `HTTP ${response.status}`
+        }));
+      }
+    } catch (error) {
+      console.log('Could not fetch smartgrid status');
+      setSmartGridFetch(prev => ({
+        status: 'error',
+        lastFetchedAt: prev.lastFetchedAt,
+        error: error?.message || 'fetch_failed'
+      }));
+    }
+  };
+
   // Set risk overlay mode (manual override)
   const setRiskMode = async (mode, reason) => {
     try {
@@ -917,6 +958,13 @@ function App() {
   useEffect(() => {
     fetchOrchestrator();
     const interval = setInterval(fetchOrchestrator, 15000); // Every 15 seconds
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch SmartGrid Advisor status periodically
+  useEffect(() => {
+    fetchSmartGrid();
+    const interval = setInterval(fetchSmartGrid, 15000); // Every 15 seconds
     return () => clearInterval(interval);
   }, []);
 
@@ -2016,6 +2064,131 @@ function App() {
                 </>
               );
             })()}
+
+            {/* ═══════════════════════════════════════════════════════════════════
+                SMARTGRID ADVISOR BANNER - Grid Intelligence Monitoring
+            ═══════════════════════════════════════════════════════════════════ */}
+            {(() => {
+              const sgOk = smartGridFetch.status === 'ok';
+              const symbols = smartGrid.symbols || {};
+              const symbolKeys = Object.keys(symbols);
+              const hasRecommendations = symbolKeys.some(s => symbols[s]?.recommendation_active);
+              const isEnforcing = smartGrid.enforce;
+
+              return (
+                <div
+                  className={`smartgrid-banner ${sgOk ? (hasRecommendations ? 'smartgrid-banner-recommend' : (isEnforcing ? '' : 'smartgrid-banner-shadow')) : ''}`}
+                  onClick={() => setSmartGridExpanded(!smartGridExpanded)}
+                >
+                  <div className="smartgrid-banner-content">
+                    {/* Mode Badge */}
+                    <div className="smartgrid-mode-badge">
+                      <span className="smartgrid-mode-icon">🎯</span>
+                      <span className="smartgrid-mode-text">
+                        {!sgOk ? 'OFFLINE' : hasRecommendations ? 'RECOMMENDING' : 'MONITORING'}
+                      </span>
+                    </div>
+
+                    {/* Status Indicator */}
+                    {sgOk && (
+                      <div className={`smartgrid-status-indicator ${isEnforcing ? 'active' : 'shadow'}`}>
+                        <span className="smartgrid-status-dot"></span>
+                        {isEnforcing ? 'ENFORCE' : 'SHADOW'}
+                      </div>
+                    )}
+
+                    {/* Quick Status */}
+                    {sgOk && (
+                      <div className="smartgrid-status-text">
+                        {hasRecommendations
+                          ? `${symbolKeys.filter(s => symbols[s]?.recommendation_active).length} symbol(s) recommend recenter`
+                          : 'All grids within threshold'}
+                      </div>
+                    )}
+
+                    {/* Expand Chevron */}
+                    <div className="smartgrid-expand-chevron">
+                      <svg
+                        className={`smartgrid-chevron-icon ${smartGridExpanded ? 'expanded' : ''}`}
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
+                        <polyline points="6 9 12 15 18 9"></polyline>
+                      </svg>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* SmartGrid Expanded Panel */}
+            {smartGridExpanded && smartGridFetch.status === 'ok' && (
+              <div className="smartgrid-expanded-panel">
+                <div className="smartgrid-panel-grid">
+                  {/* Symbol Drift Section */}
+                  <div className="smartgrid-panel-section">
+                    <div className="smartgrid-section-header">
+                      <span className="smartgrid-section-icon">📊</span>
+                      <span className="smartgrid-section-title">Symbol Drift Status</span>
+                    </div>
+                    <div className="smartgrid-symbols-grid">
+                      {Object.entries(smartGrid.symbols || {}).map(([symbol, data]) => {
+                        const isRecommending = data?.recommendation_active;
+                        return (
+                          <div key={symbol} className={`smartgrid-symbol-card ${isRecommending ? 'recommending' : ''}`}>
+                            <span className="smartgrid-symbol-name">{symbol.replace('/', '')}</span>
+                            <div className="smartgrid-symbol-drift">
+                              {isRecommending ? (
+                                <span className="smartgrid-drift-pct recommend">RECENTER</span>
+                              ) : (
+                                <span className="smartgrid-drift-pct safe">OK</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {Object.keys(smartGrid.symbols || {}).length === 0 && (
+                        <div style={{ color: 'var(--text-muted)', fontStyle: 'italic', padding: '0.5rem' }}>
+                          No symbols tracked
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Config Section */}
+                  <div className="smartgrid-panel-section">
+                    <div className="smartgrid-section-header">
+                      <span className="smartgrid-section-icon">⚙️</span>
+                      <span className="smartgrid-section-title">Configuration</span>
+                    </div>
+                    <div className="smartgrid-config-grid">
+                      <div className="smartgrid-config-item">
+                        <span className="smartgrid-config-label">Drift Trigger</span>
+                        <span className="smartgrid-config-value">55%</span>
+                      </div>
+                      <div className="smartgrid-config-item">
+                        <span className="smartgrid-config-label">Drift Clear</span>
+                        <span className="smartgrid-config-value">40%</span>
+                      </div>
+                      <div className="smartgrid-config-item">
+                        <span className="smartgrid-config-label">Cooldown</span>
+                        <span className="smartgrid-config-value">60 min</span>
+                      </div>
+                      <div className="smartgrid-config-item">
+                        <span className="smartgrid-config-label">Last Update</span>
+                        <span className="smartgrid-config-value">
+                          {smartGrid.last_saved
+                            ? new Date(smartGrid.last_saved).toLocaleTimeString()
+                            : '--'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* ═══════════════════════════════════════════════════════════════════
                 HEALTH STATUS PANEL

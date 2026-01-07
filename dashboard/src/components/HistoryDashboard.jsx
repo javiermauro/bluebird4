@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Line } from 'react-chartjs-2';
 
-// Backend connection settings (same pattern as App.jsx)
+// Backend connection settings - LIVE INSTANCE (Port 8001)
 const API_HOST = import.meta.env.VITE_API_HOST || window.location.hostname;
-const API_PORT = import.meta.env.VITE_API_PORT || '8000';
+const API_PORT = import.meta.env.VITE_API_PORT || '8001';  // LIVE default
 const API_BASE = `${window.location.protocol}//${API_HOST}:${API_PORT}`;
 
 function HistoryDashboard() {

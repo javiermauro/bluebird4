@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⚠️ LIVE TRADING INSTANCE
+
+**THIS IS THE LIVE TRADING INSTANCE** - Trades with REAL MONEY on Alpaca LIVE API.
+
+| Setting | Value |
+|---------|-------|
+| **Mode** | LIVE (PAPER_TRADING = False) |
+| **API Port** | 8001 |
+| **Symbols** | AVAX/USD (90%), LTC/USD (10%) |
+| **Lock Dir** | `/tmp/bluebird-live/` |
+| **Logs** | `/tmp/bluebird-live-*.log` |
+| **SMS Prefix** | `[LIVE]` |
+
+Paper instance runs separately at port 8000 in `~/BLUEBIRD/bluebird`.
+
 ## Project Overview
 
 BLUEBIRD 4.0 is a cryptocurrency grid trading bot that trades on Alpaca. It uses a grid trading strategy (not prediction-based) that profits from sideways market volatility by placing buy/sell orders at regular price intervals.
@@ -63,9 +78,9 @@ nohup caffeinate -i python3 src/notifications/notifier.py > /tmp/bluebird-notifi
 
 ### Check Status
 ```bash
-curl http://localhost:8000/health          # Bot health
-curl http://localhost:8000/api/risk/status # Risk & P/L
-ls /tmp/bluebird/*.pid                     # Running services
+curl http://localhost:8001/health          # Bot health (LIVE)
+curl http://localhost:8001/api/risk/status # Risk & P/L
+ls /tmp/bluebird-live/*.pid                # Running services
 ```
 
 ## Architecture
@@ -73,9 +88,9 @@ ls /tmp/bluebird/*.pid                     # Running services
 ### Services (3 total)
 | Service | Entry Point | Port | Lock |
 |---------|-------------|------|------|
-| Grid Bot | `src/api/server.py` | 8000 | `bluebird-bot` |
-| Dashboard | `dashboard/` (Vite/React) | 5173 | Port-based |
-| Notifier | `src/notifications/notifier.py` | - | `bluebird-notifier` |
+| Grid Bot | `src/api/server.py` | 8001 | `bluebird-live-bot` |
+| Dashboard | `dashboard/` (Vite/React) | 5174 | Port-based |
+| Notifier | `src/notifications/notifier.py` | - | `bluebird-live-notifier` |
 
 ### Core Components
 - **`src/api/server.py`** - FastAPI server with WebSocket for real-time dashboard updates. Runs the grid bot via `run_grid_bot()`.
@@ -84,7 +99,7 @@ ls /tmp/bluebird/*.pid                     # Running services
 - **`src/strategy/risk_overlay.py`** - Risk overlay state machine (NORMAL/RISK_OFF/RECOVERY). Provides crash protection.
 - **`src/strategy/orchestrator.py`** - Thin meta-controller for inventory management. Adds inventory episode tracking and staged liquidation.
 - **`src/database/db.py`** - SQLite database for persistent trade/equity/order storage at `data/bluebird.db`.
-- **`src/utils/process_lock.py`** - Single-instance protection using file locks in `/tmp/bluebird/`.
+- **`src/utils/process_lock.py`** - Single-instance protection using file locks in `/tmp/bluebird-live/`.
 - **`config_ultra.py`** - All trading configuration (symbols, risk limits, grid settings).
 
 ### Data Flow
@@ -107,9 +122,9 @@ ls /tmp/bluebird/*.pid                     # Running services
 - `watchdog.json` - Notifier watchdog state
 
 **Process/lock files** (in `/tmp`, cleared on reboot - intentional):
-- `/tmp/bluebird/*.lock`, `/tmp/bluebird/*.pid` - Single-instance protection
-- `/tmp/bluebird-notifier.log` - Notifier log file
-- `/tmp/bluebird-bot.log` - Bot log file
+- `/tmp/bluebird-live/*.lock`, `/tmp/bluebird-live/*.pid` - Single-instance protection
+- `/tmp/bluebird-live-notifier.log` - Notifier log file
+- `/tmp/bluebird-live-bot.log` - Bot log file
 
 **Database**: `data/bluebird.db` (trades, equity, orders, notifications)
 
@@ -125,12 +140,15 @@ ls /tmp/bluebird/*.pid                     # Running services
 ## Configuration
 
 All settings in `config_ultra.py`:
-- `SYMBOLS`: Trading pairs (SOL 35%, LTC 25%, AVAX 25%, DOGE 15%) - BTC removed Dec 31, DOGE added Jan 1
+- `TRADING_MODE`: "LIVE" (this is the live instance)
+- `PAPER_TRADING`: False (uses Alpaca LIVE API)
+- `SYMBOLS`: AVAX/USD (90%), LTC/USD (10%) - 2 symbols for correlation protection
 - `GRID_CONFIGS`: Per-symbol grid settings (levels, spacing, size)
 - Risk limits: `MAX_RISK_PER_TRADE=1.5%`, `DAILY_LOSS_LIMIT=5%`, `MAX_DRAWDOWN=10%`
 
 Environment variables in `.env`:
-- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` - Trading credentials
+- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` - **LIVE** trading credentials
+- `ALPACA_BASE_URL`: `https://api.alpaca.markets` (LIVE API)
 - `TWILIO_*` - SMS notification credentials
 
 ## Risk Overlay (Crash Protection)
@@ -184,18 +202,18 @@ Stability gate requires:
 
 ```bash
 # Get current overlay status
-curl http://localhost:8000/api/risk/overlay
+curl http://localhost:8001/api/risk/overlay
 
 # Get telemetry ($ amounts protected)
-curl http://localhost:8000/api/risk/overlay/telemetry
+curl http://localhost:8001/api/risk/overlay/telemetry
 
 # Manual override to RISK_OFF
-curl -X POST http://localhost:8000/api/risk/overlay \
+curl -X POST http://localhost:8001/api/risk/overlay \
   -H "Content-Type: application/json" \
   -d '{"mode": "RISK_OFF", "reason": "Manual protection"}'
 
 # Clear manual override (return to automatic)
-curl -X POST http://localhost:8000/api/risk/overlay \
+curl -X POST http://localhost:8001/api/risk/overlay \
   -H "Content-Type: application/json" \
   -d '{"mode": "clear"}'
 ```
@@ -253,13 +271,13 @@ Liquidation orders are ONLY placed in overlay mode NORMAL:
 
 ```bash
 # Get orchestrator status
-curl http://localhost:8000/api/orchestrator/status
+curl http://localhost:8001/api/orchestrator/status
 
 # Get symbol-specific status
-curl http://localhost:8000/api/orchestrator/symbol/BTC-USD
+curl http://localhost:8001/api/orchestrator/symbol/AVAX-USD
 
 # Get telemetry ($ amounts)
-curl http://localhost:8000/api/orchestrator/telemetry
+curl http://localhost:8001/api/orchestrator/telemetry
 ```
 
 ### Config Settings
@@ -345,15 +363,15 @@ The notifier (`src/notifications/notifier.py`) polls the bot API and sends SMS a
 
 Both bot and notifier have watchdog scripts that auto-restart on crash. These run via **launchd** (not cron) due to macOS security restrictions on external volumes.
 
-**Architecture:**
+**Architecture (LIVE Instance):**
 | Component | Location |
 |-----------|----------|
-| Bot watchdog | `~/Library/Application Support/BLUEBIRD/run-check-bot.sh` |
-| Notifier watchdog | `~/Library/Application Support/BLUEBIRD/run-check-notifier.sh` |
-| Bot LaunchAgent | `~/Library/LaunchAgents/com.bluebird.watchdog-bot.plist` |
-| Notifier LaunchAgent | `~/Library/LaunchAgents/com.bluebird.watchdog-notifier.plist` |
-| Durable state | `~/Library/Application Support/BLUEBIRD/state/` |
-| Logs | `/tmp/bluebird-watchdog.log` |
+| Bot watchdog | `~/Library/Application Support/BLUEBIRD-LIVE/run-check-bot.sh` |
+| Notifier watchdog | `~/Library/Application Support/BLUEBIRD-LIVE/run-check-notifier.sh` |
+| Bot LaunchAgent | `~/Library/LaunchAgents/com.bluebird-live.watchdog-bot.plist` |
+| Notifier LaunchAgent | `~/Library/LaunchAgents/com.bluebird-live.watchdog-notifier.plist` |
+| Durable state | `~/Library/Application Support/BLUEBIRD-LIVE/state/` |
+| Logs | `/tmp/bluebird-live-watchdog.log` |
 
 **Why local filesystem?** macOS launchd cannot execute scripts on external APFS volumes with `noowners` flag (EPERM). The local watchdog scripts are full copies that read the database on the external volume but write state locally.
 
@@ -365,21 +383,18 @@ Both bot and notifier have watchdog scripts that auto-restart on crash. These ru
 
 ```bash
 # Check LaunchAgents status
-launchctl list | grep bluebird
+launchctl list | grep bluebird-live
 
 # Manual checks (run local scripts directly)
-bash "$HOME/Library/Application Support/BLUEBIRD/run-check-bot.sh"
-bash "$HOME/Library/Application Support/BLUEBIRD/run-check-notifier.sh"
+bash "$HOME/Library/Application Support/BLUEBIRD-LIVE/run-check-bot.sh"
+bash "$HOME/Library/Application Support/BLUEBIRD-LIVE/run-check-notifier.sh"
 
 # View watchdog log
-tail -f /tmp/bluebird-watchdog.log
+tail -f /tmp/bluebird-live-watchdog.log
 
 # Reset crash loop pause (after fixing root cause)
-rm "$HOME/Library/Application Support/BLUEBIRD/state/crash-loop-bot.json"
-rm "$HOME/Library/Application Support/BLUEBIRD/state/crash-loop-notifier.json"
-
-# Sync local scripts with repo (after editing scripts/check_*.sh)
-bash scripts/sync-watchdog-scripts.sh
+rm "$HOME/Library/Application Support/BLUEBIRD-LIVE/state/crash-loop-bot.json"
+rm "$HOME/Library/Application Support/BLUEBIRD-LIVE/state/crash-loop-notifier.json"
 ```
 
 ### Check Service Status
@@ -434,7 +449,7 @@ Quarantined fills are stored in `unmatched_fills` for audit but won't be reproce
 
 ## API Endpoints
 
-Key endpoints on `http://localhost:8000`:
+Key endpoints on `http://localhost:8001` (LIVE):
 - `GET /health` - Service health and regime
 - `GET /api/risk/status` - Current equity, daily P/L, drawdown
 - `GET /api/risk/overlay` - Risk overlay mode, triggers, telemetry
@@ -450,10 +465,57 @@ Key endpoints on `http://localhost:8000`:
 
 ## Dashboard
 
-React app in `dashboard/` using Vite:
+React app in `dashboard/` using Vite (built with VITE_API_PORT=8001):
 ```bash
 cd dashboard
 npm install
-npm run dev      # Development server on :5173
-npm run build    # Production build to dist/
+VITE_API_PORT=8001 npm run dev -- --port 5174   # Development server on :5174
+VITE_API_PORT=8001 npm run build                 # Production build to dist/
 ```
+
+## Performance Updates
+
+When user asks for a "performance update", follow this exact sequence:
+
+### 1. Always check system time FIRST
+```bash
+date  # Get actual Mac system time - NEVER guess the date
+```
+
+### 2. Query data sources (use the RIGHT source for each metric)
+
+```bash
+# Bot health (LIVE on port 8001)
+curl -s http://localhost:8001/health
+
+# Equity & Daily P/L — USE DATABASE (accurate snapshots)
+sqlite3 data/bluebird.db "SELECT timestamp, equity, daily_pnl, daily_pnl_pct FROM equity_snapshots ORDER BY timestamp DESC LIMIT 1;"
+
+# Recent daily summaries — USE DATABASE
+sqlite3 data/bluebird.db "SELECT date, realized_pnl, starting_equity, ending_equity FROM daily_summary ORDER BY date DESC LIMIT 3;"
+
+# Current positions — USE ALPACA API (source of truth)
+curl -s http://localhost:8001/api/positions
+
+# Risk overlay status
+curl -s http://localhost:8001/api/risk/overlay
+```
+
+**Data source accuracy:**
+| Metric | Source | Why |
+|--------|--------|-----|
+| Positions | Alpaca API | DB trades incomplete (pre-Dec 10 missing) |
+| Equity | DB equity_snapshots | Written every minute, accurate |
+| Daily P/L | DB daily_summary | Aggregated correctly |
+| Unrealized P/L | Alpaca API | Real-time from broker |
+
+### 3. Calculate grid profit
+Grid profit = Current Equity - Grid Starting Equity ($90,276.26 from Dec 2, 2025)
+
+### 4. Format output with date header
+Always include the actual date/time in the report header:
+```
+## Performance Update — [Day] [Month] [Date], [Year] @ [Time] [TZ]
+```
+
+**CRITICAL**: Never infer the date from conversation flow. Always run `date` command.

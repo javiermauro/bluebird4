@@ -26,6 +26,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # =========================================
+# TRADING MODE (LIVE / PAPER)
+# =========================================
+# Single source of truth for live/paper mode
+# This is checked by AlpacaClient to set paper=True/False
+TRADING_MODE = "LIVE"
+PAPER_TRADING = False  # False = LIVE TRADING with real money
+
+# =========================================
 # MODULE-LEVEL FEE CONSTANTS
 # =========================================
 # These are also defined in UltraConfig class, but exposed here for direct access
@@ -46,7 +54,11 @@ class UltraConfig:
     # =========================================
     API_KEY = os.getenv("ALPACA_API_KEY")
     SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-    BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+    BASE_URL = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")  # LIVE API URL
+
+    # LIVE TRADING MODE - Single source of truth
+    TRADING_MODE = TRADING_MODE  # From module level
+    PAPER_TRADING = PAPER_TRADING  # False = LIVE, True = PAPER
 
     # Alpaca API timeout settings (prevents hung event loop)
     ALPACA_API_TIMEOUT_SECONDS = 10.0       # Default timeout for most API calls
@@ -59,14 +71,13 @@ class UltraConfig:
     SYMBOL = "SOL/USD"  # Primary symbol (best performer)
 
     # Multi-asset diversification (reduces single-asset risk)
-    # Top altcoins - removed BTC due to low volatility underperformance
+    # LIVE ACCOUNT: 3 symbols for correlation protection + trade frequency
     SYMBOLS = [
-        "SOL/USD",   # Solana - Best performer (35% allocation)
-        "LTC/USD",   # Litecoin - Good volume (25% allocation)
-        "AVAX/USD",  # Avalanche - High volatility (25% allocation)
-        "DOGE/USD",  # Dogecoin - Highest volatility (15% allocation) - Added Dec 31
+        "AVAX/USD",  # Avalanche - High volatility (45% allocation)
+        "LTC/USD",   # Litecoin - Good volume (10% allocation)
+        "DOGE/USD",  # Dogecoin - Most frequent fills (45% allocation)
     ]
-    MAX_EXPOSURE_PER_ASSET = 0.35  # Max 35% equity in any single asset (SOL)
+    MAX_EXPOSURE_PER_ASSET = 0.45  # Max 45% equity in any single asset
     
     # Timeframe: Grid bot uses 1-minute bars from Alpaca websocket stream
     # (Alpaca's subscribe_bars() defaults to 1-min bars)
@@ -255,26 +266,22 @@ class UltraConfig:
     # investment_ratio: Portion of equity allocated to this symbol's grid
     # OPTIMIZED FOR MORE TRADES & FASTER RECOVERY (Dec 9, 2025)
     # Tighter ranges = more grid completions = more profits
+    # LIVE ACCOUNT GRID CONFIGS: 2 symbols with 90/10 split
     GRID_CONFIGS = {
-        "SOL/USD": {
-            "num_grids": 5,        # 5 grids = 6 levels, ~1.30% spacing
-            "range_pct": 0.065,    # 6.5% range for 1.30% per grid
-            "investment_ratio": 0.35  # 35% - best performer
+        "AVAX/USD": {
+            "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing
+            "range_pct": 0.087,    # 8.7% range for 1.45% per grid
+            "investment_ratio": 0.45  # 45% allocation
         },
         "LTC/USD": {
             "num_grids": 6,        # 6 grids = 7 levels, ~1.40% spacing
             "range_pct": 0.084,    # 8.4% range for 1.40% per grid
-            "investment_ratio": 0.25  # 25%
-        },
-        "AVAX/USD": {
-            "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing
-            "range_pct": 0.087,    # 8.7% range for 1.45% per grid
-            "investment_ratio": 0.25  # 25%
+            "investment_ratio": 0.10  # 10% - secondary for correlation
         },
         "DOGE/USD": {
             "num_grids": 6,        # 6 grids = 7 levels, ~1.67% spacing
-            "range_pct": 0.10,     # 10% range - highest volatility coin
-            "investment_ratio": 0.15  # 15% - conservative for meme coin
+            "range_pct": 0.10,     # 10% range - highest volatility
+            "investment_ratio": 0.45  # 45% allocation - frequent fills
         }
     }
 
@@ -312,6 +319,28 @@ class UltraConfig:
     OVERSHOOT_REBALANCE_COOLDOWN = 30  # Minutes between rebalances per symbol (prevents churn)
 
     # =========================================
+    # SMART GRID ADVISOR (Phase 1: Shadow Mode)
+    # =========================================
+    # Monitors grid drift and recommends recentering.
+    # Phase 1: Advisory only - logs recommendations but doesn't execute.
+    # Does NOT add a third rebalance system - respects existing range-break/overshoot.
+
+    SMART_GRID_ENABLED = True
+    SMART_GRID_ENFORCE = False  # Phase 1: advisory only, no execution
+
+    # Drift thresholds (with hysteresis to prevent oscillation)
+    SMART_GRID_DRIFT_TRIGGER = 0.55   # Recommend recenter when drift >= 55% toward edge
+    SMART_GRID_DRIFT_CLEAR = 0.40     # Clear recommendation when drift <= 40%
+    SMART_GRID_COOLDOWN_MINUTES = 60  # Min time between recommendations per symbol
+
+    # Fee floor (for future spacing adjustments in Phase 2+)
+    SMART_GRID_MIN_SPACING_PCT = 0.85  # Never go below 0.85% spacing (~0.25% profit after fees)
+
+    # Evaluation frequency (time-based, not bar-based)
+    # Background task ensures evaluation even during WS stalls
+    SMART_GRID_EVAL_INTERVAL_SECONDS = 300  # 5 minutes
+
+    # =========================================
     # FAST FILL DETECTION (Near Real-Time)
     # =========================================
     # Lightweight per-tick check for limit order fills
@@ -344,6 +373,7 @@ class UltraConfig:
         "SOL/USD": (2, 4),   # $0.01 price, 0.0001 qty
         "LTC/USD": (2, 5),   # $0.01 price, 0.00001 qty
         "AVAX/USD": (2, 4),  # $0.01 price, 0.0001 qty
+        "DOGE/USD": (4, 1),  # $0.0001 price, 0.1 qty (low price coin)
     }
 
     # =========================================

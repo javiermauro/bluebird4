@@ -1,6 +1,8 @@
 # Active Context — Current Focus
 
 ## Now
+- [2026-01-07 16:30] **DASHBOARD THEME OVERHAUL** - Replaced harsh red/crimson "Control Room Alert" theme with calming teal/slate "Deep Ocean" theme. New fonts (IBM Plex Sans/Mono), new color palette, softer on the eyes. Added SmartGrid Advisor panel to dashboard with drift status per symbol.
+- [2026-01-07 16:00] **SMART GRID ADVISOR (Phase 1) COMPLETE** - Implemented `src/strategy/smart_grid_advisor.py` (shadow-mode drift recommendations + hysteresis: 55% trigger, 40% clear, 60min cooldown). Wired into `src/execution/bot_grid.py` with periodic evaluation task (handles WS stalls). API `GET /api/smartgrid/status` serves data via state-file fallback `data/state/smart-grid-advisor.json`.
 - [2026-01-01 22:30] **🏆 BEST DAY EVER: +$6,283 (+6.2%)** - Peak equity $107,138.56. Grid sold into rally perfectly. All 4 symbols cycling. 30D grid profit now +$16,862 (+18.7%). Trusted the system — it delivered.
 - [2026-01-01 17:20] **ALL 9 PROTECTION SYSTEMS VERIFIED** - Comprehensive verification passed. All systems working.
 - [2026-01-01 15:42] **SYSTEM CRASH RECOVERED** - Mac crashed, bot died. Restarted successfully.

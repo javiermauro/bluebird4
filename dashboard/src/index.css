@@ -1,73 +1,89 @@
 @import "tailwindcss";
 
-/* Playfair Display for elegant headers + DM Sans for refined body text */
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+/* IBM Plex for professional clarity + JetBrains Mono for data */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   BLUEBIRD PRIVATE - Midnight Luxury Trading Suite
-   Premium finance aesthetic for discerning traders
+   BLUEBIRD LIVE - Deep Ocean Trading Suite
+   Professional trading interface with calming teal/slate palette
+   ⚠️ THIS IS THE LIVE INSTANCE - NOT PAPER TRADING
 ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* Midnight Navy Palette */
-  --midnight-deep: #080c14;
-  --midnight-base: #0d1421;
-  --midnight-surface: #151d2e;
-  --midnight-elevated: #1a2540;
-  --midnight-hover: #1f2d4a;
+  /* Deep Ocean Palette - Calming slate/teal */
+  --midnight-deep: #0a0f14;
+  --midnight-base: #0d1419;
+  --midnight-surface: #131a21;
+  --midnight-elevated: #1a232c;
+  --midnight-hover: #212d38;
 
-  /* Luxury Gold */
-  --gold-primary: #d4af37;
-  --gold-light: #e8c547;
-  --gold-muted: #a08a3c;
-  --gold-glow: rgba(212, 175, 55, 0.15);
+  /* Teal Accent - Primary accent (calming but professional) */
+  --gold-primary: #14b8a6;
+  --gold-light: #2dd4bf;
+  --gold-muted: #0d9488;
+  --gold-glow: rgba(20, 184, 166, 0.2);
 
-  /* Rose Gold Accent */
-  --rose-gold: #b76e79;
-  --rose-glow: rgba(183, 110, 121, 0.15);
+  /* Soft Amber - Secondary accent */
+  --rose-gold: #f59e0b;
+  --rose-glow: rgba(245, 158, 11, 0.2);
 
-  /* Text Hierarchy */
-  --text-primary: #f5f0e6;
-  --text-secondary: #b8c1d1;
-  --text-muted: #6b7a94;
+  /* Text Hierarchy - Softer, easier on eyes */
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
 
-  /* Semantic Colors */
-  --success: #3ecf8e;
-  --success-muted: #2d9b6d;
-  --success-glow: rgba(62, 207, 142, 0.12);
-  --danger: #e57373;
-  --danger-muted: #c45c5c;
-  --danger-glow: rgba(229, 115, 115, 0.12);
-  --info: #64b5f6;
-  --info-glow: rgba(100, 181, 246, 0.12);
+  /* Semantic Colors - Clear but not harsh */
+  --success: #10b981;
+  --success-muted: #059669;
+  --success-glow: rgba(16, 185, 129, 0.15);
+  --danger: #f87171;
+  --danger-muted: #ef4444;
+  --danger-glow: rgba(248, 113, 113, 0.15);
+  --info: #38bdf8;
+  --info-glow: rgba(56, 189, 248, 0.15);
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-  --shadow-gold: 0 4px 20px rgba(212, 175, 55, 0.15);
+  /* Shadows - Subtle depth */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
+  --shadow-gold: 0 4px 24px rgba(20, 184, 166, 0.2);
 
   /* Risk Overlay Colors */
-  --risk-normal: #3ecf8e;
-  --risk-normal-bg: rgba(62, 207, 142, 0.08);
-  --risk-normal-glow: rgba(62, 207, 142, 0.25);
-  --risk-recovery: #f0b429;
-  --risk-recovery-bg: rgba(240, 180, 41, 0.1);
-  --risk-recovery-glow: rgba(240, 180, 41, 0.3);
-  --risk-off: #ff6b6b;
-  --risk-off-bg: rgba(255, 107, 107, 0.12);
-  --risk-off-glow: rgba(255, 107, 107, 0.35);
+  --risk-normal: #10b981;
+  --risk-normal-bg: rgba(16, 185, 129, 0.1);
+  --risk-normal-glow: rgba(16, 185, 129, 0.3);
+  --risk-recovery: #fbbf24;
+  --risk-recovery-bg: rgba(251, 191, 36, 0.12);
+  --risk-recovery-glow: rgba(251, 191, 36, 0.35);
+  --risk-off: #f87171;
+  --risk-off-bg: rgba(248, 113, 113, 0.15);
+  --risk-off-glow: rgba(248, 113, 113, 0.4);
 
-  /* Orchestrator Colors - Teal/Cyan theme for inventory management */
-  --orch-full: #22d3ee;
-  --orch-full-bg: rgba(34, 211, 238, 0.08);
-  --orch-full-glow: rgba(34, 211, 238, 0.25);
-  --orch-reduced: #fbbf24;
-  --orch-reduced-bg: rgba(251, 191, 36, 0.1);
-  --orch-reduced-glow: rgba(251, 191, 36, 0.3);
+  /* Orchestrator Colors - Amber/Orange for inventory states */
+  --orch-full: #fbbf24;
+  --orch-full-bg: rgba(251, 191, 36, 0.1);
+  --orch-full-glow: rgba(251, 191, 36, 0.3);
+  --orch-reduced: #fb923c;
+  --orch-reduced-bg: rgba(251, 146, 60, 0.12);
+  --orch-reduced-glow: rgba(251, 146, 60, 0.35);
   --orch-defensive: #f87171;
-  --orch-defensive-bg: rgba(248, 113, 113, 0.12);
-  --orch-defensive-glow: rgba(248, 113, 113, 0.35);
+  --orch-defensive-bg: rgba(248, 113, 113, 0.15);
+  --orch-defensive-glow: rgba(248, 113, 113, 0.4);
+
+  /* SmartGrid Advisor Colors - Cyan/Blue for grid intelligence */
+  --smartgrid-active: #06b6d4;
+  --smartgrid-active-bg: rgba(6, 182, 212, 0.1);
+  --smartgrid-active-glow: rgba(6, 182, 212, 0.3);
+  --smartgrid-shadow: #8b5cf6;
+  --smartgrid-shadow-bg: rgba(139, 92, 246, 0.1);
+  --smartgrid-recommend: #a78bfa;
+  --smartgrid-recommend-bg: rgba(167, 139, 250, 0.12);
+  --smartgrid-recommend-glow: rgba(167, 139, 250, 0.35);
+
+  /* LIVE indicator - Teal instead of red (still visible but calmer) */
+  --live-red: #0d9488;
+  --live-red-bright: #14b8a6;
+  --live-glow: rgba(20, 184, 166, 0.5);
 }
 
 * {
@@ -82,23 +98,111 @@ body {
   margin: 0;
   background: var(--midnight-deep);
   color: var(--text-primary);
-  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'IBM Plex Sans', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   line-height: 1.5;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   BACKGROUND TEXTURE - Subtle noise overlay
+   LIVE TRADING BANNER - Always visible warning
+═══════════════════════════════════════════════════════════════════════════ */
+
+.live-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  background: linear-gradient(90deg, #134e4a 0%, #0f766e 50%, #134e4a 100%);
+  border-bottom: 2px solid var(--live-red);
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  box-shadow: 0 4px 20px rgba(20, 184, 166, 0.3);
+}
+
+.live-beacon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  background: var(--live-red-bright);
+  border-radius: 50%;
+  animation: live-pulse 1.5s ease-in-out infinite;
+}
+
+.live-beacon::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: 2px solid var(--live-red-bright);
+  border-radius: 50%;
+  animation: live-ring 1.5s ease-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--live-glow);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 20px 5px var(--live-glow);
+    opacity: 0.8;
+  }
+}
+
+@keyframes live-ring {
+  0% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2);
+    opacity: 0;
+  }
+}
+
+.live-text {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: #ecfdf5;
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+}
+
+.live-text-warning {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-weight: 500;
+  font-size: 0.75rem;
+  color: #a7f3d0;
+  letter-spacing: 0.05em;
+}
+
+/* Offset body content for fixed banner */
+.luxury-bg {
+  padding-top: 44px !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BACKGROUND TEXTURE - Deep ocean calm atmosphere
 ═══════════════════════════════════════════════════════════════════════════ */
 
 .luxury-bg {
   position: relative;
   min-height: 100vh;
   background:
-    radial-gradient(ellipse at 20% 0%, rgba(212, 175, 55, 0.03) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 100%, rgba(183, 110, 121, 0.02) 0%, transparent 50%),
-    var(--midnight-deep);
+    radial-gradient(ellipse at 20% 0%, rgba(20, 184, 166, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 100%, rgba(56, 189, 248, 0.02) 0%, transparent 50%),
+    linear-gradient(180deg, #0a0f14 0%, #0d1419 100%);
 }
 
 .luxury-bg::before {
@@ -109,31 +213,50 @@ body {
   right: 0;
   bottom: 0;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-  opacity: 0.02;
+  opacity: 0.03;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Scanline effect for industrial feel */
+.luxury-bg::after {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
   pointer-events: none;
   z-index: 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   TYPOGRAPHY
+   TYPOGRAPHY - Clean Professional
 ═══════════════════════════════════════════════════════════════════════════ */
 
 .font-display {
-  font-family: 'Playfair Display', Georgia, serif;
+  font-family: 'IBM Plex Sans', sans-serif;
 }
 
 .font-body {
-  font-family: 'DM Sans', sans-serif;
+  font-family: 'IBM Plex Sans', sans-serif;
 }
 
 .font-mono {
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', 'SF Mono', monospace;
 }
 
 h1, h2, h3 {
-  font-family: 'Playfair Display', Georgia, serif;
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -142,8 +265,8 @@ h1, h2, h3 {
 
 .card {
   background: var(--midnight-surface);
-  border: 1px solid rgba(212, 175, 55, 0.08);
-  border-radius: 16px;
+  border: 1px solid rgba(20, 184, 166, 0.1);
+  border-radius: 12px;
   box-shadow: var(--shadow-md);
   position: relative;
   overflow: hidden;
@@ -156,43 +279,45 @@ h1, h2, h3 {
   top: 0;
   left: 0;
   right: 0;
-  height: 1px;
+  height: 2px;
   background: linear-gradient(90deg,
     transparent,
-    rgba(212, 175, 55, 0.3),
+    rgba(20, 184, 166, 0.4),
     transparent
   );
 }
 
 .card:hover {
-  border-color: rgba(212, 175, 55, 0.15);
+  border-color: rgba(20, 184, 166, 0.2);
   box-shadow: var(--shadow-lg), var(--shadow-gold);
   transform: translateY(-1px);
 }
 
 .card-header {
-  padding: 1.25rem 1.5rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  background: rgba(20, 184, 166, 0.02);
 }
 
 .card-title {
-  font-family: 'Playfair Display', serif;
-  font-size: 1.1rem;
-  font-weight: 500;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
   color: var(--text-primary);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .card-body {
   padding: 1.5rem;
 }
 
-/* Gold accent card variant */
+/* Accent card variant */
 .card-gold {
-  border-color: rgba(212, 175, 55, 0.2);
+  border-color: rgba(20, 184, 166, 0.25);
 }
 
 .card-gold::before {
@@ -201,7 +326,7 @@ h1, h2, h3 {
     var(--gold-primary),
     transparent
   );
-  opacity: 0.5;
+  opacity: 0.6;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -218,21 +343,22 @@ h1, h2, h3 {
 
 .metric:hover {
   background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(212, 175, 55, 0.1);
+  border-color: rgba(20, 184, 166, 0.15);
 }
 
 .metric-label {
+  font-family: 'IBM Plex Sans', sans-serif;
   font-size: 0.7rem;
-  font-weight: 600;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-muted);
   margin-bottom: 0.5rem;
 }
 
 .metric-value {
-  font-family: 'Playfair Display', serif;
-  font-size: 1.75rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 1.5rem;
   font-weight: 500;
   color: var(--text-primary);
   line-height: 1.2;
@@ -261,7 +387,7 @@ h1, h2, h3 {
 .badge-gold {
   background: var(--gold-glow);
   color: var(--gold-primary);
-  border: 1px solid rgba(212, 175, 55, 0.2);
+  border: 1px solid rgba(220, 38, 38, 0.3);
 }
 
 .badge-success {
@@ -4664,5 +4790,372 @@ input:focus {
   .equity-stats {
     flex-wrap: wrap;
     gap: 0.75rem;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SMARTGRID ADVISOR - Grid Intelligence Panel
+═══════════════════════════════════════════════════════════════════════════ */
+
+.smartgrid-banner {
+  background: var(--midnight-surface);
+  border: 1px solid rgba(6, 182, 212, 0.15);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.smartgrid-banner::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--smartgrid-active), transparent);
+  border-radius: 12px 12px 0 0;
+}
+
+.smartgrid-banner:hover {
+  border-color: rgba(6, 182, 212, 0.25);
+  box-shadow: 0 0 20px var(--smartgrid-active-glow);
+}
+
+/* Shadow mode indicator */
+.smartgrid-banner-shadow {
+  border-color: rgba(139, 92, 246, 0.15);
+}
+
+.smartgrid-banner-shadow::before {
+  background: linear-gradient(90deg, transparent, var(--smartgrid-shadow), transparent);
+}
+
+/* Recommending state */
+.smartgrid-banner-recommend {
+  border-color: rgba(167, 139, 250, 0.25);
+  background: linear-gradient(135deg, var(--midnight-surface), var(--smartgrid-recommend-bg));
+  animation: smartgrid-pulse 3s ease-in-out infinite;
+}
+
+.smartgrid-banner-recommend::before {
+  background: linear-gradient(90deg, var(--smartgrid-recommend), var(--smartgrid-active), var(--smartgrid-recommend));
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes smartgrid-pulse {
+  0%, 100% { box-shadow: 0 0 15px var(--smartgrid-recommend-glow); }
+  50% { box-shadow: 0 0 30px var(--smartgrid-recommend-glow), 0 0 50px rgba(167, 139, 250, 0.15); }
+}
+
+.smartgrid-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.smartgrid-mode-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.smartgrid-mode-icon {
+  font-size: 1.1rem;
+}
+
+.smartgrid-mode-text {
+  color: var(--smartgrid-active);
+}
+
+.smartgrid-banner-shadow .smartgrid-mode-text {
+  color: var(--smartgrid-shadow);
+}
+
+.smartgrid-banner-recommend .smartgrid-mode-text {
+  color: var(--smartgrid-recommend);
+}
+
+.smartgrid-status-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.smartgrid-drift-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.8rem;
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.15);
+  border-radius: 8px;
+}
+
+.smartgrid-drift-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.smartgrid-drift-value {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--smartgrid-active);
+}
+
+.smartgrid-drift-value.warning {
+  color: var(--risk-recovery);
+}
+
+.smartgrid-drift-value.recommend {
+  color: var(--smartgrid-recommend);
+}
+
+.smartgrid-expand-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+  transition: transform 0.3s ease;
+}
+
+.smartgrid-chevron-icon {
+  width: 20px;
+  height: 20px;
+  transition: transform 0.3s ease;
+}
+
+.smartgrid-chevron-icon.expanded {
+  transform: rotate(180deg);
+}
+
+/* Expanded Panel */
+.smartgrid-expanded-panel {
+  margin-top: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 1.25rem;
+  background: var(--midnight-elevated);
+  border: 1px solid rgba(6, 182, 212, 0.12);
+  border-radius: 12px;
+  animation: dropdown-appear 0.25s ease-out;
+}
+
+.smartgrid-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.25rem;
+}
+
+.smartgrid-panel-section {
+  background: var(--midnight-surface);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.smartgrid-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.smartgrid-section-icon {
+  font-size: 1rem;
+}
+
+.smartgrid-section-title {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+/* Symbol drift cards */
+.smartgrid-symbols-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.smartgrid-symbol-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: rgba(6, 182, 212, 0.04);
+  border: 1px solid rgba(6, 182, 212, 0.1);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.smartgrid-symbol-card:hover {
+  border-color: rgba(6, 182, 212, 0.2);
+  background: rgba(6, 182, 212, 0.06);
+}
+
+.smartgrid-symbol-card.recommending {
+  border-color: rgba(167, 139, 250, 0.3);
+  background: var(--smartgrid-recommend-bg);
+}
+
+.smartgrid-symbol-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.smartgrid-symbol-drift {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.smartgrid-drift-bar {
+  width: 60px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.smartgrid-drift-bar::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.2);
+  transform: translateX(-50%);
+}
+
+.smartgrid-drift-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+  position: absolute;
+}
+
+.smartgrid-drift-fill.up {
+  left: 50%;
+  background: linear-gradient(90deg, var(--smartgrid-active), var(--success));
+}
+
+.smartgrid-drift-fill.down {
+  right: 50%;
+  background: linear-gradient(270deg, var(--smartgrid-active), var(--danger));
+}
+
+.smartgrid-drift-fill.warning {
+  background: linear-gradient(90deg, var(--risk-recovery), var(--smartgrid-recommend)) !important;
+}
+
+.smartgrid-drift-pct {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 500;
+  min-width: 45px;
+  text-align: right;
+}
+
+.smartgrid-drift-pct.safe { color: var(--smartgrid-active); }
+.smartgrid-drift-pct.warning { color: var(--risk-recovery); }
+.smartgrid-drift-pct.recommend { color: var(--smartgrid-recommend); }
+
+/* Config section */
+.smartgrid-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+}
+
+.smartgrid-config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.smartgrid-config-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.smartgrid-config-value {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+/* Status indicator */
+.smartgrid-status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.smartgrid-status-indicator.shadow {
+  background: var(--smartgrid-shadow-bg);
+  color: var(--smartgrid-shadow);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.smartgrid-status-indicator.active {
+  background: var(--smartgrid-active-bg);
+  color: var(--smartgrid-active);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+}
+
+.smartgrid-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .smartgrid-banner-content {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .smartgrid-expand-chevron {
+    position: absolute;
+    right: 1rem;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .smartgrid-panel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .smartgrid-config-grid {
+    grid-template-columns: 1fr;
   }
 }
