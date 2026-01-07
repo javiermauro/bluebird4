@@ -89,10 +89,10 @@ const TriggerGauge = ({ label, value, threshold, max, format, invert = false, di
 };
 
 function App() {
-  // Backend connection settings
+  // Backend connection settings - LIVE INSTANCE (Port 8001)
   // NOTE: The dashboard may be opened from another machine; avoid hardcoding localhost.
   const API_HOST = import.meta.env.VITE_API_HOST || window.location.hostname;
-  const API_PORT = import.meta.env.VITE_API_PORT || '8000';
+  const API_PORT = import.meta.env.VITE_API_PORT || '8001';  // LIVE default
   const API_BASE = `${window.location.protocol}//${API_HOST}:${API_PORT}`;
   const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const WS_URL = `${WS_PROTOCOL}://${API_HOST}:${API_PORT}/ws`;
@@ -108,13 +108,11 @@ function App() {
   const [autoRefreshInterval, setAutoRefreshInterval] = useState(5); // seconds
   const [data, setData] = useState({});
 
-  // Symbol selector state
-  const [selectedSymbol, setSelectedSymbol] = useState('SOL/USD');
+  // Symbol selector state - LIVE INSTANCE: Only AVAX (90%) + LTC (10%)
+  const [selectedSymbol, setSelectedSymbol] = useState('AVAX/USD');
   const [symbolPrices, setSymbolPrices] = useState({
-    'SOL/USD': { price: 0, change: 0, changePercent: 0, history: [] },
-    'LTC/USD': { price: 0, change: 0, changePercent: 0, history: [] },
     'AVAX/USD': { price: 0, change: 0, changePercent: 0, history: [] },
-    'DOGE/USD': { price: 0, change: 0, changePercent: 0, history: [] }
+    'LTC/USD': { price: 0, change: 0, changePercent: 0, history: [] }
   });
 
   const [ai, setAi] = useState({
@@ -376,22 +374,20 @@ function App() {
     error: null
   });
 
-  // Per-symbol chart data storage
+  // Per-symbol chart data storage - LIVE INSTANCE: AVAX + LTC only
   const [symbolChartData, setSymbolChartData] = useState({
-    'SOL/USD': { labels: [], data: [] },
-    'LTC/USD': { labels: [], data: [] },
     'AVAX/USD': { labels: [], data: [] },
-    'DOGE/USD': { labels: [], data: [] }
+    'LTC/USD': { labels: [], data: [] }
   });
 
-  // Computed chart data based on selected symbol
+  // Computed chart data based on selected symbol - LIVE uses amber/crimson
   const chartData = {
     labels: symbolChartData[selectedSymbol]?.labels || [],
     datasets: [{
       label: selectedSymbol,
       data: symbolChartData[selectedSymbol]?.data || [],
-      borderColor: '#d4af37',
-      backgroundColor: 'rgba(212, 175, 55, 0.08)',
+      borderColor: '#f59e0b',
+      backgroundColor: 'rgba(245, 158, 11, 0.1)',
       tension: 0.4,
       fill: true,
       pointRadius: 0,
@@ -427,7 +423,7 @@ function App() {
       ws.current.onopen = () => {
         wsReconnectAttempts.current = 0;
         setStatus('connected');
-        addLog('INFO', `Connected to BlueBird Private (${API_HOST}:${API_PORT})`);
+        addLog('INFO', `Connected to BlueBird LIVE (${API_HOST}:${API_PORT})`);
       };
 
       ws.current.onmessage = (event) => {
@@ -572,8 +568,8 @@ function App() {
     setSymbolChartData(prev => {
       const updated = { ...prev };
 
-      // Update active symbol from stream
-      const activeSymbol = symbol || 'SOL/USD';
+      // Update active symbol from stream - LIVE default is AVAX
+      const activeSymbol = symbol || 'AVAX/USD';
       if (updated[activeSymbol] && price) {
         const newLabels = [...updated[activeSymbol].labels, timeLabel];
         const newData = [...updated[activeSymbol].data, price];
@@ -1016,22 +1012,32 @@ function App() {
 
   return (
     <div className="luxury-bg">
+      {/* ═══════════════════════════════════════════════════════════════════
+          LIVE TRADING BANNER - Always visible warning
+      ═══════════════════════════════════════════════════════════════════ */}
+      <div className="live-banner">
+        <div className="live-beacon" />
+        <span className="live-text">LIVE TRADING</span>
+        <span className="live-text-warning">Real Money • AVAX/LTC • Port 8001</span>
+        <div className="live-beacon" />
+      </div>
+
       <div className="relative z-10 p-6 min-h-screen">
         {/* ═══════════════════════════════════════════════════════════════════
             HEADER
         ═══════════════════════════════════════════════════════════════════ */}
         <header className="mb-6">
           <div className="flex items-center justify-between">
-            {/* Logo & Title */}
+            {/* Logo & Title - LIVE INSTANCE */}
             <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#d4af37] to-[#a08a3c] flex items-center justify-center shadow-lg glow-gold">
-                <span className="text-[#080c14] font-display text-xl font-bold">B</span>
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#dc2626] to-[#991b1b] flex items-center justify-center shadow-lg" style={{ boxShadow: '0 0 20px rgba(220, 38, 38, 0.4)' }}>
+                <span className="text-white font-display text-xl font-bold">B</span>
               </div>
               <div>
-                <h1 className="font-display text-2xl text-[#f5f0e6] tracking-tight">
-                  BlueBird <span className="text-gold">Private</span>
+                <h1 className="font-display text-2xl text-[#fafafa] tracking-wide">
+                  BLUEBIRD <span className="text-[#ef4444]">LIVE</span>
                 </h1>
-                <p className="text-muted text-sm">Intelligent Grid Trading</p>
+                <p className="text-[#f59e0b] text-sm font-medium tracking-wider uppercase">Real Money Trading</p>
               </div>
             </div>
 
@@ -2726,20 +2732,19 @@ function App() {
                     <span className={getSignalClass(ai.signal)}>{ai.signal}</span>
                   </div>
 
-                  {/* Symbol Selector - Luxury Ticker Strip */}
+                  {/* Symbol Selector - LIVE: AVAX (90%) + LTC (10%) */}
                   <div className="px-4 py-3 border-b border-[rgba(255,255,255,0.04)]">
                     <div className="flex gap-2">
-                      {['SOL/USD', 'LTC/USD', 'AVAX/USD', 'DOGE/USD'].map((sym) => {
+                      {['AVAX/USD', 'LTC/USD'].map((sym) => {
                         const isSelected = selectedSymbol === sym;
                         const symData = symbolPrices[sym] || { price: 0, changePercent: 0 };
                         const hasPosition = positions.some(p => p.symbol?.includes(sym.split('/')[0]));
                         const isPositive = symData.changePercent >= 0;
                         const cryptoIcons = {
-                          'SOL/USD': '◎',
-                          'LTC/USD': 'Ł',
                           'AVAX/USD': 'A',
-                          'DOGE/USD': 'Ð'
+                          'LTC/USD': 'Ł'
                         };
+                        const allocationPct = sym === 'AVAX/USD' ? '90%' : '10%';
 
                         return (
                           <button
@@ -2749,14 +2754,14 @@ function App() {
                               group relative flex-1 px-3 py-2.5 rounded-xl
                               transition-all duration-300 ease-out
                               ${isSelected
-                                ? 'bg-gradient-to-b from-[rgba(212,175,55,0.15)] to-[rgba(212,175,55,0.05)] border border-[rgba(212,175,55,0.4)] shadow-[0_0_20px_rgba(212,175,55,0.15)]'
+                                ? 'bg-gradient-to-b from-[rgba(220,38,38,0.15)] to-[rgba(220,38,38,0.05)] border border-[rgba(220,38,38,0.4)] shadow-[0_0_20px_rgba(220,38,38,0.15)]'
                                 : 'bg-[rgba(255,255,255,0.02)] border border-transparent hover:bg-[rgba(255,255,255,0.04)] hover:border-[rgba(255,255,255,0.08)]'
                               }
                             `}
                           >
-                            {/* Animated gold underline for selected */}
+                            {/* Animated crimson underline for selected */}
                             {isSelected && (
-                              <div className="absolute -bottom-px left-1/2 -translate-x-1/2 w-12 h-0.5 bg-gradient-to-r from-transparent via-[#d4af37] to-transparent" />
+                              <div className="absolute -bottom-px left-1/2 -translate-x-1/2 w-12 h-0.5 bg-gradient-to-r from-transparent via-[#dc2626] to-transparent" />
                             )}
 
                             {/* Position indicator dot */}
@@ -3317,8 +3322,8 @@ function App() {
                   <span><span className="text-muted">Max DD:</span> <span className="text-danger">10%</span></span>
                   <span><span className="text-muted">Stop Loss:</span> <span className="text-danger">10% below grid</span></span>
                 </div>
-                <div className="text-muted text-sm">
-                  BlueBird Private v4.0 · {Object.keys(grid.summaries || {}).length || 4} Assets
+                <div className="text-[#f59e0b] text-sm font-medium">
+                  BlueBird LIVE v4.0 · {Object.keys(grid.summaries || {}).length || 2} Assets · Port 8001
                 </div>
               </div>
             </footer>
