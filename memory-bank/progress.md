@@ -1,8 +1,9 @@
 # Progress — Status & History
 
 ## Current Status
+- [2026-01-14 14:35] **WEEK 1 ANALYSIS COMPLETE** - Decision: CONTINUE current config (AVAX 90%, LTC 10%, 2.7% spacing). Net profit +$15.13 since Jan 8. Fee ratio improved from ~50% to 21%. LTC kept for correlation signal (risk management), not profit.
 - [2026-01-14 14:20] **PAPER BOT SERVICES DISABLED** - Stopped all paper bot services and permanently disabled launchd agents. Moved 7 plist files to `~/Library/LaunchAgents/disabled/`. Only live bot (port 8001) remains active.
-- [2026-01-14 14:20] **PERFORMANCE UPDATE** - Equity: $2,011.53 (+101.15% grid P/L since Jan 6). Daily P/L: +$0.35. System healthy, NORMAL mode.
+- [2026-01-14 14:20] **CORRECTED P/L** - Actual trading P/L: +$11.53 (+0.58% on $2K). Previous "+101%" was misleading (included $1K deposit).
 - [2026-01-08 12:30] **LIVE BOT CONFIG CHANGE: Wider Grid Spacing** - Reduced from 3 symbols to 2, widened spacing from ~1.5% to 2.7% to overcome friction costs.
   - **Problem**: Previous 1.5% spacing was being eaten by fees (~0.25%) + slippage (~1-2%) = net ~0% or negative
   - **Solution**: 2 symbols (AVAX 90%, LTC 10%), 2.7% spacing, 5-6 levels
@@ -37,26 +38,39 @@
 
 ## Recent Work (High Signal)
 
-### Jan 14, 2026 — Paper Bot Disabled + Performance Milestone
+### Jan 14, 2026 — Week 1 Analysis + Paper Bot Disabled
+
+**Week 1 Analysis (2.7% Grid Spacing)**:
+Config changed on Jan 8. Analysis performed Jan 14 (6 days).
+
+| Metric | Before (1.5% spacing) | After (2.7% spacing) |
+|--------|----------------------|---------------------|
+| Fee ratio | ~50% of gross | **21%** of gross |
+| Net result | -$3.59 (2.5 days) | **+$15.13** (6 days) |
+| Daily avg | -$1.44/day | **+$2.50/day** |
+
+**Decision**: CONTINUE current config.
+
+**Single Pair Consideration**:
+- Analyzed going 100% AVAX (removing LTC)
+- **Decision**: Keep LTC at 10% because it provides **correlation signal**
+- Code uses 2nd pair for:
+  1. `get_correlation_risk_adjustment()` — reduces position sizes when correlation > 0.85
+  2. RISK_OFF trigger — correlation > 0.90 is one of 3 signals for crash protection
+- Without 2nd pair: correlation always 0, crash protection weakened
+- LTC profit (~$0.85/cycle) is minimal but correlation signal is valuable
+
+**Corrected P/L** (was showing misleading +101%):
+- Starting capital: $2,000 ($1K original + $1K deposit added)
+- Current equity: $2,011.53
+- **Actual trading P/L**: +$11.53 (+0.58% on $2K)
+- **P/L since config change** (Jan 8): +$15.13 (+0.76%)
 
 **Paper Bot Services Disabled (14:20)**:
 - Stopped all paper bot services (port 8000) that were auto-restarting via launchd
-- Unloaded and moved 7 launchd plist files to `~/Library/LaunchAgents/disabled/`:
-  - `com.bluebird.bot.plist`
-  - `com.bluebird.notifier.plist`
-  - `com.bluebird.dashboard.plist`
-  - `com.bluebird.monitor.plist`
-  - `com.bluebird.monitor-status.plist`
-  - `com.bluebird.watchdog-bot.plist`
-  - `com.bluebird.watchdog-notifier.plist`
+- Moved 7 launchd plist files to `~/Library/LaunchAgents/disabled/`
 - Paper bot will NOT auto-start on reboot anymore
 - Only live bot agents (`com.bluebird-live.*`) remain active
-
-**Performance Milestone**:
-- **Grid P/L**: +$1,011.53 (+101.15%) since Jan 6 grid start ($1,000)
-- **Current Equity**: $2,011.53
-- **Daily P/L**: +$0.35 (+0.017%)
-- Recent daily performance: Jan 13 +$16.53, Jan 12 -$4.46, Jan 11 +$2.83
 
 ### Jan 14, 2026 — Order Tracking & Circuit Breaker Hardening
 
@@ -471,16 +485,20 @@
 - ~~P3: Notifier monitoring~~ FIXED Dec 23 - watchdog cron job active
 
 ## Performance Tracking (LIVE Instance - $2K Account)
-| Date | Daily P/L | Grid P/L | Equity | Notes |
-|------|-----------|----------|--------|-------|
-| **Jan 14** | +$0.36 | +$1,011.54 | $2,011.54 | System healthy, paper bot disabled |
-| Jan 13 | +$16.53 | +$1,011.29 | $2,011.29 | Strong day |
-| Jan 12 | -$4.46 | +$994.76 | $1,994.76 | False halt bug fixed |
-| Jan 11 | +$2.83 | +$999.22 | $1,999.22 | — |
-| Jan 10 | $0.00 | +$996.39 | $1,996.39 | — |
-| Jan 8 | -$3.45 | — | $1,996.41 | Config change: 2 symbols, 2.7% spacing |
-| Jan 7 | -$0.14 | — | — | First full day, DOGE trades |
-| Jan 6 | $0 | $0 | $1,000 | Grid start ($1,000 of $2,000 equity) |
+
+**NOTE**: Starting capital = $2,000 ($1K original + $1K deposit). Actual trading P/L = +$11.53 (+0.58%).
+
+| Date | Daily P/L | Cumulative | Equity | Notes |
+|------|-----------|------------|--------|-------|
+| **Jan 14** | +$0.36 | +$15.13 | $2,011.54 | Week 1 analysis: CONTINUE config |
+| Jan 13 | +$16.53 | +$14.77 | $2,011.29 | Strong day |
+| Jan 12 | -$4.46 | -$1.76 | $1,994.76 | False halt bug fixed |
+| Jan 11 | +$2.83 | +$2.70 | $1,999.22 | — |
+| Jan 10 | $0.00 | -$0.13 | $1,996.39 | — |
+| Jan 9 | -$0.02 | -$0.13 | $1,996.39 | — |
+| Jan 8 | -$3.45 | -$0.11 | $1,996.41 | Config change: 2 symbols, 2.7% spacing |
+| Jan 7 | -$0.14 | +$3.34 | $1,999.86 | First full day, DOGE trades |
+| Jan 6 | — | — | $2,000.00 | Start ($1K + $1K deposit) |
 
 ## Performance Tracking (PAPER Instance - $100K+ Account)
 | Date | Daily P/L | Grid P/L | Notes |

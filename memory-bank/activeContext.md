@@ -1,7 +1,23 @@
 # Active Context — Current Focus
 
 ## Reminders
-- **[2026-01-13] WEEK 1 ANALYSIS DUE** — Evaluate if 2.7% grid spacing is profitable after 1 week of live trading. Compare: cycles completed, net profit per cycle, total equity change. Decision point: continue, widen further, or reassess strategy.
+- **[2026-01-21] WEEK 2 REVIEW** — Continue monitoring 2.7% grid spacing performance. Compare daily averages, fee ratios, and total equity growth.
+
+## Week 1 Analysis Results (Jan 14, 2026)
+**Decision**: CONTINUE current config (AVAX 90%, LTC 10%, 2.7% spacing)
+
+**Key Findings**:
+- Net profit since config change (Jan 8): **+$15.13** (+0.76% on $2K)
+- Fee ratio improved: **21%** of gross (was ~50% with 1.5% spacing)
+- Daily average: ~$2.50/day
+- AVAX generated 90% of profit (matches allocation)
+
+**Why Keep LTC at 10%**:
+- LTC is used for **correlation-based risk management**, not profit
+- When AVAX-LTC correlation > 0.85 → position sizes reduced automatically
+- When correlation > 0.90 → can trigger RISK_OFF mode
+- Without 2nd pair: correlation features disabled, weaker crash protection
+- $0.85/cycle from LTC is worth it for the risk signal it provides
 
 ## Now
 - [2026-01-14 14:20] **PAPER BOT SERVICES DISABLED** - Stopped all paper bot services (port 8000) and disabled launchd agents permanently. Moved 7 plist files to `~/Library/LaunchAgents/disabled/`. Only live bot (port 8001) remains active.
@@ -44,11 +60,12 @@
 - [2025-12-21] Orchestrator meta-controller deployed and verified in production
 - [2025-12-21] First real RISK_OFF trigger observed and handled correctly
 
-## System Health (LIVE Instance) — Updated Jan 14, 2026 @ 14:20 EST
+## System Health (LIVE Instance) — Updated Jan 14, 2026 @ 14:35 EST
 - **Bot**: Healthy, NORMAL mode, port 8001, stream connected
-- **Notifier**: Running (PID 10051), 8 SMS sent today
-- **Risk Overlay**: NORMAL (6.8 hrs), all triggers inactive
-- **Equity**: $2,011.53 (+101.15% grid P/L since Jan 6)
+- **Notifier**: Running, watchdog active
+- **Risk Overlay**: NORMAL, all triggers inactive (momentum +0.21%, correlation 0.75, ADX 15.5)
+- **Equity**: $2,011.53 (started $2,000 = $1,000 original + $1,000 deposit)
+- **Actual Trading P/L**: +$11.53 (+0.58% on $2K) since Jan 6
 - **Daily P/L**: +$0.35 (+0.017%)
 - **Positions**: LTC/USD (0.13 qty), DOGE/USD (0.10 qty), AVAX/USD (dust)
 - **Paper Bot**: DISABLED (launchd agents moved to ~/Library/LaunchAgents/disabled/)
@@ -103,24 +120,26 @@ tail -f /tmp/bluebird-logrotate.log   # Rotation logs
 python3 scripts/cleanup_db.py         # DB cleanup (dry run)
 ```
 
-## Current Configuration (Jan 8, 2026 - LIVE Instance)
+## Current Configuration (Jan 14, 2026 - LIVE Instance)
 | Setting | Value |
 |---------|-------|
 | **Symbols** | AVAX/USD (90%), LTC/USD (10%) |
-| **Grid Spacing** | 2.67% (wider for profitability) |
+| **LTC Purpose** | Correlation signal for risk management (not profit) |
+| **Grid Spacing** | ~2.7% (AVAX 2.53%, LTC 2.78%) |
 | **Levels** | 5-6 per symbol |
+| **$/Level** | AVAX ~$360, LTC ~$40 |
 | **MAX_POSITIONS** | 2 |
 | **TIMEFRAME** | 1Min |
-| **DOGE/USD** | REMOVED Jan 8 (concentrated capital) |
 
 ## Key Metrics (Jan 14, 2026 - LIVE Instance)
 | Metric | Value |
 |--------|-------|
 | **Equity** | $2,011.53 |
-| **Grid Starting (Jan 6)** | $1,000.00 |
-| **Grid P/L** | +$1,011.53 (+101.15%) |
+| **Starting Capital** | $2,000.00 ($1K original + $1K deposit) |
+| **Actual Trading P/L** | +$11.53 (+0.58%) |
+| **P/L Since Config Change (Jan 8)** | +$15.13 (+0.76%) |
 | **Daily P/L** | +$0.35 (+0.017%) |
-| **Status** | Healthy, trading AVAX/USD & LTC/USD |
+| **Status** | Healthy, AVAX/USD (90%) + LTC/USD (10% for correlation) |
 
 ## Fee Modeling - Live
 | Component | Status |
