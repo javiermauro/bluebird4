@@ -2207,9 +2207,30 @@ class GridTradingBot:
                 if orphans:
                     logger.warning(f"[HEALTH] Orphan orders on Alpaca (not tracked): {len(orphans)}")
                     result['orphan_ids'] = list(orphans)[:5]  # First 5 for logging
+
+                    # Auto-cancel orphan orders if enabled
+                    cancel_orphans = getattr(self.config, 'CANCEL_ORPHAN_ORDERS_ON_HEALTH_CHECK', False)
+                    if cancel_orphans:
+                        cancelled = []
+                        for orphan_id in orphans:
+                            try:
+                                client.cancel_order(orphan_id)
+                                cancelled.append(orphan_id)
+                                logger.warning(f"[HEALTH] Auto-cancelled orphan order: {orphan_id[:8]}...")
+                            except Exception as e:
+                                logger.error(f"[HEALTH] Failed to cancel orphan {orphan_id[:8]}...: {e}")
+                        result['orphans_cancelled'] = len(cancelled)
+                        if cancelled:
+                            logger.info(f"[HEALTH] Auto-cancelled {len(cancelled)} orphan orders")
+
                 if stale:
                     logger.warning(f"[HEALTH] Stale tracking (not on Alpaca): {len(stale)}")
                     result['stale_ids'] = list(stale)[:5]
+                    # Clean up stale tracking entries
+                    for stale_id in stale:
+                        self.grid_strategy.remove_open_limit_order(stale_id)
+                        logger.info(f"[HEALTH] Removed stale tracking for: {stale_id[:8]}...")
+                    self.grid_strategy.save_state()
             else:
                 logger.debug(f"[HEALTH] Order tracking OK: Alpaca={alpaca_count}, Tracked={tracked_count}")
 
@@ -2597,15 +2618,20 @@ class GridTradingBot:
 
             self._save_daily_equity(equity, is_new_day=True)  # Persist for tracking
 
-        # Initialize starting equity
-        if self.starting_equity == 0:
+        # Initialize starting equity (skip if equity is 0 - fallback value)
+        if self.starting_equity == 0 and equity > 0:
             self.starting_equity = equity
             self.peak_equity = equity
             logger.info(f"Initial equity set: ${equity:,.2f}")
 
         # Update peak equity for drawdown calculation
-        if equity > self.peak_equity:
-            self.peak_equity = equity
+        # Sanity check: don't update if equity is 0 (fallback) or unreasonably high (>10x daily start)
+        if equity > 0 and equity > self.peak_equity:
+            # Guard against corrupted/unreasonable equity values
+            if self.daily_start_equity > 0 and equity > self.daily_start_equity * 10:
+                logger.warning(f"[SANITY] Ignoring unreasonable equity ${equity:,.2f} (>10x daily start ${self.daily_start_equity:,.2f})")
+            else:
+                self.peak_equity = equity
 
         # Calculate current daily P&L
         if self.daily_start_equity > 0:
@@ -3184,12 +3210,12 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 await broadcast_log(f"Buying Power: ${buying_power:,.2f}")
             else:
                 await broadcast_log("Account fetch timed out, using fallback")
-                equity = 90000
-                buying_power = 180000
+                equity = 0  # Safe fallback - will skip trading but not cause false halts
+                buying_power = 0
         except Exception as e:
             await broadcast_log(f"Failed to get account: {e}")
-            equity = 90000  # Fallback
-            buying_power = 180000
+            equity = 0  # Safe fallback - will skip trading but not cause false halts
+            buying_power = 0
 
         # Warm up with historical data
         await broadcast_log("Warming up with historical data...")
@@ -3449,9 +3475,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     operation_name="main_loop:get_account",
                     default_on_timeout=None
                 )
-                equity = float(account.equity) if account else 90000
+                equity = float(account.equity) if account else 0
             except:
-                equity = 90000
+                equity = 0  # Safe fallback
 
             # Check position quantity for this symbol
             alpaca_symbol = symbol.replace('/', '')

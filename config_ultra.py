@@ -71,13 +71,13 @@ class UltraConfig:
     SYMBOL = "SOL/USD"  # Primary symbol (best performer)
 
     # Multi-asset diversification (reduces single-asset risk)
-    # LIVE ACCOUNT: 3 symbols for correlation protection + trade frequency
+    # LIVE ACCOUNT: 2 symbols - concentrated capital + correlation signal
+    # Changed Jan 8, 2026: Reduced from 3 to 2 symbols, wider grid spacing (2.5%)
     SYMBOLS = [
-        "AVAX/USD",  # Avalanche - High volatility (45% allocation)
-        "LTC/USD",   # Litecoin - Good volume (10% allocation)
-        "DOGE/USD",  # Dogecoin - Most frequent fills (45% allocation)
+        "AVAX/USD",  # Avalanche - Primary (90% allocation)
+        "LTC/USD",   # Litecoin - Secondary for correlation signal (10% allocation)
     ]
-    MAX_EXPOSURE_PER_ASSET = 0.45  # Max 45% equity in any single asset
+    MAX_EXPOSURE_PER_ASSET = 0.90  # Max 90% equity in single asset (concentrated)
     
     # Timeframe: Grid bot uses 1-minute bars from Alpaca websocket stream
     # (Alpaca's subscribe_bars() defaults to 1-min bars)
@@ -92,8 +92,8 @@ class UltraConfig:
     # =========================================
     
     # Maximum positions at once
-    # 4 positions = allows multiple positions per symbol or flexibility for 4th symbol
-    MAX_POSITIONS = 4  # Can have multiple positions across 3 symbols
+    # 2 positions = one per symbol (AVAX + LTC)
+    MAX_POSITIONS = 2  # One position per symbol
     
     # Maximum risk per trade (% of equity)
     # Kelly Criterion will adjust this, but never exceed
@@ -190,7 +190,7 @@ class UltraConfig:
     # =========================================
     
     # Enable time-based filtering
-    USE_TIME_FILTER = True
+    USE_TIME_FILTER = False  # Disabled Jan 12 - crypto trades 24/7, time filter was blocking too much
     
     # Optimal trading windows (UTC hours)
     # US Session: 13:00-17:00 UTC (9AM-1PM ET)
@@ -264,24 +264,20 @@ class UltraConfig:
     # range_pct: Total range as percentage of price (e.g., 0.05 = 5% total range)
     # num_grids: Number of grid levels (more = smaller profits per trade, more trades)
     # investment_ratio: Portion of equity allocated to this symbol's grid
-    # OPTIMIZED FOR MORE TRADES & FASTER RECOVERY (Dec 9, 2025)
-    # Tighter ranges = more grid completions = more profits
-    # LIVE ACCOUNT GRID CONFIGS: 2 symbols with 90/10 split
+    #
+    # UPDATED Jan 8, 2026: Wider spacing (2.5%) to overcome friction costs
+    # Previous 1.5% spacing was being eaten by fees + slippage (~1.5-2%)
+    # New 2.5% spacing should yield ~0.5-1% net profit per cycle
     GRID_CONFIGS = {
         "AVAX/USD": {
-            "num_grids": 6,        # 6 grids = 7 levels, ~1.45% spacing
-            "range_pct": 0.087,    # 8.7% range for 1.45% per grid
-            "investment_ratio": 0.45  # 45% allocation
+            "num_grids": 5,        # 5 grids = 6 levels, 2.5% spacing
+            "range_pct": 0.125,    # 12.5% total range (12.5% / 5 = 2.5% per grid)
+            "investment_ratio": 0.90  # 90% allocation - primary symbol
         },
         "LTC/USD": {
-            "num_grids": 6,        # 6 grids = 7 levels, ~1.40% spacing
-            "range_pct": 0.084,    # 8.4% range for 1.40% per grid
-            "investment_ratio": 0.10  # 10% - secondary for correlation
-        },
-        "DOGE/USD": {
-            "num_grids": 6,        # 6 grids = 7 levels, ~1.67% spacing
-            "range_pct": 0.10,     # 10% range - highest volatility
-            "investment_ratio": 0.45  # 45% allocation - frequent fills
+            "num_grids": 5,        # 5 grids = 6 levels, 2.5% spacing
+            "range_pct": 0.125,    # 12.5% total range
+            "investment_ratio": 0.10  # 10% - secondary for correlation signal
         }
     }
 
@@ -364,6 +360,10 @@ class UltraConfig:
     # cancel them to avoid "surprise fills" after a crash/restart.
     # Safer default for an automated grid bot.
     CANCEL_UNTRACKED_OPEN_ORDERS_ON_STARTUP = True
+
+    # During health checks (every 5 min), auto-cancel orphan orders on Alpaca that we're not tracking.
+    # This catches orphans that appear mid-operation (e.g., state save failure) without needing a restart.
+    CANCEL_ORPHAN_ORDERS_ON_HEALTH_CHECK = True
 
     # Symbol precision for price and quantity rounding
     # (price_decimals, qty_decimals)
