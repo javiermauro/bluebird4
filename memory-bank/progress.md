@@ -1,12 +1,16 @@
 # Progress — Status & History
 
 ## Current Status
-- [2026-01-07 16:30] **DASHBOARD THEME OVERHAUL**: Replaced harsh red/crimson "Control Room Alert" theme with calming teal/slate "Deep Ocean" theme. New fonts (IBM Plex Sans/Mono), new color palette, softer on the eyes. Added SmartGrid Advisor panel to dashboard with drift status per symbol.
-- [2026-01-07 16:00] **SMART GRID ADVISOR (Phase 1) IMPLEMENTED (LIVE INSTANCE)**: Added `src/strategy/smart_grid_advisor.py` (shadow-mode only) with drift detection + hysteresis (55% trigger / 40% clear), DB-backed fill-rate sampling, and ATR percentile ring buffer stored in `data/state/smart-grid-advisor.json`. Wired into `src/execution/bot_grid.py` (evaluate in `handle_bar()` + periodic task for WS stall resilience). Added API `GET /api/smartgrid/status` (state-file backed).
-- [2026-01-01 17:20] **ALL 9 SYSTEMS VERIFIED**: Windfall, Limit Orders, Fast Fill, Time Filters, Rebalancing, Consecutive Down Bars, Developing Downtrend, Risk Overlay, Orchestrator - ALL working.
-- [2026-01-01 15:42] **SYSTEM CRASH RECOVERED**: Mac crashed, bot died. Restarted successfully, all services healthy.
-- [2026-01-01 14:00] **DOGE DISPLAY FIX**: Fixed DOGE not appearing in dashboard orchestrator. Commit: `ee3fbc3`.
-- [2026-01-01 10:50] **DOGE/USD ADDED**: Highest volatility coin (10.3% 7D range). 15% allocation. New: SOL 35%, LTC 25%, AVAX 25%, DOGE 15%.
+- [2026-01-14 14:20] **PAPER BOT SERVICES DISABLED** - Stopped all paper bot services and permanently disabled launchd agents. Moved 7 plist files to `~/Library/LaunchAgents/disabled/`. Only live bot (port 8001) remains active.
+- [2026-01-14 14:20] **PERFORMANCE UPDATE** - Equity: $2,011.53 (+101.15% grid P/L since Jan 6). Daily P/L: +$0.35. System healthy, NORMAL mode.
+- [2026-01-08 12:30] **LIVE BOT CONFIG CHANGE: Wider Grid Spacing** - Reduced from 3 symbols to 2, widened spacing from ~1.5% to 2.7% to overcome friction costs.
+  - **Problem**: Previous 1.5% spacing was being eaten by fees (~0.25%) + slippage (~1-2%) = net ~0% or negative
+  - **Solution**: 2 symbols (AVAX 90%, LTC 10%), 2.7% spacing, 5-6 levels
+  - **Changes**: Updated `config_ultra.py`, cleared grid state, cancelled orphan DOGE orders
+  - **Expected**: ~0.7-1% net profit per grid cycle instead of ~0%
+- [2026-01-07 16:30] **DASHBOARD THEME OVERHAUL**: Deep Ocean teal/slate theme.
+- [2026-01-07 16:00] **SMART GRID ADVISOR (Phase 1)**: Shadow-mode drift detection.
+- [2026-01-06] **LIVE BOT LAUNCHED**: $2000 equity, 3 symbols (AVAX/LTC/DOGE), 1.5% spacing.
 - [2025-12-31 16:40] **BTC/USD REMOVED**: Underperformed 5.7x vs altcoins.
 - [2025-12-31 16:00] **BUG FIXES**: Timezone (naive→UTC), config spam (singleton), TIMEFRAME ("5Min"→"1Min").
 - [2025-12-30 00:00] **BOT LAUNCHAGENT CREATED**: Created `com.bluebird.bot.plist` with `RunAtLoad=true` and `KeepAlive=true`. Bot now managed directly by launchd for reliable auto-restart after reboot/power outage. Watchdog serves as backup monitor.
@@ -32,6 +36,84 @@
 - [2025-12-25 11:30] **Phase 1 Maintenance Complete**: State files moved to persistent storage
 
 ## Recent Work (High Signal)
+
+### Jan 14, 2026 — Paper Bot Disabled + Performance Milestone
+
+**Paper Bot Services Disabled (14:20)**:
+- Stopped all paper bot services (port 8000) that were auto-restarting via launchd
+- Unloaded and moved 7 launchd plist files to `~/Library/LaunchAgents/disabled/`:
+  - `com.bluebird.bot.plist`
+  - `com.bluebird.notifier.plist`
+  - `com.bluebird.dashboard.plist`
+  - `com.bluebird.monitor.plist`
+  - `com.bluebird.monitor-status.plist`
+  - `com.bluebird.watchdog-bot.plist`
+  - `com.bluebird.watchdog-notifier.plist`
+- Paper bot will NOT auto-start on reboot anymore
+- Only live bot agents (`com.bluebird-live.*`) remain active
+
+**Performance Milestone**:
+- **Grid P/L**: +$1,011.53 (+101.15%) since Jan 6 grid start ($1,000)
+- **Current Equity**: $2,011.53
+- **Daily P/L**: +$0.35 (+0.017%)
+- Recent daily performance: Jan 13 +$16.53, Jan 12 -$4.46, Jan 11 +$2.83
+
+### Jan 14, 2026 — Order Tracking & Circuit Breaker Hardening
+
+**Issue 1: Orphan Orders Accumulating**
+- Found 3 LTC limit orders on Alpaca not being tracked by bot
+- Root cause: State save failure on Jan 12 restart left orders orphaned
+- **Fix**: Added `CANCEL_ORPHAN_ORDERS_ON_HEALTH_CHECK = True` to config
+- Health check (every 5 min) now auto-cancels orphan orders and cleans stale tracking
+- **Commit**: `43193a3` - feat: auto-cancel orphan orders during health check
+
+**Issue 2: False Circuit Breaker Trigger**
+- Circuit breakers (max_drawdown + daily_limit) triggered during normal trading
+- Root cause: Alpaca API timeout returned equity=0, causing false 100% drawdown calculation
+- **Fix**: Added sanity checks in `check_circuit_breakers()`:
+  - Skip if equity <= 0 (API timeout)
+  - Skip if equity < 50% of daily start (likely API error)
+- Also added sanity check in `update_risk_state()` for daily P&L calculation
+- Reset circuit breakers via `/api/risk/reset`
+- **Commit**: `5f58bb0` - Add sanity checks to prevent false circuit breaker triggers from API timeouts
+
+**Files Modified**:
+- `config_ultra.py`: Added `CANCEL_ORPHAN_ORDERS_ON_HEALTH_CHECK = True`
+- `src/execution/bot_grid.py`:
+  - `check_order_tracking_health()`: Auto-cancel orphans, clean stale tracking
+  - `check_circuit_breakers()`: Sanity checks for invalid equity
+  - `update_risk_state()`: Sanity check for daily P&L
+
+### Jan 8, 2026 — LIVE Bot Grid Config Change (Wider Spacing)
+**Problem Identified**: First 2.5 days of live trading showed:
+- 10 trades, $2.31 realized profit, $0.67 fees
+- BUT equity down $3.59 (-0.18%)
+- Gap of $5.23 = hidden friction costs (spread + slippage)
+- Grid spacing (1.5%) ≈ friction costs (1.5-2%) = no edge
+
+**Solution Implemented**:
+1. Reduced symbols from 3 to 2:
+   - AVAX/USD: 90% allocation (was 45%)
+   - LTC/USD: 10% allocation (for correlation signal)
+   - DOGE/USD: REMOVED
+2. Widened grid spacing to 2.5% target (actual: 2.67%):
+   - `num_grids`: 5 (was 6)
+   - `range_pct`: 0.125 (was 0.087)
+   - Expected net profit: ~0.7-1% per cycle (was ~0%)
+3. Concentrated capital: ~$300/level (was ~$130/level)
+
+**Changes Made**:
+- `config_ultra.py`: Updated SYMBOLS, GRID_CONFIGS, MAX_POSITIONS
+- Cleared `data/state/grid-state.json` and `grid_snapshots` table
+- Cancelled orphan DOGE limit order on Alpaca
+- Restarted bot to apply new config
+
+**Verification**:
+- Grid status shows: AVAX 7 levels @ 2.67%, LTC 6 levels @ 2.68%
+- 8 open orders (5 AVAX, 3 LTC) - no DOGE
+- Bot healthy, stream healthy
+
+**Test Plan**: Run for 1 week (through Jan 13) to validate wider spacing is profitable.
 
 ### Jan 7, 2026 — SmartGrid Advisor + Dashboard Theme
 **SmartGrid Advisor (Phase 1 - Shadow Mode)**:
@@ -388,7 +470,19 @@
 - ~~P2: Notifier state persistence~~ FIXED Dec 23 - now database-backed
 - ~~P3: Notifier monitoring~~ FIXED Dec 23 - watchdog cron job active
 
-## Performance Tracking
+## Performance Tracking (LIVE Instance - $2K Account)
+| Date | Daily P/L | Grid P/L | Equity | Notes |
+|------|-----------|----------|--------|-------|
+| **Jan 14** | +$0.36 | +$1,011.54 | $2,011.54 | System healthy, paper bot disabled |
+| Jan 13 | +$16.53 | +$1,011.29 | $2,011.29 | Strong day |
+| Jan 12 | -$4.46 | +$994.76 | $1,994.76 | False halt bug fixed |
+| Jan 11 | +$2.83 | +$999.22 | $1,999.22 | — |
+| Jan 10 | $0.00 | +$996.39 | $1,996.39 | — |
+| Jan 8 | -$3.45 | — | $1,996.41 | Config change: 2 symbols, 2.7% spacing |
+| Jan 7 | -$0.14 | — | — | First full day, DOGE trades |
+| Jan 6 | $0 | $0 | $1,000 | Grid start ($1,000 of $2,000 equity) |
+
+## Performance Tracking (PAPER Instance - $100K+ Account)
 | Date | Daily P/L | Grid P/L | Notes |
 |------|-----------|----------|-------|
 | **Jan 1** | **+$6,283 (+6.2%)** | **+$16,862** | 🏆 BEST DAY EVER! Broke $107K |

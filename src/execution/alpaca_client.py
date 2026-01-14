@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class AlpacaClient:
     def __init__(self, config, skip_verify: bool = False):
         self.config = config
-        self.trading_client = TradingClient(config.API_KEY, config.SECRET_KEY, paper=True) # Default to paper
+        self.trading_client = TradingClient(config.API_KEY, config.SECRET_KEY, paper=config.PAPER_TRADING)
         self.data_client = CryptoHistoricalDataClient(config.API_KEY, config.SECRET_KEY)
         # self.stream_client = CryptoDataStream(config.API_KEY, config.SECRET_KEY) # REMOVED: Redundant connection causing 429s
 

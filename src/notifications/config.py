@@ -117,8 +117,8 @@ class NotificationConfig:
     twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "")
     notify_phone_number: str = os.getenv("NOTIFY_PHONE_NUMBER", "")
 
-    # Bot API endpoint
-    bot_api_url: str = os.getenv("BOT_API_URL", "http://localhost:8000")
+    # Bot API endpoint (LIVE instance on port 8001)
+    bot_api_url: str = os.getenv("BOT_API_URL", "http://localhost:8001")
 
     # Polling settings
     poll_interval: int = 60  # seconds between polls

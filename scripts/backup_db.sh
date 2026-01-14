@@ -1,21 +1,22 @@
 #!/bin/bash
-# BLUEBIRD Database Backup Script
+# BLUEBIRD-LIVE Database Backup Script
+# WARNING: This is for LIVE TRADING instance
 #
 # Creates daily backups of bluebird.db using SQLite's .backup command
 # which is safe to run while the database is in use.
 #
 # Intended to be run via cron daily:
-#   0 3 * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/backup_db.sh" >> /tmp/bluebird-backup.log 2>&1
+#   0 3 * * * /bin/bash "/Users/javierrodriguez/BLUEBIRD/bluebird-live/scripts/backup_db.sh" >> /tmp/bluebird-live-backup.log 2>&1
 #
 
 set -e
 
-# Configuration
-PROJECT_DIR="/Volumes/DOCK/BLUEBIRD 4.0"
+# Configuration - LIVE instance
+PROJECT_DIR="/Users/javierrodriguez/BLUEBIRD/bluebird-live"
 DB_PATH="${PROJECT_DIR}/data/bluebird.db"
 BACKUP_DIR="${PROJECT_DIR}/data/backups"
 KEEP_DAYS=7  # Number of daily backups to keep
-LOG_PREFIX="[$(date '+%Y-%m-%d %H:%M:%S')] [BACKUP]"
+LOG_PREFIX="[$(date '+%Y-%m-%d %H:%M:%S')] [LIVE-BACKUP]"
 
 # Create backup directory if it doesn't exist
 mkdir -p "$BACKUP_DIR"

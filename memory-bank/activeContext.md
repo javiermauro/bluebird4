@@ -1,14 +1,22 @@
 # Active Context — Current Focus
 
+## Reminders
+- **[2026-01-13] WEEK 1 ANALYSIS DUE** — Evaluate if 2.7% grid spacing is profitable after 1 week of live trading. Compare: cycles completed, net profit per cycle, total equity change. Decision point: continue, widen further, or reassess strategy.
+
 ## Now
-- [2026-01-07 16:30] **DASHBOARD THEME OVERHAUL** - Replaced harsh red/crimson "Control Room Alert" theme with calming teal/slate "Deep Ocean" theme. New fonts (IBM Plex Sans/Mono), new color palette, softer on the eyes. Added SmartGrid Advisor panel to dashboard with drift status per symbol.
-- [2026-01-07 16:00] **SMART GRID ADVISOR (Phase 1) COMPLETE** - Implemented `src/strategy/smart_grid_advisor.py` (shadow-mode drift recommendations + hysteresis: 55% trigger, 40% clear, 60min cooldown). Wired into `src/execution/bot_grid.py` with periodic evaluation task (handles WS stalls). API `GET /api/smartgrid/status` serves data via state-file fallback `data/state/smart-grid-advisor.json`.
-- [2026-01-01 22:30] **🏆 BEST DAY EVER: +$6,283 (+6.2%)** - Peak equity $107,138.56. Grid sold into rally perfectly. All 4 symbols cycling. 30D grid profit now +$16,862 (+18.7%). Trusted the system — it delivered.
-- [2026-01-01 17:20] **ALL 9 PROTECTION SYSTEMS VERIFIED** - Comprehensive verification passed. All systems working.
-- [2026-01-01 15:42] **SYSTEM CRASH RECOVERED** - Mac crashed, bot died. Restarted successfully.
-- [2026-01-01 14:00] **DOGE DISPLAY FIX** - Commit `ee3fbc3`.
-- [2026-01-01 10:50] **DOGE/USD ADDED** - 15% allocation. First day: accumulated 112K DOGE, +$334 unrealized.
-- [2025-12-31 16:40] **BTC/USD REMOVED** - Underperformed 5.7x vs altcoins.
+- [2026-01-14 14:20] **PAPER BOT SERVICES DISABLED** - Stopped all paper bot services (port 8000) and disabled launchd agents permanently. Moved 7 plist files to `~/Library/LaunchAgents/disabled/`. Only live bot (port 8001) remains active.
+- [2026-01-14 07:15] **CIRCUIT BREAKER SANITY CHECKS** - Added protection against false circuit breaker triggers from API timeouts. When Alpaca API times out and returns equity=$0, we now skip circuit breaker evaluation instead of triggering 100% drawdown halt. Also skips if equity drops >50% in single check.
+- [2026-01-14 07:00] **ORPHAN ORDER AUTO-CANCEL** - Added `CANCEL_ORPHAN_ORDERS_ON_HEALTH_CHECK = True` to config. Health checks now auto-cancel orphan orders on Alpaca that we're not tracking internally. Also cleans up stale tracking entries.
+- [2026-01-12 10:20] **TIME FILTER DISABLED** - Set `USE_TIME_FILTER = False` to allow 24/7 trading. Time filter was blocking ~6 hours/day during "low liquidity" windows (22-24 UTC, 5-7 UTC), severely limiting grid activity. Only 2 cycles completed in 5 days due to restrictions.
+- [2026-01-12 10:10] **FALSE HALT BUG FIXED** - Corrupted `peak_equity: $90,000` in daily-equity.json caused false 97.78% drawdown calculation and trading halt. Fixed by resetting peak_equity to actual value (~$1,999). Root cause of corruption still needs investigation.
+- [2026-01-08 12:30] **LIVE BOT CONFIG CHANGE: 2 Symbols + Wider Spacing** - Reduced from 3 symbols to 2 (removed DOGE). Widened grid spacing from ~1.5% to 2.7% to overcome friction costs. Previous config was losing money due to fees+slippage exceeding grid profits.
+  - **Symbols**: AVAX/USD (90%), LTC/USD (10%)
+  - **Grid spacing**: 2.67% (was 1.45-1.67%)
+  - **Levels**: 5-6 per symbol (was 6-7)
+  - **Rationale**: $2K account with 1.5% spacing = ~0% net after ~1.5-2% friction. 2.7% spacing should yield ~0.7-1% net per cycle.
+- [2026-01-07 16:30] **DASHBOARD THEME OVERHAUL** - Deep Ocean teal/slate theme.
+- [2026-01-07 16:00] **SMART GRID ADVISOR (Phase 1)** - Shadow-mode drift detection.
+- [2026-01-06] **LIVE BOT LAUNCHED** - $2000 initial equity ($1000 deposit + $1000 existing).
 - [2025-12-27] **TIER-CORRECT FEE MODELING COMPLETE** - Volume-based Alpaca crypto fee tiers, Gross vs Net P&L
 - [2025-12-26 06:35] **WATCHDOG LAUNCHD MIGRATION COMPLETE** - Fixed EPERM on external volume, durable local state
 - [2025-12-26 01:45] **TIMEOUT HARDENING COMPLETE** - All main loop Alpaca calls bounded with 10-15s timeouts
@@ -36,13 +44,14 @@
 - [2025-12-21] Orchestrator meta-controller deployed and verified in production
 - [2025-12-21] First real RISK_OFF trigger observed and handled correctly
 
-## System Health
-- **Bot**: Healthy, NORMAL mode, port 8000
-- **Dashboard**: Running, port 5173
-- **Notifier**: Running, watchdog active
-- **Risk Overlay**: NORMAL, all triggers inactive
-- **Orchestrator**: ENFORCING, all symbols GRID_FULL after profit-taking
-- **Performance**: +$6,283 daily, +$16,862 monthly, $107K equity
+## System Health (LIVE Instance) — Updated Jan 14, 2026 @ 14:20 EST
+- **Bot**: Healthy, NORMAL mode, port 8001, stream connected
+- **Notifier**: Running (PID 10051), 8 SMS sent today
+- **Risk Overlay**: NORMAL (6.8 hrs), all triggers inactive
+- **Equity**: $2,011.53 (+101.15% grid P/L since Jan 6)
+- **Daily P/L**: +$0.35 (+0.017%)
+- **Positions**: LTC/USD (0.13 qty), DOGE/USD (0.10 qty), AVAX/USD (dust)
+- **Paper Bot**: DISABLED (launchd agents moved to ~/Library/LaunchAgents/disabled/)
 
 ## Maintenance Plan (5 Phases) - ALL COMPLETE
 | Phase | Status | Description |
@@ -55,13 +64,15 @@
 
 ## Scheduled Tasks
 
-### LaunchAgents (launchd - for watchdogs)
+### LaunchAgents (launchd - LIVE instance only)
 | Agent | Interval | Purpose |
 |-------|----------|---------|
-| `com.bluebird.watchdog-bot` | 5 min | Bot auto-restart |
-| `com.bluebird.watchdog-notifier` | 5 min | Notifier auto-restart |
+| `com.bluebird-live.bot` | RunAtLoad | Live bot (port 8001) |
+| `com.bluebird-live.notifier` | RunAtLoad | Live notifier |
+| `com.bluebird-live.watchdog-bot` | 5 min | Bot auto-restart |
+| `com.bluebird-live.watchdog-notifier` | 5 min | Notifier auto-restart |
 
-**Note**: Watchdogs use launchd (not cron) because macOS can't execute scripts on external APFS volumes from cron. Scripts live in `~/Library/Application Support/BLUEBIRD/`.
+**Note**: Paper bot agents (`com.bluebird.*`) have been disabled and moved to `~/Library/LaunchAgents/disabled/` as of Jan 14, 2026.
 
 ### Cron Jobs (remaining)
 | Schedule | Script | Purpose |
@@ -92,26 +103,24 @@ tail -f /tmp/bluebird-logrotate.log   # Rotation logs
 python3 scripts/cleanup_db.py         # DB cleanup (dry run)
 ```
 
-## Current Configuration (Jan 1, 2026)
+## Current Configuration (Jan 8, 2026 - LIVE Instance)
 | Setting | Value |
 |---------|-------|
-| **Symbols** | SOL/USD, LTC/USD, AVAX/USD, DOGE/USD |
-| **Allocation** | SOL 35%, LTC 25%, AVAX 25%, DOGE 15% |
-| **MAX_POSITIONS** | 4 |
+| **Symbols** | AVAX/USD (90%), LTC/USD (10%) |
+| **Grid Spacing** | 2.67% (wider for profitability) |
+| **Levels** | 5-6 per symbol |
+| **MAX_POSITIONS** | 2 |
 | **TIMEFRAME** | 1Min |
-| **BTC/USD** | REMOVED Dec 31 (5.7x underperformer) |
-| **DOGE/USD** | ADDED Jan 1 (highest volatility) |
+| **DOGE/USD** | REMOVED Jan 8 (concentrated capital) |
 
-## Key Metrics (Jan 1, 2026 - End of Day)
+## Key Metrics (Jan 14, 2026 - LIVE Instance)
 | Metric | Value |
 |--------|-------|
-| **Peak Equity** | **$107,138.56** |
-| **Daily P/L** | **+$6,283.63 (+6.2%)** |
-| **Grid Profit (30 days)** | **+$16,862.30 (+18.7%)** |
-| 30D Volume | $1,874,740 |
-| Fee Tier | Tier 4 (0.08%/0.18%) |
-| Windfall Captures | 20 captures, $864.52 |
-| **Test Status** | **101/101 PASS** |
+| **Equity** | $2,011.53 |
+| **Grid Starting (Jan 6)** | $1,000.00 |
+| **Grid P/L** | +$1,011.53 (+101.15%) |
+| **Daily P/L** | +$0.35 (+0.017%) |
+| **Status** | Healthy, trading AVAX/USD & LTC/USD |
 
 ## Fee Modeling - Live
 | Component | Status |

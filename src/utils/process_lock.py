@@ -32,8 +32,8 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Lock file directory
-LOCK_DIR = Path("/tmp/bluebird")
+# Lock file directory - LIVE instance uses separate directory
+LOCK_DIR = Path("/tmp/bluebird-live")
 LOCK_DIR.mkdir(exist_ok=True)
 
 

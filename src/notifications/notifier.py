@@ -48,7 +48,8 @@ STATE_DIR = os.path.join(PROJECT_ROOT, "data", "state")
 # Pending alerts file (written by watchdog scripts for crash loop / disk alerts)
 # Note: Watchdog scripts run via launchd and write to LOCAL filesystem because
 # macOS launchd cannot write to external APFS volumes with 'noowners' flag (EPERM).
-PENDING_ALERTS_STATE_DIR = os.path.expanduser("~/Library/Application Support/BLUEBIRD/state")
+# LIVE INSTANCE: Uses BLUEBIRD-LIVE directory to avoid collision with paper
+PENDING_ALERTS_STATE_DIR = os.path.expanduser("~/Library/Application Support/BLUEBIRD-LIVE/state")
 PENDING_ALERTS_FILE = os.path.join(PENDING_ALERTS_STATE_DIR, "pending-alerts.txt")
 PENDING_ALERTS_PROCESSING = os.path.join(PENDING_ALERTS_STATE_DIR, "pending-alerts.processing.txt")
 
@@ -62,9 +63,10 @@ from src.database.db import (
 )
 
 # PID and state file paths (for dashboard integration)
-PID_FILE = "/tmp/bluebird-notifier.pid"
-SMS_COUNT_FILE = "/tmp/bluebird-notifier-count.json"
-LOG_FILE = "/tmp/bluebird-notifier.log"
+# LIVE INSTANCE: Uses -live- prefix to avoid collision with paper
+PID_FILE = "/tmp/bluebird-live-notifier.pid"
+SMS_COUNT_FILE = "/tmp/bluebird-live-notifier-count.json"
+LOG_FILE = "/tmp/bluebird-live-notifier.log"
 LAST_STARTUP_FILE = os.path.join(STATE_DIR, "notifier-startup.json")  # Persists across reboot
 
 # Minimum time between startup SMS notifications (in seconds)
@@ -212,6 +214,10 @@ class NotificationService:
         Returns:
             True if sent successfully, False otherwise
         """
+        # LIVE INSTANCE: Prefix all messages for operator safety
+        if not message.startswith("[LIVE]"):
+            message = f"[LIVE] {message}"
+
         # Check quiet hours
         current_hour = datetime.now().hour
         if not force and self.config.is_quiet_hours(current_hour):
@@ -443,7 +449,7 @@ class NotificationService:
                 f"Bot API unresponsive!\n"
                 f"Failed {self.api_failure_count} consecutive attempts.\n\n"
                 f"Check bot status:\n"
-                f"  curl http://localhost:8000/health\n\n"
+                f"  curl http://localhost:8001/health\n\n"
                 f"Restart if needed:\n"
                 f"  python3 start.py --stop && python3 start.py",
                 force=True,

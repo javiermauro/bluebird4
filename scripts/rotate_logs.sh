@@ -1,26 +1,27 @@
 #!/bin/bash
-# BLUEBIRD Log Rotation Script
+# BLUEBIRD-LIVE Log Rotation Script
+# WARNING: This is for LIVE TRADING instance
 #
 # Rotates log files when they exceed MAX_SIZE_MB
 # Keeps KEEP_ROTATIONS old copies, compressed
 #
 # Cron (daily at 5 AM):
-#   0 5 * * * /bin/bash "/Volumes/DOCK/BLUEBIRD 4.0/scripts/rotate_logs.sh" >> /tmp/bluebird-logrotate.log 2>&1
+#   0 5 * * * /bin/bash "/Users/javierrodriguez/BLUEBIRD/bluebird-live/scripts/rotate_logs.sh" >> /tmp/bluebird-live-logrotate.log 2>&1
 
 set -e
 
 # Configuration
 MAX_SIZE_MB=50
 KEEP_ROTATIONS=3
-LOG_PREFIX="[$(date '+%Y-%m-%d %H:%M:%S')] [LOGROTATE]"
+LOG_PREFIX="[$(date '+%Y-%m-%d %H:%M:%S')] [LIVE-LOGROTATE]"
 
-# Log files to rotate
+# LIVE log files to rotate
 LOG_FILES=(
-    "/tmp/bluebird-bot.log"
-    "/tmp/bluebird-notifier.log"
-    "/tmp/bluebird-watchdog.log"
-    "/tmp/bluebird-backup.log"
-    "/tmp/bluebird-cleanup.log"
+    "/tmp/bluebird-live-bot.log"
+    "/tmp/bluebird-live-notifier.log"
+    "/tmp/bluebird-live-watchdog.log"
+    "/tmp/bluebird-live-backup.log"
+    "/tmp/bluebird-live-cleanup.log"
 )
 
 rotate_log() {
