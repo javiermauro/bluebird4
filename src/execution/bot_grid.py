@@ -2633,9 +2633,14 @@ class GridTradingBot:
             else:
                 self.peak_equity = equity
 
-        # Calculate current daily P&L
-        if self.daily_start_equity > 0:
-            self.daily_pnl = (equity - self.daily_start_equity) / self.daily_start_equity
+        # Calculate current daily P&L (only if equity is valid)
+        # Skip if equity is 0 (API timeout) or suspiciously low (<50% of daily start)
+        if self.daily_start_equity > 0 and equity > 0:
+            # Sanity check: don't update daily_pnl if equity looks invalid
+            if equity < self.daily_start_equity * 0.5:
+                logger.debug(f"[SANITY] Skipping daily P&L update - suspicious equity ${equity:,.2f}")
+            else:
+                self.daily_pnl = (equity - self.daily_start_equity) / self.daily_start_equity
 
         # Periodically save daily equity state (every update to ensure persistence)
         self._save_daily_equity(equity)
@@ -2719,6 +2724,17 @@ class GridTradingBot:
             'daily_limit_hit': self.daily_limit_hit,
             'max_drawdown_hit': self.max_drawdown_hit
         }
+
+        # SANITY CHECK: Skip circuit breaker evaluation if equity is invalid
+        # This prevents false triggers from API timeouts/errors that return equity=0
+        if equity <= 0:
+            logger.debug(f"[CIRCUIT] Skipping check - invalid equity: ${equity}")
+            return result
+
+        # SANITY CHECK: Skip if equity dropped more than 50% in one check (likely API error)
+        if self.daily_start_equity > 0 and equity < self.daily_start_equity * 0.5:
+            logger.warning(f"[CIRCUIT] Skipping check - suspicious equity drop: ${equity:,.2f} vs daily start ${self.daily_start_equity:,.2f}")
+            return result
 
         # Check daily loss limit
         if self.daily_start_equity > 0:
