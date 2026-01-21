@@ -1,6 +1,19 @@
 # Progress — Status & History
 
 ## Current Status
+- [2026-01-21 PM] **COMPUTER RESTARTED - WATCHDOG RECOVERED BOT** - Mac restarted, launchd watchdog automatically recovered the live bot. Bot running on port 8001, stream initializing. All services healthy.
+- [2026-01-21 PM] **AVAX POSITION UPDATE** - Position reduced from 119 to 104.47 qty (some sells filled). Now @ $13.26 avg entry. Current price $11.99, unrealized -$132.69 (-9.6%). Need +10.6% to hit breakeven.
+- [2026-01-21 PM] **PERFORMANCE UPDATE** - Equity: $1,827.48. Total return: -$172.52 (-8.6%) from $2K starting. Daily P/L: -$37.34 (-2.0%). Grid profit: +$35.03 (2 trades).
+- [2026-01-21 AM] **CODE QUALITY IMPROVEMENTS DEPLOYED** - SQLite hardening (WAL mode, 30s timeout), exception handling fixes, stream watchdog lowered to 90s.
+- [2026-01-21 AM] **BOT STABILITY** - Bot crashed multiple times during session but watchdog auto-recovered each time. Stream reconnection working.
+- [2026-01-20 PM] **AVAX RECOVERY IN PROGRESS** - Placed manual breakeven limit sell: 35 AVAX @ $13.60 (Order ID: 4d3a11de-...). Position: 119.14 AVAX @ $13.58 avg, current ~$12.50, unrealized -$129. Grid top ($13.38) is below avg cost — grid can't recover alone. Need AVAX > $13.58 for order to fill.
+- [2026-01-20 PM] **BOT RESTARTED WITH NEW CODE** - All protection improvements now active. ADX direction shows "up" (raw DI+/DI- working), stream state tracking visible in /health, AVAX in grid_reduced mode. Killed stray paper processes. Restarted notifier for 2-min stale threshold.
+- [2026-01-20] **PROTECTION IMPROVEMENTS DEPLOYED TO LIVE** - All 9 phases of protection improvements deployed to LIVE instance with conservative settings. Changes take effect on next bot restart.
+- [2026-01-19 19:00] **PROTECTION IMPROVEMENTS PLANNED** - Deep root cause analysis of Jan 17-18 incidents complete. Identified 5 protection gaps + 4 resilience gaps. Implementation plan at `~/.claude/plans/spicy-questing-bumblebee.md`. 9 phases of fixes planned (P0: ADX direction, orchestrator thresholds; P1: fast momentum, down bars, price drop, startup resilience; P2: stream tracking, stale detection, connection cleanup).
+- [2026-01-19 18:59] **TRADING RESUMED** - New day reset daily loss limit. Equity $1,917.47. Today's P/L +$12.28 (+0.64%). AVAX recovering slightly ($12.66→$12.77). Still holding 119 AVAX at -6% unrealized (-$96). Risk overlay NORMAL, all signals healthy.
+- [2026-01-18 22:12] **⚠️ DAILY LOSS LIMIT HIT — TRADING HALTED** - AVAX dropped ~8% ($13.76 → $12.66). Bot accumulated during decline (119 qty @ $13.58 avg). Unrealized -$111.17. Daily P/L -$105.84 (-5.27%) exceeded -5% limit. Circuit breaker triggered. Trading resumes at midnight or via manual reset.
+- [2026-01-17 17:00] **BOT CRASH & RECOVERY** - Alpaca WebSocket rate limit (429 + "connection limit exceeded") caused crash. Fixed by killing zombie processes holding stale TCP connections, then starting server directly (bypassing start.py timeout). Exponential backoff in stream.py eventually reconnected.
+- [2026-01-16 22:39] **PERFORMANCE UPDATE** - Bot healthy, NORMAL mode for 34+ hours. Equity $1,995.50. Today +$0.99 (4 trades). 7-day +$16.43. All-time +$18.74 (27 trades). Grid profit: AVAX $13.57, LTC $3.41. 5 open limit orders on AVAX.
 - [2026-01-14 14:35] **WEEK 1 ANALYSIS COMPLETE** - Decision: CONTINUE current config (AVAX 90%, LTC 10%, 2.7% spacing). Net profit +$15.13 since Jan 8. Fee ratio improved from ~50% to 21%. LTC kept for correlation signal (risk management), not profit.
 - [2026-01-14 14:20] **PAPER BOT SERVICES DISABLED** - Stopped all paper bot services and permanently disabled launchd agents. Moved 7 plist files to `~/Library/LaunchAgents/disabled/`. Only live bot (port 8001) remains active.
 - [2026-01-14 14:20] **CORRECTED P/L** - Actual trading P/L: +$11.53 (+0.58% on $2K). Previous "+101%" was misleading (included $1K deposit).
@@ -37,6 +50,167 @@
 - [2025-12-25 11:30] **Phase 1 Maintenance Complete**: State files moved to persistent storage
 
 ## Recent Work (High Signal)
+
+### Jan 21, 2026 AM — Code Quality & Robustness Improvements
+
+**Session Focus**: Addressed critical code quality issues identified in system analysis.
+
+**Changes Deployed** (both paper and live instances):
+
+1. **SQLite Configuration** (`src/database/db.py` lines 41-46):
+   ```python
+   conn = sqlite3.connect(DB_PATH, timeout=30.0)
+   conn.execute("PRAGMA journal_mode=WAL")
+   conn.execute("PRAGMA synchronous=NORMAL")
+   conn.execute("PRAGMA busy_timeout=30000")
+   ```
+   - Prevents "database is locked" errors under concurrent access
+   - WAL mode enables concurrent reads
+   - 30s timeout prevents indefinite hangs
+
+2. **Exception Handling** (`src/execution/bot_grid.py` lines 3591, 3607, 3620):
+   - Fixed 3 bare `except:` blocks that silently swallowed errors
+   - Now logs: `logger.error(f"[ERROR] {operation} failed: {type(e).__name__}: {e}")`
+   - Affects: positions fetch, open orders fetch, account/equity fetch
+   - Maintains safe fallback behavior while providing visibility
+
+3. **Stream Watchdog Threshold** (`src/execution/bot_grid.py` line 3410):
+   - Changed `STALE_THRESHOLD_SECONDS` from 180 to 90
+   - Triggers reconnection after ~1.5 missed bars instead of ~3
+   - More aggressive recovery for live trading
+
+4. **Stream Status Threshold** (`src/execution/bot_grid.py` line 4710):
+   - Fixed hardcoded 90s to 60s for "connected" status
+   - Status levels now: <60s=connected, 60-90s=degraded, >90s=stale
+   - Provides accurate health reporting
+
+**Bot Stability**: Bot crashed multiple times during session (cause unknown), but watchdog auto-recovered each time. Stream reconnection working correctly with new 90s threshold.
+
+**AVAX Position**: Still underwater at -9.2% (-$147). Avg entry improved slightly ($13.58 → $13.45) due to cost basis averaging. Needs +7.5% to reach $13.13 breakeven sell.
+
+**Files Modified**:
+- `bluebird/src/database/db.py`
+- `bluebird-live/src/database/db.py`
+- `bluebird/src/execution/bot_grid.py`
+- `bluebird-live/src/execution/bot_grid.py`
+
+### Jan 20, 2026 PM — Bot Restart & AVAX Recovery Order
+
+**Bot Restart**:
+- Killed LIVE bot (PID 79619) to trigger restart with new protection code
+- Verified new code loaded:
+  - `/api/risk/overlay` shows `raw_plus_di` and `raw_minus_di` fields (ADX direction fix working)
+  - ADX direction = "up" (previously stuck at "neutral" due to regime masking bug)
+  - `/health` shows `stream_state` object with connection tracking
+  - AVAX in `grid_reduced` mode (orchestrator thresholds working)
+- Killed stray paper bot processes (PIDs 47868, 67890, 67891) that shouldn't have been running
+- Restarted notifier to pick up 2-min stale threshold (was 5 min)
+
+**AVAX Position Analysis**:
+- **Core Problem**: Grid top ($13.38) is BELOW avg cost ($13.58)
+- Grid sells can't recover position — they sell at a loss
+- Position: 119.14 AVAX @ $13.58 avg, current ~$12.50
+- Unrealized loss: **-$129** (-8.5%)
+- 83 AVAX already allocated to 4 grid sell orders
+- Only 36 AVAX available for new orders
+
+**Recovery Strategy — Option C (Manual Breakeven Sell)**:
+- First attempt: 40 AVAX @ $13.60 → REJECTED (insufficient available balance)
+- Discovery: 83 AVAX allocated to grid orders, only 36 available
+- Second attempt: 35 AVAX @ $13.60 → SUCCESS
+- **Order ID**: `4d3a11de-6529-4ab5-9a07-92dac42da0a5`
+- Expected: If AVAX > $13.60, sell 35 @ ~$0.02 profit each
+
+**Current AVAX Order Stack**:
+| Level | Qty | Price | Status |
+|-------|-----|-------|--------|
+| Breakeven | 35 | $13.60 | NEW (manual) |
+| Grid L4 | ~20 | $14.02 | Grid sell |
+| Grid L3 | ~21 | $13.71 | Grid sell |
+| Grid L2 | ~21 | $13.38 | Grid sell |
+| Grid L1 | ~21 | $13.04 | Grid sell |
+
+**Market Conditions**: ADX 9.1 (very low = sideways), correlation -0.02, momentum -0.28%. Favorable for grid trading and recovery.
+
+### Jan 20, 2026 — Protection Improvements Deployed to LIVE
+
+**Deployment**: All 9 phases of protection improvements deployed to LIVE instance with **conservative settings** (more buffer than paper instance).
+
+**Files Modified**:
+1. `config_ultra.py` - Added new protection parameters with conservative values
+2. `src/execution/bot_grid.py` - ADX direction fix, fast momentum, enhanced down bars, price drop protection, stream state updates
+3. `src/api/server.py` - Added stream_state to system_state and /health endpoint
+4. `src/notifications/notifier.py` - Faster stale detection (2 min threshold)
+5. `start.py` - Added wait_for_health with 90s timeout, degraded mode support
+
+**Conservative vs Paper Thresholds**:
+
+| Parameter | Paper | LIVE | Rationale |
+|-----------|-------|------|-----------|
+| DEFENSIVE_INVENTORY_PCT | 110% | **130%** | More buffer before blocking |
+| GRID_REDUCED_ENTER_PCT | 70% | **85%** | Catches buildup with more room |
+| MOMENTUM_FAST_THRESHOLD | -2.0% | **-3.0%** | Only triggers on larger drops |
+| PRICE_DROP_THRESHOLD_PCT | -5.0% | **-8.0%** | Won't block during normal volatility |
+| ADX_DIRECTION_MIN_DI_DIFF_PCT | 5.0% | **5.0%** | Same (critical fix) |
+| Stale threshold | 2 min | **2 min** | Same (faster alerts) |
+
+**New Protection Features**:
+- **ADX Direction Fix**: Uses raw DI+/DI- comparison instead of regime classification. Fixes bug where VOLATILE regime masked TRENDING_DOWN.
+- **Fast Momentum**: 3-bar window catches flash crashes before 10-bar window would react.
+- **Enhanced Down Bars**: Window analysis (70% red ratio OR 4% cumulative drop) doesn't reset on single green bar.
+- **Price Drop Protection**: Blocks buys if price dropped >8% from 30-minute high.
+
+**Observability Improvements**:
+- `/health` endpoint now shows stream_state with connection_status, is_rate_limited, current_backoff_seconds, reconnect_count, last_error.
+- Notifier alerts on stale data after 2 minutes (was 5 minutes).
+
+**Startup Resilience**:
+- `wait_for_health()` method with 90s timeout (was 30s port check)
+- Accepts degraded mode (API up, stream reconnecting) during WebSocket backoff cycles
+
+**Syntax Verification**: All 5 modified files pass `python -m py_compile`
+
+**Note**: Changes take effect on next bot restart. Current bot continues running with old code until restart.
+
+### Jan 19, 2026 — Root Cause Analysis & Protection Improvements Plan
+
+**Incident Analysis (Jan 17-18)**:
+Deep analysis of why protections failed during the AVAX 8% drop and WebSocket crash.
+
+**Protection System Gaps Found**:
+
+| Gap | Issue | Impact |
+|-----|-------|--------|
+| ADX Direction Bug | VOLATILE regime masks TRENDING_DOWN | adx_direction="neutral" even during clear downtrends |
+| Orchestrator Dead Zone | 30-100% inventory has no restrictions | Inventory accumulated to 79% without any gates |
+| Momentum Window | 10-bar window too large | -1.4% reading when actual drop was -8% |
+| Down Bars Fragile | Resets on single green bar | Ineffective during sustained drops |
+
+**Resilience Gaps Found**:
+
+| Gap | Issue | Impact |
+|-----|-------|--------|
+| start.py Timeout | 30s too short for WebSocket backoff | Declares failure during normal reconnection |
+| No Degraded Mode | Can't start API without stream | Bot completely down during rate limits |
+| Slow Stale Detection | 5 min threshold in notifier | Late alerts on stream disconnect |
+| Zombie Cleanup | No TCP connection cleanup | Manual intervention needed |
+
+**Root Cause - ADX Direction**:
+- `regime_detector.py` line 133-136 checks VOLATILE (vol_ratio > 1.5) BEFORE TRENDING (adx > 25)
+- During volatile downtrends, regime = VOLATILE → adx_direction = "neutral"
+- Raw DI+/DI- are calculated in `feature_calculator.py` but NOT used for direction
+- Fix: Use raw `minus_di > plus_di` comparison instead of regime classification
+
+**Root Cause - Orchestrator**:
+- GRID_REDUCED threshold at 100% is too high
+- At 79% inventory, orchestrator was still GRID_FULL (no size restrictions)
+- Fix: Lower GRID_REDUCED to 70%, DEFENSIVE to 110%
+
+**Implementation Plan**: `~/.claude/plans/spicy-questing-bumblebee.md`
+- 9 phases of improvements
+- P0: ADX direction fix, lower orchestrator thresholds
+- P1: Fast momentum (3-bar), enhanced down bars, price drop protection, startup resilience
+- P2: Stream state tracking, faster stale detection, connection cleanup
 
 ### Jan 14, 2026 — Week 1 Analysis + Paper Bot Disabled
 
@@ -486,18 +660,25 @@ Config changed on Jan 8. Analysis performed Jan 14 (6 days).
 
 ## Performance Tracking (LIVE Instance - $2K Account)
 
-**NOTE**: Starting capital = $2,000 ($1K original + $1K deposit). Actual trading P/L = +$11.53 (+0.58%).
+**NOTE**: Starting capital = $2,000 ($1K original + $1K deposit). Grid start = $1,000 (Jan 6). Current equity = $1,827.48.
 
 | Date | Daily P/L | Cumulative | Equity | Notes |
 |------|-----------|------------|--------|-------|
-| **Jan 14** | +$0.36 | +$15.13 | $2,011.54 | Week 1 analysis: CONTINUE config |
-| Jan 13 | +$16.53 | +$14.77 | $2,011.29 | Strong day |
-| Jan 12 | -$4.46 | -$1.76 | $1,994.76 | False halt bug fixed |
-| Jan 11 | +$2.83 | +$2.70 | $1,999.22 | — |
-| Jan 10 | $0.00 | -$0.13 | $1,996.39 | — |
-| Jan 9 | -$0.02 | -$0.13 | $1,996.39 | — |
-| Jan 8 | -$3.45 | -$0.11 | $1,996.41 | Config change: 2 symbols, 2.7% spacing |
-| Jan 7 | -$0.14 | +$3.34 | $1,999.86 | First full day, DOGE trades |
+| **Jan 21** | -$37.34 | -$172.52 | $1,827.48 | Computer restarted, watchdog recovered bot |
+| Jan 20 | — | — | ~$1,865 | Protections deployed, bot restarted, breakeven order placed |
+| Jan 19 | +$12.28 | — | $1,917 | Trading resumed after daily reset |
+| **Jan 18** | **-$99.29** | -$96.54 | $1,903.46 | ⚠️ HALTED: Daily loss limit (-5.27%) |
+| Jan 17 | +$9.55 | +$2.75 | $2,012.85 | Bot crash & recovery (WS rate limit) |
+| Jan 16 | -$0.09 | -$6.80 | $1,993.52 | — |
+| Jan 15 | -$10.97 | -$6.71 | $1,996.35 | — |
+| Jan 14 | -$4.56 | +$4.26 | $2,006.62 | Week 1 analysis: CONTINUE config |
+| Jan 13 | +$16.53 | +$8.82 | $2,011.29 | Strong day |
+| Jan 12 | -$4.46 | -$7.71 | $1,994.76 | False halt bug fixed |
+| Jan 11 | +$2.81 | -$3.25 | $1,999.22 | — |
+| Jan 10 | $0.00 | -$6.06 | $1,996.39 | — |
+| Jan 9 | -$0.02 | -$6.06 | $1,996.39 | — |
+| Jan 8 | -$3.45 | -$6.04 | $1,996.41 | Config change: 2 symbols, 2.7% spacing |
+| Jan 7 | -$0.14 | -$2.59 | $1,999.86 | First full day, DOGE trades |
 | Jan 6 | — | — | $2,000.00 | Start ($1K + $1K deposit) |
 
 ## Performance Tracking (PAPER Instance - $100K+ Account)
