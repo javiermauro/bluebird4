@@ -111,7 +111,13 @@ class NotificationService:
         # Watchdog state - detect stale data (bot stream disconnected)
         self.last_bot_update: Optional[datetime] = None
         self.stale_alert_sent = False
-        self.stale_threshold_minutes = 5  # Alert if no update for 5 minutes
+        self.stale_threshold_minutes = 2  # Alert if no update for 2 minutes (faster alerts)
+        self.last_stale_alert_time: Optional[datetime] = None  # Cooldown tracking
+        self.stale_alert_cooldown_minutes = 30  # Don't repeat stale alerts within 30 min
+
+        # Drawdown alert cooldown
+        self.last_drawdown_alert_time: Optional[datetime] = None
+        self.drawdown_alert_cooldown_minutes = 60  # Don't repeat drawdown alerts within 60 min
 
         # API resilience tracking
         self.api_failure_count = db_status.get('api_failures', 0) if db_status else 0
@@ -533,20 +539,26 @@ class NotificationService:
             self.send_sms(message, force=True, sms_type="alert")  # Force send even in quiet hours
         self.last_risk_halted = halted
 
-        # Check drawdown threshold
+        # Check drawdown threshold (with cooldown to prevent spam)
         drawdown = risk.get('drawdown_pct', 0)
         if drawdown >= self.config.drawdown_alert_threshold:
-            if not self.last_drawdown_alert_sent:
+            # Check cooldown - don't spam if we already alerted recently
+            cooldown_ok = True
+            if self.last_drawdown_alert_time:
+                elapsed = (datetime.now() - self.last_drawdown_alert_time).total_seconds() / 60
+                if elapsed < self.drawdown_alert_cooldown_minutes:
+                    cooldown_ok = False
+                    logger.debug(f"Drawdown alert suppressed (cooldown: {elapsed:.0f}/{self.drawdown_alert_cooldown_minutes} min)")
+
+            if cooldown_ok:
                 message = templates.format_risk_alert(
                     risk,
                     reason=f"Drawdown exceeded {self.config.drawdown_alert_threshold}%"
                 )
                 logger.warning(f"Drawdown alert: {drawdown:.2f}%")
                 self.send_sms(message, sms_type="alert")
-                self.last_drawdown_alert_sent = True
-        else:
-            # Reset flag when drawdown recovers
-            self.last_drawdown_alert_sent = False
+                self.last_drawdown_alert_time = datetime.now()
+        # Note: No reset needed with cooldown approach - cooldown expires naturally
 
     def check_daily_summary(self, stats: Dict[str, Any]) -> None:
         """Check if it's time to send daily summary."""
@@ -589,7 +601,16 @@ class NotificationService:
                     minutes_stale = (now - last_update).total_seconds() / 60
 
                     if minutes_stale >= self.stale_threshold_minutes:
-                        if not self.stale_alert_sent:
+                        # Check cooldown to prevent spam from stream flapping
+                        cooldown_ok = True
+                        if self.last_stale_alert_time:
+                            elapsed = (datetime.now() - self.last_stale_alert_time).total_seconds() / 60
+                            if elapsed < self.stale_alert_cooldown_minutes:
+                                cooldown_ok = False
+                                if not self.stale_alert_sent:
+                                    logger.info(f"Stale alert suppressed (cooldown: {elapsed:.0f}/{self.stale_alert_cooldown_minutes} min)")
+
+                        if not self.stale_alert_sent and cooldown_ok:
                             message = (
                                 f"⚠️ BLUEBIRD WATCHDOG ALERT\n\n"
                                 f"Bot data is STALE!\n"
@@ -601,14 +622,21 @@ class NotificationService:
                             logger.warning(f"Stale data detected: {minutes_stale:.1f} minutes old")
                             self.send_sms(message, force=True, sms_type="alert")
                             self.stale_alert_sent = True
+                            self.last_stale_alert_time = datetime.now()
                     else:
-                        # Data is fresh - reset alert flag
-                        if self.stale_alert_sent:
-                            logger.info("Bot data is fresh again - resetting stale alert")
-                            self.send_sms(
-                                f"✅ BLUEBIRD RECOVERED\n\nBot is receiving data again.",
-                                force=True, sms_type="alert"
-                            )
+                        # Data is fresh - only send RECOVERED if we actually alerted about being stale
+                        # AND we've been stale for meaningful time (prevents flap spam)
+                        if self.stale_alert_sent and self.last_stale_alert_time:
+                            stale_duration = (datetime.now() - self.last_stale_alert_time).total_seconds() / 60
+                            # Only send recovered if stale for at least 5 min (meaningful outage)
+                            if stale_duration >= 5:
+                                logger.info(f"Bot data recovered after {stale_duration:.1f} min stale")
+                                self.send_sms(
+                                    f"✅ BLUEBIRD RECOVERED\n\nBot is receiving data again after {int(stale_duration)} min.",
+                                    force=True, sms_type="alert"
+                                )
+                            else:
+                                logger.info(f"Bot recovered quickly ({stale_duration:.1f} min) - no recovery SMS")
                         self.stale_alert_sent = False
                         self.last_bot_update = last_update
 

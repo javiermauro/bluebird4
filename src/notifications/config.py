@@ -132,7 +132,7 @@ class NotificationConfig:
     daily_summary_enabled: bool = True
 
     # Alert thresholds
-    drawdown_alert_threshold: float = 2.0  # Alert if drawdown > 2%
+    drawdown_alert_threshold: float = 3.0  # Alert if drawdown > 3% (raised from 2% to reduce spam)
 
     # Alert toggles
     alert_on_trade: bool = True

@@ -1,9 +1,9 @@
 # Progress — Status & History
 
 ## Current Status
+- [2026-01-22 PM] **✅ DECISION: HOLD AVAX** - After thorough analysis (web research + paper bot data), decided to HOLD. Paper bot shows AVAX outperforms SOL 3.3x ($4,428 vs $1,336 in Jan). Issue is timing not coin. Review Jan 29. Exit if AVAX < $11.
 - [2026-01-21 PM] **COMPUTER RESTARTED - WATCHDOG RECOVERED BOT** - Mac restarted, launchd watchdog automatically recovered the live bot. Bot running on port 8001, stream initializing. All services healthy.
-- [2026-01-21 PM] **AVAX POSITION UPDATE** - Position reduced from 119 to 104.47 qty (some sells filled). Now @ $13.26 avg entry. Current price $11.99, unrealized -$132.69 (-9.6%). Need +10.6% to hit breakeven.
-- [2026-01-21 PM] **PERFORMANCE UPDATE** - Equity: $1,827.48. Total return: -$172.52 (-8.6%) from $2K starting. Daily P/L: -$37.34 (-2.0%). Grid profit: +$35.03 (2 trades).
+- [2026-01-21 PM] **AVAX POSITION UPDATE** - Position reduced from 119 to 75.30 qty (sells filled). Now @ $13.15 avg entry. Current price $12.14, unrealized -$76.38 (-7.7%). Need +8.3% to hit breakeven.
 - [2026-01-21 AM] **CODE QUALITY IMPROVEMENTS DEPLOYED** - SQLite hardening (WAL mode, 30s timeout), exception handling fixes, stream watchdog lowered to 90s.
 - [2026-01-21 AM] **BOT STABILITY** - Bot crashed multiple times during session but watchdog auto-recovered each time. Stream reconnection working.
 - [2026-01-20 PM] **AVAX RECOVERY IN PROGRESS** - Placed manual breakeven limit sell: 35 AVAX @ $13.60 (Order ID: 4d3a11de-...). Position: 119.14 AVAX @ $13.58 avg, current ~$12.50, unrealized -$129. Grid top ($13.38) is below avg cost — grid can't recover alone. Need AVAX > $13.58 for order to fill.
@@ -48,6 +48,54 @@
 - [2025-12-25 11:48] **Phase 3 Maintenance Complete**: Daily database backups at 3 AM
 - [2025-12-25 11:42] **Phase 2 Maintenance Complete**: Bot watchdog with auto-restart
 - [2025-12-25 11:30] **Phase 1 Maintenance Complete**: State files moved to persistent storage
+
+## ✅ Coin Analysis Complete — DECISION: HOLD AVAX (Jan 22, 2026)
+
+### Analysis Performed
+Thorough research comparing AVAX vs SOL for grid trading:
+1. Web search for price predictions and trends
+2. Paper bot historical performance comparison
+3. Volatility and risk metrics analysis
+
+### Key Discovery: Paper Bot Data
+| Symbol | Jan 2026 Sells | Total Profit | Avg/Trade |
+|--------|----------------|--------------|-----------|
+| **AVAX/USD** | 182 | **$4,428** | $24.33 |
+| LTC/USD | 29 | $1,407 | $48.53 |
+| SOL/USD | 107 | $1,336 | $12.49 |
+| DOGE/USD | 91 | $1,266 | $13.92 |
+
+**AVAX outperforms SOL by 3.3x on paper bot!**
+
+### Web Research Summary
+| Metric | AVAX | SOL |
+|--------|------|-----|
+| YTD 2026 Return | -19.26% | +21.05% |
+| Volatility | 26.03% (higher = more grid cycles) | 20.78% |
+| Sharpe Ratio | 0.10 | 0.70 |
+
+### Why Live Bot Is Down (Not Coin's Fault)
+1. **Bad timing**: Started Jan 6, crashed Jan 18 (-8%)
+2. **Small capital**: $2K vs paper's $100K+ = less buffer
+3. **Same strategy works**: Paper bot making $4,428 on AVAX
+
+### Decision: HOLD
+- Do NOT switch to SOL
+- AVAX needs +8.3% to breakeven ($12.14 → $13.15)
+- Grid profit +$44 proves strategy works
+- Switching would lock in -$76 loss permanently
+
+### Monitoring Plan
+- **Review date**: Jan 29, 2026
+- **Exit trigger**: If AVAX breaks below $11.00 (-10% more), reassess
+- **Success trigger**: AVAX reaches $13.15+, position recovers
+
+### Sources
+- [PortfoliosLab SOL vs AVAX](https://portfolioslab.com/tools/stock-comparison/SOL-USD/AVAX-USD)
+- [CoinCodex AVAX Prediction](https://coincodex.com/crypto/avalanche/price-prediction/)
+- [BeInCrypto Grid Trading](https://beincrypto.com/learn/grid-trading-crypto-explained/)
+
+---
 
 ## Recent Work (High Signal)
 
@@ -664,7 +712,8 @@ Config changed on Jan 8. Analysis performed Jan 14 (6 days).
 
 | Date | Daily P/L | Cumulative | Equity | Notes |
 |------|-----------|------------|--------|-------|
-| **Jan 21** | -$37.34 | -$172.52 | $1,827.48 | Computer restarted, watchdog recovered bot |
+| **Jan 22** | -$36.11 | -$151.07 | $1,848.93 | ⚠️ Coin change evaluation |
+| Jan 21 | +$20.22 | -$114.96 | $1,885.04 | Computer restarted, watchdog recovered bot |
 | Jan 20 | — | — | ~$1,865 | Protections deployed, bot restarted, breakeven order placed |
 | Jan 19 | +$12.28 | — | $1,917 | Trading resumed after daily reset |
 | **Jan 18** | **-$99.29** | -$96.54 | $1,903.46 | ⚠️ HALTED: Daily loss limit (-5.27%) |

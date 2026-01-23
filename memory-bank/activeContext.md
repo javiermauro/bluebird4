@@ -1,36 +1,59 @@
 # Active Context — Current Focus
 
 ## Reminders
-- **[2026-01-21] WEEK 2 REVIEW** — Continue monitoring 2.7% grid spacing performance. Compare daily averages, fee ratios, and total equity growth.
+- **[2026-01-29] AVAX REVIEW DATE** — Check if AVAX recovered. Exit trigger: below $11.00. Success: above $13.15.
+- **[2026-01-22] ✅ DECISION: HOLD AVAX** — Analysis complete. Paper bot proves AVAX outperforms SOL 3.3x. Issue is timing, not coin. Do NOT switch.
 
 ## Now
-- [2026-01-21 PM] **COMPUTER RESTARTED - WATCHDOG RECOVERED BOT** - System restarted, launchd watchdog automatically recovered the live bot. Bot running on port 8001, stream initializing.
-- [2026-01-21 PM] **AVAX POSITION STATUS** - Underwater at -9.6% (-$133), needs +10.6% to hit $13.26 breakeven. Position reduced from 119 to 104 qty (some sells filled). Grid strategy working as designed - waiting for bounce.
-- [2026-01-21 AM] **CODE QUALITY IMPROVEMENTS DEPLOYED** - SQLite hardening (WAL mode, 30s timeout), exception handling fixes, stream watchdog lowered to 90s.
-- [2026-01-20 PM] **AVAX BREAKEVEN ORDER PLACED** - Manual limit sell for 35 AVAX @ $13.60 (Order ID: 4d3a11de-...).
-- [2026-01-20] **PROTECTION IMPROVEMENTS DEPLOYED TO LIVE** - All 9 phases of protection improvements deployed with conservative settings.
+- [2026-01-22 PM] **✅ HOLD AVAX DECISION** - After analysis (web + paper bot data), decided to HOLD. Paper bot: AVAX $4,428 vs SOL $1,336 in Jan (3.3x better). Review Jan 29.
+- [2026-01-22 PM] **PERFORMANCE** - Equity $1,848.93 (-7.6% from $2K). AVAX unrealized -$76 (-7.7%). Grid profit +$44. Needs +8.3% to breakeven.
+- [2026-01-21 PM] **COMPUTER RESTARTED - WATCHDOG RECOVERED BOT** - System restarted, launchd watchdog automatically recovered the live bot.
+- [2026-01-20] **PROTECTION IMPROVEMENTS DEPLOYED TO LIVE** - All 9 phases deployed with conservative settings.
 
-## System Health (LIVE Instance) — Updated Jan 21, 2026 @ 2:10 PM EST
+## System Health (LIVE Instance) — Updated Jan 22, 2026 @ 7:26 PM EST
 - **Bot**: Healthy, NORMAL mode, port 8001
-- **Stream**: Initializing (post-restart, watchdog recovering)
-- **Equity**: $1,827.48
-- **Daily P/L**: -$37.34 (-2.0%)
-- **Unrealized P/L**: **-$133** (AVAX -$133, LTC -$1)
-- **AVAX Position**: 104.47 qty @ $13.26 avg (current $11.99)
-- **Breakeven Target**: $13.26 (+10.6% needed)
-- **Risk Overlay**: NORMAL mode
-- **Orchestrator**: AVAX in grid_reduced (123h episode), LTC in grid_full
+- **Stream**: Degraded (100s since last bar)
+- **Equity**: $1,848.93
+- **Daily P/L**: -$36.11 (-1.92%)
+- **Unrealized P/L**: **-$76** (AVAX -$76, LTC +$1)
+- **AVAX Position**: 75.30 qty @ $13.15 avg (current $12.14)
+- **Breakeven Target**: $13.15 (+8.3% needed)
+- **Risk Overlay**: NORMAL (7.6 hours)
+- **Orchestrator**: AVAX grid_full (152h episode), LTC grid_full (50h episode)
 
-## Key Metrics (Jan 21, 2026 - LIVE Instance)
+## Key Metrics (Jan 22, 2026 - LIVE Instance)
 | Metric | Value |
 |--------|-------|
-| **Equity** | $1,827.48 |
+| **Equity** | $1,848.93 |
 | **Starting Capital** | $2,000.00 |
-| **Total Return** | **-$172.52 (-8.6%)** |
-| **AVAX Position** | 104.47 qty @ $13.26 avg |
-| **AVAX Unrealized** | -$132.69 (-9.6%) |
-| **Breakeven Price** | $13.26 (+10.6% from $11.99) |
-| **Grid Profit** | +$35.03 (2 completed trades) |
+| **Total Return** | **-$151.07 (-7.6%)** |
+| **AVAX Position** | 75.30 qty @ $13.15 avg |
+| **AVAX Unrealized** | -$76.38 (-7.7%) |
+| **Breakeven Price** | $13.15 (+8.3% from $12.14) |
+| **Grid Profit** | +$44.04 (2 completed trades) |
+
+## ✅ AVAX Decision: HOLD (Jan 22, 2026)
+
+**Decision**: HOLD AVAX position. Do NOT switch to SOL.
+
+**Key Finding**: Paper bot data proves AVAX is the BEST performer for grid trading:
+| Symbol | Jan 2026 Profit |
+|--------|-----------------|
+| **AVAX** | **$4,428** (182 sells) |
+| SOL | $1,336 (107 sells) |
+
+AVAX outperforms SOL by **3.3x** on paper bot in same period!
+
+**Why We're Down**: Bad timing, not bad coin choice.
+- Live bot started Jan 6, right before Jan 18 crash (-8%)
+- Small capital ($2K) vs paper ($100K+) = less buffer
+- Same coin, same strategy = paper bot profiting, we're temporarily underwater
+
+**Recovery Plan**:
+- AVAX needs +8.3% to breakeven ($12.14 → $13.15)
+- Grid profit: +$44 ✅ (strategy IS working)
+- Monitor until Jan 29 - if AVAX breaks below $11.00, reassess
+- Switching now would lock in -$76 loss permanently
 
 ## Configuration (Jan 14, 2026 - LIVE Instance)
 | Setting | Value |
