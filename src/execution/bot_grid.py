@@ -207,6 +207,34 @@ class GridTradingBot:
         self.daily_loss_limit = getattr(config, 'DAILY_LOSS_LIMIT', 0.05)
         self.max_drawdown = getattr(config, 'MAX_DRAWDOWN', 0.10)
 
+        # === GRADUATED LOSS RESPONSE (Phase 2) ===
+        # Progressive protection before circuit breaker triggers
+        self.daily_loss_trigger_caution = getattr(config, 'DAILY_LOSS_TRIGGER_CAUTION', 0.02)
+        self.daily_loss_trigger_defensive = getattr(config, 'DAILY_LOSS_TRIGGER_DEFENSIVE', 0.035)
+        self.daily_loss_recovery_pct = getattr(config, 'DAILY_LOSS_RECOVERY_PCT', 0.015)
+        self.daily_loss_caution_size_mult = getattr(config, 'DAILY_LOSS_CAUTION_SIZE_MULT', 0.50)
+        self.graduated_loss_mode = "NORMAL"  # NORMAL, CAUTION, DEFENSIVE, or HALT
+        logger.info(f"  Graduated Loss: CAUTION @ {self.daily_loss_trigger_caution:.0%}, "
+                    f"DEFENSIVE @ {self.daily_loss_trigger_defensive:.0%}, HALT @ {self.daily_loss_limit:.0%}")
+
+        # === RECOVERY TRAILING PROFIT TRIM ===
+        # Tighter exits when inventory is elevated
+        self.recovery_trail_enabled = getattr(config, 'RECOVERY_TRAIL_ENABLED', True)
+        self.recovery_trail_inventory_threshold = getattr(config, 'RECOVERY_TRAIL_INVENTORY_THRESHOLD', 1.0)
+        self.recovery_trail_trigger_pct = getattr(config, 'RECOVERY_TRAIL_TRIGGER_PCT', 0.025)
+        self.recovery_trail_gap_pct = getattr(config, 'RECOVERY_TRAIL_GAP_PCT', 0.005)
+        self.recovery_trail_sell_portion = getattr(config, 'RECOVERY_TRAIL_SELL_PORTION', 0.40)
+        self.recovery_trail_cooldown_min = getattr(config, 'RECOVERY_TRAIL_COOLDOWN_MIN', 90)
+        self.recovery_trail_grid_sell_buffer_min = getattr(config, 'RECOVERY_TRAIL_GRID_SELL_BUFFER_MIN', 5)
+        # Per-symbol trailing state: {symbol: {'peak': float, 'line': float, 'active': bool, 'last_sell_ts': datetime}}
+        self.recovery_trail_state: Dict[str, Dict] = {}
+        # Track last grid sell timestamp per symbol
+        self.last_grid_sell_ts: Dict[str, datetime] = {}
+        if self.recovery_trail_enabled:
+            logger.info(f"  Recovery Trail: trigger={self.recovery_trail_trigger_pct:.1%}, "
+                        f"gap={self.recovery_trail_gap_pct:.1%}, portion={self.recovery_trail_sell_portion:.0%}, "
+                        f"cooldown={self.recovery_trail_cooldown_min}min")
+
         # === RISK OVERLAY (Crash Protection State Machine) ===
         # Blocks buys and rebalance-down during crashes, gradual re-entry on recovery
         self.risk_overlay = RiskOverlay(config)
@@ -255,6 +283,9 @@ class GridTradingBot:
         self.price_history: Dict[str, List[float]] = {s: [] for s in self.symbols}
         self.correlation_window = 20  # Number of bars for correlation calculation
         self.high_correlation_threshold = 0.85  # Reduce exposure when correlation > this
+
+        # Price drop protection - track rolling highs per symbol
+        self.price_highs: Dict[str, List[Tuple[datetime, float]]] = {s: [] for s in self.symbols}
 
         # === WINDFALL PROFIT-TAKING STATE ===
         # Captures profits when positions show significant unrealized gains
@@ -1215,6 +1246,9 @@ class GridTradingBot:
         if len(self.price_history[symbol]) > self.correlation_window:
             self.price_history[symbol].pop(0)
 
+        # Update price high for drop protection
+        self.update_price_high(symbol, price)
+
     def detect_regime(self, symbol: str) -> Dict[str, Any]:
         """
         Detect market regime for a symbol using stored bars.
@@ -1391,6 +1425,8 @@ class GridTradingBot:
         """
         Check for consecutive down (red) bars as a simple crash guard.
 
+        Enhanced Jan 2026: Also checks window analysis (red ratio + cumulative drop).
+
         Args:
             symbol: The trading symbol to check
 
@@ -1410,7 +1446,7 @@ class GridTradingBot:
 
         # Count consecutive down bars from most recent
         count = 0
-        for bar in reversed(bars[-threshold:]):
+        for bar in reversed(bars):
             bar_open = float(bar.open) if hasattr(bar, 'open') else float(bar.get('open', 0))
             bar_close = float(bar.close) if hasattr(bar, 'close') else float(bar.get('close', 0))
             if bar_close < bar_open:
@@ -1418,11 +1454,133 @@ class GridTradingBot:
             else:
                 break
 
-        allow_buy = count < threshold
-        if not allow_buy:
+        if count >= threshold:
             logger.info(f"[DOWN] {symbol}: {count} consecutive down bars - blocking buys")
+            return False, count
 
-        return allow_buy, count
+        # === ENHANCED CHECK: Window analysis (doesn't reset on single green) ===
+        window = getattr(self.config, 'DOWN_BARS_WINDOW', 10)
+        red_ratio_threshold = getattr(self.config, 'DOWN_BARS_RED_RATIO_THRESHOLD', 0.70)
+        cumulative_drop_threshold = getattr(self.config, 'DOWN_BARS_CUMULATIVE_DROP_PCT', -4.0)
+
+        if len(bars) >= window:
+            window_bars = bars[-window:]
+
+            # Count red bars in window
+            red_count = 0
+            for bar in window_bars:
+                bar_open = float(bar.open) if hasattr(bar, 'open') else float(bar.get('open', 0))
+                bar_close = float(bar.close) if hasattr(bar, 'close') else float(bar.get('close', 0))
+                if bar_close < bar_open:
+                    red_count += 1
+
+            red_ratio = red_count / window
+            if red_ratio >= red_ratio_threshold:
+                logger.info(f"[DOWN] {symbol}: {red_ratio:.0%} red bars in {window}-bar window (threshold {red_ratio_threshold:.0%}) - blocking buys")
+                return False, red_count
+
+            # Calculate cumulative drop over window
+            first_bar = window_bars[0]
+            last_bar = window_bars[-1]
+            first_open = float(first_bar.open) if hasattr(first_bar, 'open') else float(first_bar.get('open', 0))
+            last_close = float(last_bar.close) if hasattr(last_bar, 'close') else float(last_bar.get('close', 0))
+
+            if first_open > 0:
+                cumulative_drop = (last_close - first_open) / first_open * 100
+                if cumulative_drop < cumulative_drop_threshold:
+                    logger.info(f"[DOWN] {symbol}: {cumulative_drop:.1f}% drop over {window} bars (threshold {cumulative_drop_threshold}%) - blocking buys")
+                    return False, count
+
+        return True, count
+
+    def update_price_high(self, symbol: str, price: float, timestamp: Optional[datetime] = None) -> None:
+        """
+        Update rolling price high for price drop protection.
+
+        Tracks price highs over a configurable lookback window.
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+
+        lookback_minutes = getattr(self.config, 'PRICE_DROP_LOOKBACK_MINUTES', 30)
+
+        # Add new price point
+        self.price_highs[symbol].append((timestamp, price))
+
+        # Remove entries older than lookback window
+        cutoff = timestamp - timedelta(minutes=lookback_minutes)
+        self.price_highs[symbol] = [
+            (ts, p) for ts, p in self.price_highs[symbol]
+            if ts >= cutoff
+        ]
+
+    def check_price_drop_protection(self, symbol: str, current_price: float) -> Tuple[bool, str]:
+        """
+        Block buys if price dropped significantly from recent high.
+
+        Returns:
+            Tuple of (allow_buy, reason)
+            - allow_buy: True if buys allowed, False if blocked
+            - reason: Explanation string
+        """
+        if not getattr(self.config, 'PRICE_DROP_PROTECTION_ENABLED', True):
+            return True, "disabled"
+
+        threshold = getattr(self.config, 'PRICE_DROP_THRESHOLD_PCT', -5.0)
+
+        # Get recent high from tracked prices
+        prices = self.price_highs.get(symbol, [])
+        if not prices:
+            return True, "no_history"
+
+        recent_high = max(p for _, p in prices)
+
+        if recent_high > 0:
+            drop_pct = (current_price - recent_high) / recent_high * 100
+
+            if drop_pct < threshold:
+                logger.info(f"[PRICEDROP] {symbol}: Price dropped {drop_pct:.1f}% from high ${recent_high:.2f} (threshold {threshold}%) - blocking buys")
+                return False, f"dropped_{drop_pct:.1f}%_from_high"
+
+        return True, "ok"
+
+    def check_buy_throttle(self, symbol: str) -> Tuple[bool, str]:
+        """
+        Check if buy is allowed based on 24-hour fill throttles.
+
+        Blocks new buys if either limit is exceeded:
+        - MAX_FILLED_BUYS_24H (count)
+        - MAX_FILLED_BUY_NOTIONAL_24H (USD)
+
+        Returns:
+            Tuple of (allow_buy, reason)
+        """
+        if not getattr(self.config, 'BUY_THROTTLE_ENABLED', True):
+            return True, "disabled"
+
+        max_count = getattr(self.config, 'MAX_FILLED_BUYS_24H', 6)
+        max_notional = getattr(self.config, 'MAX_FILLED_BUY_NOTIONAL_24H', 250.0)
+
+        try:
+            from src.database.db import get_filled_buys_24h
+            stats = get_filled_buys_24h(symbol)
+
+            count_24h = stats.get('count', 0)
+            notional_24h = stats.get('notional', 0.0)
+
+            if count_24h >= max_count:
+                logger.info(f"[THROTTLE] {symbol}: Buy count {count_24h} >= {max_count} in 24h - blocking")
+                return False, f"buy_throttle_count_{count_24h}"
+
+            if notional_24h >= max_notional:
+                logger.info(f"[THROTTLE] {symbol}: Buy notional ${notional_24h:.2f} >= ${max_notional} in 24h - blocking")
+                return False, f"buy_throttle_notional_{notional_24h:.0f}"
+
+            return True, f"ok_count={count_24h}_notional={notional_24h:.0f}"
+
+        except Exception as e:
+            logger.warning(f"[THROTTLE] Error checking buy throttle for {symbol}: {e}")
+            return True, "error_checking"  # Fail open to not block trading on DB errors
 
     def calculate_correlations(self) -> Dict[str, float]:
         """
@@ -1502,21 +1660,41 @@ class GridTradingBot:
         Check momentum to avoid buying in strong downtrends.
 
         Uses simple price momentum over last N bars to detect trends.
+        Also includes FAST momentum (3-bar) for flash crash detection.
 
         Returns:
-            Dict with 'allow_buy', 'allow_sell', 'momentum', 'reason'
+            Dict with 'allow_buy', 'allow_sell', 'momentum', 'fast_momentum', 'reason'
         """
         result = {
             'allow_buy': True,
             'allow_sell': True,
             'momentum': 0.0,
+            'fast_momentum': 0.0,
             'reason': 'Neutral momentum'
         }
 
         prices = self.price_history.get(symbol, [])
+
+        # === FAST MOMENTUM CHECK (Flash Crash Detection) ===
+        # Uses 3-bar window for immediate detection of sharp drops
+        fast_window = getattr(self.config, 'MOMENTUM_FAST_WINDOW', 3)
+        fast_threshold = getattr(self.config, 'MOMENTUM_FAST_THRESHOLD', -2.0)
+
+        if len(prices) >= fast_window:
+            fast_momentum = (prices[-1] - prices[-fast_window]) / prices[-fast_window] * 100
+            fast_momentum = np.clip(fast_momentum, -100.0, 100.0)
+            result['fast_momentum'] = round(fast_momentum, 2)
+
+            if fast_momentum < fast_threshold:
+                result['allow_buy'] = False
+                result['reason'] = f"FLASH DROP {fast_momentum:.1f}% in {fast_window} bars"
+                logger.info(f"[MOMENTUM] {symbol}: Fast momentum {fast_momentum:.1f}% < {fast_threshold}% threshold - blocking buys")
+                return result  # Early return on flash crash
+
         if len(prices) < 10:
             return result
 
+        # === STANDARD MOMENTUM CHECK (10-bar window) ===
         # Calculate short-term momentum (last 5 vs previous 5)
         recent = np.mean(prices[-5:])
         previous = np.mean(prices[-10:-5])
@@ -2709,6 +2887,210 @@ class GridTradingBot:
             except Exception as e:
                 logger.debug(f"Failed to log equity snapshot: {e}")
 
+    def evaluate_graduated_loss_mode(self) -> Dict[str, Any]:
+        """
+        Evaluate and update graduated loss response mode.
+
+        Phase 2: Progressive protection before circuit breaker triggers:
+        - NORMAL: Full trading
+        - CAUTION: At 2% loss, reduce buy size to 50%
+        - DEFENSIVE: At 3.5% loss, block all buys
+        - HALT: At 5% loss, circuit breaker (existing)
+
+        Uses hysteresis to prevent mode flapping: only recover when loss < 1.5%.
+
+        Returns:
+            Dict with 'mode', 'size_mult', 'block_buys', 'reason'
+        """
+        loss_pct = -self.daily_pnl if self.daily_pnl < 0 else 0.0
+        prev_mode = self.graduated_loss_mode
+
+        result = {
+            'mode': self.graduated_loss_mode,
+            'size_mult': 1.0,
+            'block_buys': False,
+            'reason': None,
+            'loss_pct': loss_pct
+        }
+
+        # Skip evaluation if no valid starting equity
+        if self.daily_start_equity <= 0:
+            return result
+
+        # State machine with hysteresis
+        if loss_pct >= self.daily_loss_limit:
+            # HALT - handled by circuit breaker, just track mode
+            self.graduated_loss_mode = "HALT"
+            result['mode'] = "HALT"
+            result['block_buys'] = True
+            result['size_mult'] = 0.0
+            result['reason'] = f"Daily loss {loss_pct:.1%} >= HALT threshold {self.daily_loss_limit:.0%}"
+
+        elif loss_pct >= self.daily_loss_trigger_defensive:
+            # DEFENSIVE - block all buys
+            self.graduated_loss_mode = "DEFENSIVE"
+            result['mode'] = "DEFENSIVE"
+            result['block_buys'] = True
+            result['size_mult'] = 0.0
+            result['reason'] = f"Daily loss {loss_pct:.1%} >= DEFENSIVE threshold {self.daily_loss_trigger_defensive:.0%}"
+
+        elif loss_pct >= self.daily_loss_trigger_caution:
+            # CAUTION - reduce size
+            self.graduated_loss_mode = "CAUTION"
+            result['mode'] = "CAUTION"
+            result['size_mult'] = self.daily_loss_caution_size_mult
+            result['reason'] = f"Daily loss {loss_pct:.1%} >= CAUTION threshold {self.daily_loss_trigger_caution:.0%}"
+
+        elif loss_pct < self.daily_loss_recovery_pct:
+            # RECOVERY: Only return to NORMAL when loss < recovery threshold (hysteresis)
+            self.graduated_loss_mode = "NORMAL"
+            result['mode'] = "NORMAL"
+            result['size_mult'] = 1.0
+
+        else:
+            # In between recovery and caution thresholds - maintain current mode
+            # This is the hysteresis zone to prevent flapping
+            if self.graduated_loss_mode == "CAUTION":
+                result['mode'] = "CAUTION"
+                result['size_mult'] = self.daily_loss_caution_size_mult
+                result['reason'] = f"Holding CAUTION (loss {loss_pct:.1%}, need < {self.daily_loss_recovery_pct:.0%} to recover)"
+            elif self.graduated_loss_mode == "DEFENSIVE":
+                # Stepped down from DEFENSIVE but not recovered enough
+                self.graduated_loss_mode = "CAUTION"
+                result['mode'] = "CAUTION"
+                result['size_mult'] = self.daily_loss_caution_size_mult
+                result['reason'] = f"Stepped down to CAUTION (loss {loss_pct:.1%})"
+
+        # Log mode changes
+        if prev_mode != self.graduated_loss_mode:
+            logger.warning(f"[GRADUATED_LOSS] Mode change: {prev_mode} -> {self.graduated_loss_mode} "
+                          f"(daily loss: {loss_pct:.2%})")
+
+        return result
+
+    def check_recovery_trailing_exit(
+        self,
+        symbol: str,
+        current_price: float,
+        position_qty: float,
+        avg_entry_price: float,
+        inventory_pct: float
+    ) -> Dict[str, Any]:
+        """
+        Check if recovery trailing profit trim should execute.
+
+        Only active when:
+        - overlay_mode == NORMAL
+        - inventory_pct >= threshold (100%)
+        - unrealized_pnl_pct > 0
+        - No grid sell in last 5 minutes
+        - Cooldown not active
+
+        Returns:
+            Dict with 'should_sell', 'qty', 'reason', 'trailing_state'
+        """
+        result = {
+            'should_sell': False,
+            'qty': 0.0,
+            'reason': None,
+            'trailing_state': None
+        }
+
+        if not self.recovery_trail_enabled:
+            return result
+
+        # Check overlay mode (must be NORMAL)
+        if self.risk_overlay.mode != "NORMAL":
+            return result
+
+        # Check inventory threshold
+        if inventory_pct < self.recovery_trail_inventory_threshold:
+            # Clear trailing state when inventory drops below threshold
+            if symbol in self.recovery_trail_state:
+                del self.recovery_trail_state[symbol]
+            return result
+
+        # Check position exists
+        if position_qty <= 0 or avg_entry_price <= 0:
+            return result
+
+        # Calculate unrealized P/L %
+        unrealized_pnl_pct = (current_price - avg_entry_price) / avg_entry_price
+        if unrealized_pnl_pct <= 0:
+            # Clear trailing state if we're underwater
+            if symbol in self.recovery_trail_state:
+                del self.recovery_trail_state[symbol]
+            return result
+
+        # Check grid sell buffer (no grid sell in last N minutes)
+        last_grid_sell = self.last_grid_sell_ts.get(symbol)
+        if last_grid_sell:
+            minutes_since = (datetime.now() - last_grid_sell).total_seconds() / 60
+            if minutes_since < self.recovery_trail_grid_sell_buffer_min:
+                return result
+
+        # Check cooldown
+        state = self.recovery_trail_state.get(symbol, {})
+        last_sell_ts = state.get('last_sell_ts')
+        if last_sell_ts:
+            minutes_since = (datetime.now() - last_sell_ts).total_seconds() / 60
+            if minutes_since < self.recovery_trail_cooldown_min:
+                return result
+
+        # Initialize or update trailing state
+        trigger_price = avg_entry_price * (1 + self.recovery_trail_trigger_pct)
+
+        if symbol not in self.recovery_trail_state:
+            self.recovery_trail_state[symbol] = {
+                'peak': current_price,
+                'line': trigger_price,
+                'active': False,
+                'last_sell_ts': None
+            }
+            state = self.recovery_trail_state[symbol]
+
+        # Check if price is above trigger (activate trailing)
+        if current_price >= trigger_price:
+            if not state.get('active'):
+                state['active'] = True
+                state['peak'] = current_price
+                state['line'] = trigger_price
+                logger.info(f"[RECOVERY_TRAIL] {symbol}: Activated - price ${current_price:.4f} >= trigger ${trigger_price:.4f}")
+
+        # If trailing is active, update peak and line
+        if state.get('active'):
+            if current_price > state['peak']:
+                state['peak'] = current_price
+                # Trail the line behind the peak
+                state['line'] = state['peak'] * (1 - self.recovery_trail_gap_pct)
+                logger.debug(f"[RECOVERY_TRAIL] {symbol}: New peak ${state['peak']:.4f}, line ${state['line']:.4f}")
+
+            # Check if price dropped below trailing line (trigger sell)
+            if current_price < state['line']:
+                sell_qty = position_qty * self.recovery_trail_sell_portion
+                result['should_sell'] = True
+                result['qty'] = sell_qty
+                result['reason'] = f"price_{current_price:.4f}_below_line_{state['line']:.4f}"
+                result['trailing_state'] = dict(state)
+
+                logger.warning(f"[RECOVERY_TRAIL] {symbol}: SELL TRIGGERED - price ${current_price:.4f} < line ${state['line']:.4f}, "
+                              f"selling {sell_qty:.4f} ({self.recovery_trail_sell_portion:.0%} of {position_qty:.4f})")
+
+        result['trailing_state'] = dict(state) if state else None
+        return result
+
+    def record_recovery_trail_sell(self, symbol: str) -> None:
+        """Record that a recovery trail sell occurred (for cooldown tracking)."""
+        if symbol in self.recovery_trail_state:
+            self.recovery_trail_state[symbol]['last_sell_ts'] = datetime.now()
+            self.recovery_trail_state[symbol]['active'] = False
+            self.recovery_trail_state[symbol]['peak'] = 0.0
+            self.recovery_trail_state[symbol]['line'] = 0.0
+
+    def record_grid_sell(self, symbol: str) -> None:
+        """Record that a grid sell occurred (for recovery trail buffer)."""
+        self.last_grid_sell_ts[symbol] = datetime.now()
+
     def check_circuit_breakers(self, equity: float) -> Dict[str, Any]:
         """
         Check all circuit breakers and return status.
@@ -3295,7 +3677,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
         # Heartbeat tracking for stream health monitoring
         last_bar_time = [datetime.now()]  # Use list for mutable reference in nested function
-        STALE_THRESHOLD_SECONDS = 180  # 3 minutes without a bar = stale
+        STALE_THRESHOLD_SECONDS = 90  # 90 seconds without a bar = stale (aggressive for live trading)
 
         # NOTE: Stream is created inside the reconnection loop below.
         # We define handle_bar here so it's available for subscription.
@@ -3372,11 +3754,20 @@ async def run_grid_bot(broadcast_update, broadcast_log):
             # Collect signals and evaluate state machine
             max_corr = max(correlations.values()) if correlations else 0.0
 
-            # Determine ADX direction from regime (TRENDING_DOWN = "down", TRENDING_UP = "up")
-            if current_regime == MarketRegime.TRENDING_DOWN:
-                adx_direction = "down"
-            elif current_regime == MarketRegime.TRENDING_UP:
-                adx_direction = "up"
+            # ADX DIRECTION FIX (Jan 2026):
+            # Use raw DI+/DI- instead of regime classification.
+            # This fixes the bug where VOLATILE regime would mask downtrends as "neutral"
+            regime_metrics = bot.regime_metrics.get(symbol, {})
+            plus_di = regime_metrics.get('plus_di', 50)
+            minus_di = regime_metrics.get('minus_di', 50)
+
+            # Calculate DI difference as percentage of total for significance check
+            di_sum = plus_di + minus_di
+            di_diff_pct = abs(minus_di - plus_di) / max(di_sum, 1) * 100
+            MIN_DI_DIFF_PCT = getattr(config, 'ADX_DIRECTION_MIN_DI_DIFF_PCT', 5.0)
+
+            if di_diff_pct >= MIN_DI_DIFF_PCT:
+                adx_direction = "down" if minus_di > plus_di else "up"
             else:
                 adx_direction = "neutral"
 
@@ -3396,6 +3787,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 "momentum": momentum_decimal,  # risk_overlay expects decimal
                 "adx": regime_adx,
                 "adx_direction": adx_direction,
+                "raw_plus_di": plus_di,    # For API visibility
+                "raw_minus_di": minus_di,  # For API visibility
                 "max_correlation": max_corr,
                 "current_prices": current_prices,
             }
@@ -3445,6 +3838,17 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             f"[SMARTGRID] {symbol}: Recommends recenter "
                             f"(drift={drift_info.get('drift_pct', 0):.1%} {drift_info.get('direction', '')})"
                         )
+
+                        # Execute rebalance if enforce mode is enabled
+                        if advisor_result.get('would_execute', False):
+                            logger.warning(f"[SMARTGRID] {symbol}: Executing drift-based rebalance "
+                                          f"(drift={drift_info.get('drift_pct', 0):.1%})")
+                            await broadcast_log(f"[SMARTGRID] {symbol}: Executing rebalance")
+                            try:
+                                bot.grid_strategy.rebalance_grid(symbol, current_price, preserve_positions=True)
+                                logger.info(f"[SMARTGRID] {symbol}: Rebalance complete")
+                            except Exception as rebal_e:
+                                logger.error(f"[SMARTGRID] {symbol}: Rebalance failed: {rebal_e}")
                 except Exception as e:
                     logger.error(f"[SMARTGRID] Error evaluating {symbol}: {e}")
 
@@ -3465,7 +3869,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     logger.warning("[TIMEOUT] Positions fetch timed out - skipping buys this cycle")
                 current_positions = {p.symbol: p for p in positions}
                 num_positions = len(positions)
-            except:
+            except Exception as e:
+                logger.error(f"[ERROR] Positions fetch failed: {type(e).__name__}: {e}")
                 positions_timeout = True
                 current_positions = {}
                 num_positions = 0
@@ -3480,7 +3885,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 )
                 if alpaca_open_orders is None:
                     alpaca_open_orders = []
-            except:
+            except Exception as e:
+                logger.error(f"[ERROR] Open orders fetch failed: {type(e).__name__}: {e}")
                 alpaca_open_orders = []
 
             # Get account (with timeout to prevent event loop hang)
@@ -3492,7 +3898,8 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     default_on_timeout=None
                 )
                 equity = float(account.equity) if account else 0
-            except:
+            except Exception as e:
+                logger.error(f"[ERROR] Account fetch failed: {type(e).__name__}: {e}")
                 equity = 0  # Safe fallback
 
             # Check position quantity for this symbol
@@ -3739,6 +4146,52 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 windfall_executed is None):
                                 await execute_orchestrator_liquidation(bot, symbol, orch_decision.liquidation, client)
 
+                    # === GRADUATED LOSS RESPONSE (Phase 2) ===
+                    # Check daily P/L and apply graduated protection
+                    grad_loss = bot.evaluate_graduated_loss_mode()
+                    grad_loss_allow_buy = not grad_loss.get('block_buys', False)
+                    grad_loss_size_mult = grad_loss.get('size_mult', 1.0)
+
+                    if grad_loss['mode'] != "NORMAL":
+                        logger.info(f"[GRAD_LOSS] {symbol}: mode={grad_loss['mode']}, "
+                                    f"allow_buy={grad_loss_allow_buy}, size_mult={grad_loss_size_mult:.2f}, "
+                                    f"loss={grad_loss['loss_pct']:.2%}")
+
+                    # === RECOVERY TRAILING PROFIT TRIM ===
+                    # Tighter exits when inventory is elevated - takes priority over windfall
+                    recovery_trail_result = bot.check_recovery_trailing_exit(
+                        symbol=symbol,
+                        current_price=current_price,
+                        position_qty=position_qty,
+                        avg_entry_price=position_avg_entry,
+                        inventory_pct=inv_pct / 100.0  # Convert from % to decimal
+                    )
+
+                    if recovery_trail_result.get('should_sell') and not skip_trading:
+                        sell_qty = recovery_trail_result['qty']
+                        rounded_qty = round_qty(symbol, sell_qty, bot.config)
+
+                        if rounded_qty > 0:
+                            try:
+                                order = MarketOrderRequest(
+                                    symbol=symbol,
+                                    qty=rounded_qty,
+                                    side=OrderSide.SELL,
+                                    time_in_force=TimeInForce.GTC
+                                )
+                                result = await run_blocking_with_timeout(
+                                    client.trading_client.submit_order, order,
+                                    timeout_seconds=getattr(config, 'ALPACA_API_TIMEOUT_CRITICAL', 15.0),
+                                    operation_name="recovery_trail_sell"
+                                )
+                                if result:
+                                    logger.warning(f"[RECOVERY_TRAIL] {symbol}: Sold {rounded_qty:.4f} @ market - {recovery_trail_result['reason']}")
+                                    await broadcast_log(f"[RECOVERY_TRAIL] SOLD {rounded_qty:.4f} {symbol} (trailing exit)")
+                                    bot.record_recovery_trail_sell(symbol)
+                                    trade_executed = 'sell'
+                            except Exception as e:
+                                logger.error(f"[RECOVERY_TRAIL] {symbol}: Sell order failed: {e}")
+
                     # === RESTING LIMIT MODE (New - proactive maker orders) ===
                     if bot.use_limit_orders:
                         # Use new method that finds maker-safe levels AHEAD of price
@@ -3771,7 +4224,13 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                             # Check consecutive down bars (crash guard)
                             down_bar_allow, down_bar_count = bot.check_consecutive_down_bars(symbol)
 
-                            # Apply filters (regime, momentum, allocation, RISK OVERLAY, ORCHESTRATOR, consecutive down bars)
+                            # Check price drop protection (high-water mark)
+                            price_drop_allow, price_drop_reason = bot.check_price_drop_protection(symbol, current_price)
+
+                            # Check 24-hour buy throttle (fill-based)
+                            throttle_allow, throttle_reason = bot.check_buy_throttle(symbol)
+
+                            # Apply filters (regime, momentum, allocation, RISK OVERLAY, ORCHESTRATOR, consecutive down bars, price drop, throttle)
                             # FAIL CLOSED: If positions timed out, skip buys to avoid over-buying
                             if positions_timeout:
                                 logger.debug(f"[TIMEOUT] Skipping resting BUY {symbol}: positions fetch timed out")
@@ -3785,18 +4244,26 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                 notional = buy_details['quantity'] * buy_details['price']
                                 bot.orchestrator._record_blocked_buy(symbol, notional, "orchestrator_defensive")
                                 logger.info(f"[ORCH] Blocked resting BUY {symbol}: DEFENSIVE mode")
+                            elif not grad_loss_allow_buy:
+                                # GRADUATED LOSS GATE - third priority (Phase 2)
+                                logger.info(f"[GRAD_LOSS] Blocked resting BUY {symbol}: {grad_loss['mode']} mode (loss: {grad_loss['loss_pct']:.2%})")
                             elif not regime_allow_buy:
                                 logger.debug(f"[REGIME] Skipping resting BUY {symbol}: {regime_status['reason']}")
                             elif not momentum_status['allow_buy']:
                                 logger.debug(f"[MOM] Skipping resting BUY {symbol}: {momentum_status['reason']}")
                             elif not down_bar_allow:
                                 logger.info(f"[DOWN] Skipping resting BUY {symbol}: {down_bar_count} consecutive down bars")
+                            elif not price_drop_allow:
+                                logger.info(f"[PRICEDROP] Skipping resting BUY {symbol}: {price_drop_reason}")
+                            elif not throttle_allow:
+                                # 24-HOUR BUY THROTTLE - prevents runaway accumulation
+                                logger.info(f"[THROTTLE] Skipping resting BUY {symbol}: {throttle_reason}")
                             elif current_allocation >= max_allocation:
                                 logger.debug(f"[ALLOC] Skipping resting BUY {symbol}: {current_allocation:.1%} >= {max_allocation:.1%}")
                             else:
-                                # Apply adjustments (include overlay position multiplier, regime size multiplier, and orchestrator size multiplier)
+                                # Apply adjustments (include overlay position multiplier, regime size multiplier, orchestrator, and graduated loss)
                                 regime_size_mult = regime_status.get('size_mult', 1.0)
-                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult * regime_size_mult * orch_size_mult
+                                qty = base_qty * time_quality * corr_adjustment * overlay_position_mult * regime_size_mult * orch_size_mult * grad_loss_size_mult
 
                                 try:
                                     limit_price = round_limit_price(symbol, grid_price, bot.config)
@@ -3936,6 +4403,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                             await broadcast_log(f"[GRID] Resting SELL {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
                                             await broadcast_log(f"  Level: {level_id[:8]}...")
 
+                                            # Track grid sell for recovery trail buffer
+                                            bot.record_grid_sell(symbol)
+
                                 except Exception as e:
                                     logger.error(f"[SELL] Resting LIMIT failed for {symbol}: {e}")
                                     await broadcast_log(f"[ERROR] Resting SELL failed: {e}")
@@ -4051,12 +4521,22 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 # Check consecutive down bars (crash guard)
                 down_bar_allow, down_bar_count = bot.check_consecutive_down_bars(symbol)
 
+                # Check price drop protection (high-water mark)
+                price_drop_allow, price_drop_reason = bot.check_price_drop_protection(symbol, current_price)
+
+                # Check 24-hour buy throttle (fill-based)
+                throttle_allow, throttle_reason = bot.check_buy_throttle(symbol)
+
                 # RISK OVERLAY GATE - highest priority (blocks buys in RISK_OFF)
                 if not overlay_allow_buy:
                     notional = order_details.get('quantity', 0) * order_details.get('price', current_price)
                     bot.risk_overlay._record_blocked_buy(symbol, notional, overlay_buy_reason)
                     logger.info(f"[RISK] Blocked market BUY {symbol}: {overlay_buy_reason}")
                     await broadcast_log(f"[RISK] Blocked BUY: {overlay_buy_reason}")
+                # GRADUATED LOSS GATE - second priority (Phase 2)
+                elif not grad_loss_allow_buy:
+                    logger.info(f"[GRAD_LOSS] Blocked market BUY {symbol}: {grad_loss['mode']} mode (loss: {grad_loss['loss_pct']:.2%})")
+                    await broadcast_log(f"[GRAD_LOSS] Blocked BUY: {grad_loss['mode']} mode")
                 # Check regime filter (Smart Grid - avoid buying in strong downtrend)
                 elif not regime_allow_buy:
                     logger.info(f"[REGIME] Skipping BUY {symbol}: {regime_status['reason']}")
@@ -4069,6 +4549,14 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 elif not down_bar_allow:
                     logger.info(f"[DOWN] Skipping BUY {symbol}: {down_bar_count} consecutive down bars")
                     await broadcast_log(f"[DOWN] Skipping BUY: {down_bar_count} consecutive down bars")
+                # Check price drop protection
+                elif not price_drop_allow:
+                    logger.info(f"[PRICEDROP] Skipping BUY {symbol}: {price_drop_reason}")
+                    await broadcast_log(f"[PRICEDROP] Skipping BUY: {price_drop_reason}")
+                # Check 24-hour buy throttle
+                elif not throttle_allow:
+                    logger.info(f"[THROTTLE] Skipping BUY {symbol}: {throttle_reason}")
+                    await broadcast_log(f"[THROTTLE] Skipping BUY: {throttle_reason}")
                 # Check allocation limit - prevent over-buying
                 else:
                     # Get target allocation for this symbol from config
@@ -4088,14 +4576,14 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         base_qty = order_details['quantity']
                         level_id = order_details.get('level_id')  # May be None for old grids
 
-                        # Apply time quality, correlation, and regime size adjustments
+                        # Apply time quality, correlation, regime size, and graduated loss adjustments
                         time_quality = time_status.get('time_quality', 1.0)
                         regime_size_mult = regime_status.get('size_mult', 1.0)
-                        qty = base_qty * time_quality * corr_adjustment * regime_size_mult
+                        qty = base_qty * time_quality * corr_adjustment * regime_size_mult * grad_loss_size_mult
 
                         # Log adjustments if applied
-                        if time_quality < 1.0 or corr_adjustment < 1.0 or regime_size_mult < 1.0:
-                            await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%}, regime: {regime_size_mult:.0%})")
+                        if time_quality < 1.0 or corr_adjustment < 1.0 or regime_size_mult < 1.0 or grad_loss_size_mult < 1.0:
+                            await broadcast_log(f"[ADJ] Qty adjusted: {base_qty:.4f} -> {qty:.4f} (time: {time_quality:.0%}, corr: {corr_adjustment:.0%}, regime: {regime_size_mult:.0%}, grad_loss: {grad_loss_size_mult:.0%})")
 
                         # === LIMIT ORDER PATH (Maker Fee Optimization) ===
                         if bot.use_limit_orders and level_id:
@@ -4325,6 +4813,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                         await broadcast_log(f"[GRID] SELL LIMIT {symbol}: {rounded_qty:.6f} @ ${limit_price:,.2f}")
                                         await broadcast_log(f"  Level: {level_id[:8]}... | Order: {order_id[:8]}...")
 
+                                        # Track grid sell for recovery trail buffer
+                                        bot.record_grid_sell(symbol)
+
                                         # Note: Don't verify_order_fill for limit orders - they may not fill immediately
                                         # Fills will be detected via reconciliation
 
@@ -4403,6 +4894,9 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                                     if profit:
                                         await broadcast_log(f"  Profit: ${profit:.2f} (Hour {current_hour}:00 UTC)")
                                     await broadcast_log(f"  Grid level: {order_details.get('grid_level')} | Order ID: {order_id[:8]}...")
+
+                                    # Track grid sell for recovery trail buffer
+                                    bot.record_grid_sell(symbol)
                                 else:
                                     # Verify timed out - pending order remains for reconciliation
                                     logger.warning(f"[SELL] Order {order_id} not confirmed: {verification.get('reason', 'Unknown')} - pending for reconciliation")
@@ -4569,7 +5063,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         "last_bar_at": last_bar_time[0].isoformat(),
                         "seconds_since_bar": int((datetime.now() - last_bar_time[0]).total_seconds()),
                         "stale_threshold_seconds": STALE_THRESHOLD_SECONDS,
-                        "status": "connected" if (datetime.now() - last_bar_time[0]).total_seconds() < 90 else (
+                        "status": "connected" if (datetime.now() - last_bar_time[0]).total_seconds() < 60 else (
                             "degraded" if (datetime.now() - last_bar_time[0]).total_seconds() < STALE_THRESHOLD_SECONDS else "stale"
                         )
                     },
@@ -4683,15 +5177,27 @@ async def run_grid_bot(broadcast_update, broadcast_log):
 
                 await broadcast_log("Connecting to Alpaca stream...")
 
+                # Update stream state: connecting
+                from src.api.server import system_state
+                system_state["stream_state"]["status"] = "connecting"
+                system_state["stream_state"]["current_backoff_seconds"] = 0
+
                 stream = CryptoDataStream(
                     config.API_KEY,
                     config.SECRET_KEY
                 )
                 stream.subscribe_bars(handle_bar, *symbols)
 
+                # Update stream state: connected
+                system_state["stream_state"]["status"] = "connected"
+                system_state["stream_state"]["connected_at"] = datetime.now().isoformat()
+
                 # Note: run() is not async, must use _run_forever() for async context
                 await stream._run_forever()
                 backoff = 1  # Reset on clean exit
+
+                # Update stream state: disconnected (clean)
+                system_state["stream_state"]["status"] = "reconnecting"
 
                 await broadcast_log("[STREAM] Connection ended cleanly - reconnecting...")
 
@@ -4699,16 +5205,26 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 error_str = str(e).lower()
                 is_rate_limit = '429' in error_str or 'connection limit' in error_str or 'rate' in error_str
 
+                # Update stream state on error
+                system_state["stream_state"]["last_error"] = str(e)[:200]
+                system_state["stream_state"]["reconnect_count"] = system_state["stream_state"].get("reconnect_count", 0) + 1
+
                 if stream_should_restart[0]:
                     await broadcast_log(f"[WATCHDOG] Reconnecting after forced restart...")
                     backoff = 5  # Moderate backoff for watchdog restarts
+                    system_state["stream_state"]["status"] = "reconnecting"
                 elif is_rate_limit:
                     # Aggressive backoff for rate limits: 15s -> 30s -> 60s -> 120s (cap)
                     backoff = min(backoff * 2, 120) if backoff >= 15 else 15
                     await broadcast_log(f"[STREAM] Rate limited - backing off {backoff}s...")
+                    system_state["stream_state"]["status"] = "rate_limited"
                 else:
                     await broadcast_log(f"Stream disconnected: {e}")
                     backoff = min(backoff * 2, 60)  # Normal backoff: 1 -> 2 -> 4 -> ... -> 60
+                    system_state["stream_state"]["status"] = "reconnecting"
+
+                # Update backoff in stream state
+                system_state["stream_state"]["current_backoff_seconds"] = backoff
 
                 # Add jitter to prevent thundering herd
                 jitter = random.uniform(0, backoff * 0.2)

@@ -2,66 +2,74 @@
 
 ## Reminders
 - **[2026-01-29] AVAX REVIEW DATE** — Check if AVAX recovered. Exit trigger: below $11.00. Success: above $13.15.
-- **[2026-01-22] ✅ DECISION: HOLD AVAX** — Analysis complete. Paper bot proves AVAX outperforms SOL 3.3x. Issue is timing, not coin. Do NOT switch.
+- **[2026-01-22] DECISION: HOLD AVAX** — Analysis complete. Paper bot proves AVAX outperforms SOL 3.3x. Issue is timing, not coin. Do NOT switch.
 
 ## Now
-- [2026-01-22 PM] **✅ HOLD AVAX DECISION** - After analysis (web + paper bot data), decided to HOLD. Paper bot: AVAX $4,428 vs SOL $1,336 in Jan (3.3x better). Review Jan 29.
-- [2026-01-22 PM] **PERFORMANCE** - Equity $1,848.93 (-7.6% from $2K). AVAX unrealized -$76 (-7.7%). Grid profit +$44. Needs +8.3% to breakeven.
-- [2026-01-21 PM] **COMPUTER RESTARTED - WATCHDOG RECOVERED BOT** - System restarted, launchd watchdog automatically recovered the live bot.
-- [2026-01-20] **PROTECTION IMPROVEMENTS DEPLOYED TO LIVE** - All 9 phases deployed with conservative settings.
+- [2026-01-26 AM] **PHASE 1-5 IMPROVEMENTS DEPLOYED** - Major protection improvements aligned with paper bot thresholds. Bot restarted with new config.
+- [2026-01-26 AM] **PERFORMANCE** - Equity $1,812.15 (-9.4% from $2K). AVAX unrealized -$81 (-8.2%). 5-day losing streak ended with +$4.74 today.
+- [2026-01-26 AM] **AVAX EPISODE** - 238 hours (10 days) in inventory episode. Orchestrator in GRID_REDUCED mode.
 
-## System Health (LIVE Instance) — Updated Jan 22, 2026 @ 7:26 PM EST
+## System Health (LIVE Instance) — Updated Jan 26, 2026 @ 8:54 AM EST
 - **Bot**: Healthy, NORMAL mode, port 8001
-- **Stream**: Degraded (100s since last bar)
-- **Equity**: $1,848.93
-- **Daily P/L**: -$36.11 (-1.92%)
-- **Unrealized P/L**: **-$76** (AVAX -$76, LTC +$1)
-- **AVAX Position**: 75.30 qty @ $13.15 avg (current $12.14)
-- **Breakeven Target**: $13.15 (+8.3% needed)
-- **Risk Overlay**: NORMAL (7.6 hours)
-- **Orchestrator**: AVAX grid_full (152h episode), LTC grid_full (50h episode)
+- **Stream**: Healthy (88s since last bar)
+- **Equity**: $1,812.15
+- **Daily P/L**: +$3.71 (+0.21%)
+- **Unrealized P/L**: **-$80** (AVAX -$81, LTC +$1)
+- **AVAX Position**: 77.90 qty @ $12.72 avg (current $11.68)
+- **Breakeven Target**: $12.72 (+8.9% needed)
+- **Risk Overlay**: NORMAL (20+ hours)
+- **Orchestrator**: AVAX grid_reduced (238h episode), LTC grid_full, DOGE grid_full
 
-## Key Metrics (Jan 22, 2026 - LIVE Instance)
+## Key Metrics (Jan 26, 2026 - LIVE Instance)
 | Metric | Value |
 |--------|-------|
-| **Equity** | $1,848.93 |
+| **Equity** | $1,812.15 |
 | **Starting Capital** | $2,000.00 |
-| **Total Return** | **-$151.07 (-7.6%)** |
-| **AVAX Position** | 75.30 qty @ $13.15 avg |
-| **AVAX Unrealized** | -$76.38 (-7.7%) |
-| **Breakeven Price** | $13.15 (+8.3% from $12.14) |
-| **Grid Profit** | +$44.04 (2 completed trades) |
+| **Total Return** | **-$187.85 (-9.4%)** |
+| **Grid Profit** | +$812.15 (+81.2% since Jan 6) |
+| **AVAX Position** | 77.90 qty @ $12.72 avg |
+| **AVAX Unrealized** | -$80.99 (-8.2%) |
+| **Breakeven Price** | $12.72 (+8.9% from $11.68) |
 
-## ✅ AVAX Decision: HOLD (Jan 22, 2026)
+## New Protections Deployed (Jan 26, 2026)
 
-**Decision**: HOLD AVAX position. Do NOT switch to SOL.
+### Phase 1: Config Alignment (LIVE with PAPER)
+| Setting | Old | New |
+|---------|-----|-----|
+| GRID_REDUCED_ENTER_PCT | 85% | **70%** |
+| DEFENSIVE_INVENTORY_PCT | 130% | **110%** |
+| PRICE_DROP_LOOKBACK_MINUTES | 30 | **60** |
+| PRICE_DROP_THRESHOLD_PCT | -8% | **-6%** |
 
-**Key Finding**: Paper bot data proves AVAX is the BEST performer for grid trading:
-| Symbol | Jan 2026 Profit |
-|--------|-----------------|
-| **AVAX** | **$4,428** (182 sells) |
-| SOL | $1,336 (107 sells) |
+### Phase 2: Graduated Loss Response
+- **CAUTION** @ 2% daily loss → 50% size reduction
+- **DEFENSIVE** @ 3.5% daily loss → block all buys
+- **HALT** @ 5% daily loss → circuit breaker (existing)
+- Hysteresis: recover when < 1.5% loss
 
-AVAX outperforms SOL by **3.3x** on paper bot in same period!
+### Phase 3: SmartGrid Enforcement
+- `SMART_GRID_ENFORCE = True` - now executes drift-based rebalancing
+- Safety gates still apply (overlay NORMAL, not DEFENSIVE)
+- 60-min cooldown between rebalances
 
-**Why We're Down**: Bad timing, not bad coin choice.
-- Live bot started Jan 6, right before Jan 18 crash (-8%)
-- Small capital ($2K) vs paper ($100K+) = less buffer
-- Same coin, same strategy = paper bot profiting, we're temporarily underwater
+### Phase 4: Grid Quality Monitoring
+- `/health` now includes `grid_quality` metrics per symbol
+- Tracks: fills_last_hour, expected_fills_per_hour, fill_rate_pct, avg_fill_latency_ms
+- Notifier alerts when fill rate < 50%
 
-**Recovery Plan**:
-- AVAX needs +8.3% to breakeven ($12.14 → $13.15)
-- Grid profit: +$44 ✅ (strategy IS working)
-- Monitor until Jan 29 - if AVAX breaks below $11.00, reassess
-- Switching now would lock in -$76 loss permanently
+### Phase 5: Alert Improvements
+- Drawdown alerts now escalation-based (fires on each 1% increase)
+- sms_queue cleanup added to cleanup_db.py
 
-## Configuration (Jan 14, 2026 - LIVE Instance)
+## Configuration (Jan 26, 2026 - LIVE Instance)
 | Setting | Value |
 |---------|-------|
 | **Symbols** | AVAX/USD (90%), LTC/USD (10%) |
 | **Grid Spacing** | ~2.7% |
 | **Levels** | 5-6 per symbol |
-| **Stream Watchdog** | 90s (was 180s) |
+| **Orchestrator Thresholds** | GRID_REDUCED @ 70%, DEFENSIVE @ 110% |
+| **Graduated Loss** | CAUTION @ 2%, DEFENSIVE @ 3.5%, HALT @ 5% |
+| **SmartGrid** | ENABLED + ENFORCE |
 
 ## Scheduled Tasks
 
@@ -81,7 +89,7 @@ AVAX outperforms SOL by **3.3x** on paper bot in same period!
 
 ## Monitoring Commands
 ```bash
-# Health check
+# Health check (now includes grid_quality)
 curl http://localhost:8001/health | python3 -m json.tool
 
 # Positions
@@ -89,6 +97,9 @@ curl http://localhost:8001/api/positions
 
 # Risk overlay
 curl http://localhost:8001/api/risk/overlay
+
+# Orchestrator (check new thresholds)
+curl http://localhost:8001/api/orchestrator/status
 
 # Recent logs
 tail -50 /tmp/bluebird-live-bot.log

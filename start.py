@@ -2,9 +2,9 @@
 """
 BLUEBIRD 4.0 - Unified Startup Script
 
-Starts all BLUEBIRD services:
-  - Trading Bot (FastAPI server on port 8000)
-  - Dashboard (Vite dev server on port 5173)
+Starts all BLUEBIRD LIVE services:
+  - Trading Bot (FastAPI server on port 8001)
+  - Dashboard (Vite dev server on port 5174)
   - SMS Notifier (optional, polls bot API)
 
 Usage:
@@ -73,12 +73,67 @@ class ServiceManager:
                 time.sleep(0.5)
         return False
 
+    def wait_for_health(self, port: int, timeout: int = 90, accept_degraded: bool = True) -> bool:
+        """
+        Wait for /health endpoint to return healthy status.
+
+        Enhanced startup resilience:
+        - Checks actual /health endpoint, not just port availability
+        - Accepts degraded stream status during WebSocket backoff
+        - Extended timeout (90s) to allow for stream reconnection attempts
+
+        Args:
+            port: Port to check
+            timeout: Maximum wait time in seconds (default: 90)
+            accept_degraded: Accept stream_health.status != 'healthy' (default: True)
+
+        Returns:
+            True if service is healthy (or degraded with accept_degraded=True)
+        """
+        import requests
+
+        start = time.time()
+        last_status = None
+
+        while time.time() - start < timeout:
+            try:
+                resp = requests.get(f"http://localhost:{port}/health", timeout=5)
+                if resp.status_code == 200:
+                    health = resp.json()
+                    stream_status = health.get("stream_health", {}).get("status", "unknown")
+                    overall_status = health.get("status", "unknown")
+
+                    # Log status changes
+                    if stream_status != last_status:
+                        logger.info(f"Health check: status={overall_status}, stream={stream_status}")
+                        last_status = stream_status
+
+                    # Accept healthy status
+                    if overall_status == "healthy":
+                        if stream_status == "healthy":
+                            return True
+                        elif accept_degraded and stream_status in ["degraded", "stale", "unknown"]:
+                            # API is up, but stream may be reconnecting (rate limit backoff)
+                            logger.warning(f"Bot API healthy but stream status={stream_status} - accepting as ready")
+                            return True
+
+            except requests.exceptions.ConnectionError:
+                pass  # Service not yet listening
+            except requests.exceptions.Timeout:
+                pass  # Service slow to respond
+            except Exception as e:
+                logger.debug(f"Health check error: {e}")
+
+            time.sleep(1)
+
+        return False
+
     def start_bot(self) -> bool:
         """Start the grid trading bot."""
         logger.info("Starting Grid Trading Bot...")
 
-        if not self.check_port(8000):
-            logger.error("Port 8000 is already in use!")
+        if not self.check_port(8001):
+            logger.error("Port 8001 is already in use!")
             return False
 
         # Run the grid bot server with caffeinate to prevent sleep
@@ -91,12 +146,18 @@ class ServiceManager:
         )
         self.processes['bot'] = proc
 
-        # Wait for bot to start
-        if self.wait_for_port(8000, timeout=30):
-            logger.info("Grid Trading Bot started on http://localhost:8000")
-            return True
+        # Wait for bot to be healthy (extended timeout for WebSocket backoff cycles)
+        # First wait for port to be open, then check /health endpoint
+        if self.wait_for_port(8001, timeout=30):
+            # Port is open, now verify /health endpoint
+            if self.wait_for_health(8001, timeout=90, accept_degraded=True):
+                logger.info("Grid Trading Bot started on http://localhost:8001")
+                return True
+            else:
+                logger.warning("Grid Trading Bot started but /health check failed - continuing anyway")
+                return True  # Still return True since port is open
         else:
-            logger.error("Grid Trading Bot failed to start")
+            logger.error("Grid Trading Bot failed to start (port not responding)")
             return False
 
     def start_dashboard(self) -> bool:
@@ -204,11 +265,11 @@ class ServiceManager:
         # Check bot
         try:
             import requests
-            resp = requests.get("http://localhost:8000/health", timeout=2)
+            resp = requests.get("http://localhost:8001/health", timeout=2)
             status['bot'] = {
                 'running': True,
-                'url': 'http://localhost:8000',
-                'api_docs': 'http://localhost:8000/docs'
+                'url': 'http://localhost:8001',
+                'api_docs': 'http://localhost:8001/docs'
             }
         except:
             status['bot'] = {'running': False}
@@ -291,8 +352,8 @@ class ServiceManager:
         print("\n" + "-" * 60)
         print(" Services Running:")
         print("-" * 60)
-        print(f"  Grid Bot:   http://localhost:8000")
-        print(f"  API Docs:   http://localhost:8000/docs")
+        print(f"  Grid Bot:   http://localhost:8001")
+        print(f"  API Docs:   http://localhost:8001/docs")
         if start_dashboard:
             print(f"  Dashboard:  http://localhost:5173")
         if start_notifier:

@@ -1,6 +1,8 @@
 # Progress — Status & History
 
 ## Current Status
+- [2026-01-26 AM] **PHASE 1-5 IMPROVEMENTS DEPLOYED** - Major protection improvements to prevent inventory buildup during declines. Config aligned with paper bot. Bot restarted. See "Jan 26, 2026" section below.
+- [2026-01-26 AM] **PERFORMANCE** - Equity $1,812.15. 5-day losing streak (-$76) ended with +$4.74 today. AVAX unrealized -$81 (-8.2%). Needs +8.9% to breakeven.
 - [2026-01-22 PM] **✅ DECISION: HOLD AVAX** - After thorough analysis (web research + paper bot data), decided to HOLD. Paper bot shows AVAX outperforms SOL 3.3x ($4,428 vs $1,336 in Jan). Issue is timing not coin. Review Jan 29. Exit if AVAX < $11.
 - [2026-01-21 PM] **COMPUTER RESTARTED - WATCHDOG RECOVERED BOT** - Mac restarted, launchd watchdog automatically recovered the live bot. Bot running on port 8001, stream initializing. All services healthy.
 - [2026-01-21 PM] **AVAX POSITION UPDATE** - Position reduced from 119 to 75.30 qty (sells filled). Now @ $13.15 avg entry. Current price $12.14, unrealized -$76.38 (-7.7%). Need +8.3% to hit breakeven.
@@ -98,6 +100,88 @@ Thorough research comparing AVAX vs SOL for grid trading:
 ---
 
 ## Recent Work (High Signal)
+
+### Jan 26, 2026 AM — Phase 1-5 Protection Improvements
+
+**Problem Statement**: Bot accumulated AVAX position from 75 → 108 during price decline (Jan 18-25), suggesting:
+1. LIVE thresholds looser than paper bot
+2. No graduated loss response before 5% circuit breaker
+3. SmartGrid in advisory-only mode
+4. Limited grid quality observability
+
+**Root Cause Discovery**: LIVE vs PAPER config gap:
+| Setting | LIVE (was) | PAPER | Fixed |
+|---------|------------|-------|-------|
+| GRID_REDUCED_ENTER_PCT | 85% | 70% | **70%** |
+| DEFENSIVE_INVENTORY_PCT | 130% | 110% | **110%** |
+
+At 79% inventory, LIVE orchestrator was GRID_FULL. Paper would have been GRID_REDUCED.
+
+**Phase 1: Config Alignment** (config_ultra.py)
+- `GRID_REDUCED_ENTER_PCT`: 85% → **70%**
+- `DEFENSIVE_INVENTORY_PCT`: 130% → **110%**
+- `DEFENSIVE_EXIT_PCT`: 110% → **90%**
+- `GRID_REDUCED_EXIT_PCT`: 65% → **50%**
+- `PRICE_DROP_LOOKBACK_MINUTES`: 30 → **60**
+- `PRICE_DROP_THRESHOLD_PCT`: -8% → **-6%** (relaxed due to longer lookback)
+
+**Phase 2: Graduated Loss Response** (config_ultra.py, bot_grid.py)
+New intermediate protection before circuit breaker:
+- `DAILY_LOSS_TRIGGER_CAUTION = 0.02` — At 2% loss, reduce buy size to 50%
+- `DAILY_LOSS_TRIGGER_DEFENSIVE = 0.035` — At 3.5% loss, block all buys
+- `DAILY_LOSS_TRIGGER_HALT = 0.05` — At 5% loss, halt (existing)
+- `DAILY_LOSS_RECOVERY_PCT = 0.015` — Hysteresis: recover when < 1.5%
+
+Implementation:
+- Added `evaluate_graduated_loss_mode()` method with state machine
+- Integrated into both resting limit and market order paths
+- Applied as size multiplier (not hard block at CAUTION level)
+
+**Phase 3: SmartGrid Enforcement** (config_ultra.py, smart_grid_advisor.py, bot_grid.py)
+- Set `SMART_GRID_ENFORCE = True`
+- Updated advisor to set `would_execute = True` when enforce=True and gates pass
+- Added execution path: triggers `rebalance_grid()` when drift exceeds 55%
+- Safety gates preserved: overlay NORMAL, not DEFENSIVE, 60-min cooldown
+
+**Phase 4: Grid Quality Monitoring** (db.py, server.py, notifier.py)
+- Added `get_grid_quality_metrics()` to database module
+- Exposed in `/health` endpoint:
+  ```json
+  "grid_quality": {
+    "AVAX/USD": {
+      "fills_last_hour": 0,
+      "expected_fills_per_hour": 0.08,
+      "fill_rate_pct": 0.0,
+      "avg_fill_latency_ms": null
+    }
+  }
+  ```
+- Added `check_grid_quality()` alert in notifier (alerts when fill rate < 50%)
+
+**Phase 5: Alert & Cleanup Improvements** (notifier.py, cleanup_db.py)
+- Changed drawdown alerts to escalation-based (fires on each 1% increase, not just occurrence)
+- Added hysteresis: only recovers alert level when drawdown drops 1% below threshold
+- Added `sms_queue` purge (7-day retention) to cleanup_db.py
+
+**Files Modified**:
+1. `config_ultra.py` - All new thresholds and graduated loss config
+2. `src/execution/bot_grid.py` - Graduated loss evaluation + integration
+3. `src/strategy/smart_grid_advisor.py` - Added would_execute logic
+4. `src/database/db.py` - Added get_grid_quality_metrics()
+5. `src/api/server.py` - Added grid_quality to /health
+6. `src/notifications/notifier.py` - Grid quality alerts + escalation-based drawdown
+7. `scripts/cleanup_db.py` - Added sms_queue cleanup
+
+**Verification**:
+```bash
+python3 start.py --stop && python3 start.py --all
+curl http://localhost:8001/health  # Verify grid_quality present
+curl http://localhost:8001/api/orchestrator/status  # Verify new thresholds
+```
+
+**Bot Restarted**: All services healthy. New config active.
+
+---
 
 ### Jan 21, 2026 AM — Code Quality & Robustness Improvements
 
@@ -708,11 +792,15 @@ Config changed on Jan 8. Analysis performed Jan 14 (6 days).
 
 ## Performance Tracking (LIVE Instance - $2K Account)
 
-**NOTE**: Starting capital = $2,000 ($1K original + $1K deposit). Grid start = $1,000 (Jan 6). Current equity = $1,827.48.
+**NOTE**: Starting capital = $2,000 ($1K original + $1K deposit). Grid start = $1,000 (Jan 6). Current equity = $1,812.15.
 
 | Date | Daily P/L | Cumulative | Equity | Notes |
 |------|-----------|------------|--------|-------|
-| **Jan 22** | -$36.11 | -$151.07 | $1,848.93 | ⚠️ Coin change evaluation |
+| **Jan 26** | +$4.74 | -$187.85 | $1,812.15 | Phase 1-5 improvements deployed |
+| Jan 25 | -$18.76 | -$191.56 | $1,808.44 | 5-day losing streak |
+| Jan 24 | -$25.69 | -$172.80 | $1,827.20 | AVAX continued decline |
+| Jan 23 | -$7.26 | -$147.11 | $1,852.89 | — |
+| **Jan 22** | -$24.66 | -$139.62 | $1,860.38 | ⚠️ Coin change evaluation |
 | Jan 21 | +$20.22 | -$114.96 | $1,885.04 | Computer restarted, watchdog recovered bot |
 | Jan 20 | — | — | ~$1,865 | Protections deployed, bot restarted, breakeven order placed |
 | Jan 19 | +$12.28 | — | $1,917 | Trading resumed after daily reset |

@@ -115,9 +115,16 @@ class NotificationService:
         self.last_stale_alert_time: Optional[datetime] = None  # Cooldown tracking
         self.stale_alert_cooldown_minutes = 30  # Don't repeat stale alerts within 30 min
 
-        # Drawdown alert cooldown
+        # Drawdown alert escalation (Phase 5: fire on escalation, not just occurrence)
         self.last_drawdown_alert_time: Optional[datetime] = None
-        self.drawdown_alert_cooldown_minutes = 60  # Don't repeat drawdown alerts within 60 min
+        self.drawdown_alert_cooldown_minutes = 60  # Min cooldown between alerts
+        self.last_drawdown_alert_level: float = 0.0  # Last level we alerted at
+        self.drawdown_escalation_step: float = 1.0   # Alert again when drawdown increases by 1%
+
+        # Grid quality monitoring (Phase 4)
+        self.last_grid_quality_alert_time: Optional[datetime] = None
+        self.grid_quality_alert_cooldown_minutes = 120  # Don't repeat within 2 hours
+        self.grid_quality_threshold_pct = 50  # Alert if fill rate < 50%
 
         # API resilience tracking
         self.api_failure_count = db_status.get('api_failures', 0) if db_status else 0
@@ -539,26 +546,46 @@ class NotificationService:
             self.send_sms(message, force=True, sms_type="alert")  # Force send even in quiet hours
         self.last_risk_halted = halted
 
-        # Check drawdown threshold (with cooldown to prevent spam)
+        # Check drawdown threshold with escalation (Phase 5: fire on escalation, not just occurrence)
+        # Alerts when: 1) First crossing threshold, or 2) Escalating to new tier (each 1% increase)
         drawdown = risk.get('drawdown_pct', 0)
+
+        # Determine if this is an escalation event
+        should_alert = False
+        alert_reason = ""
+
         if drawdown >= self.config.drawdown_alert_threshold:
-            # Check cooldown - don't spam if we already alerted recently
-            cooldown_ok = True
-            if self.last_drawdown_alert_time:
+            # Check if this is a new higher level (escalation)
+            next_alert_level = self.last_drawdown_alert_level + self.drawdown_escalation_step
+
+            if self.last_drawdown_alert_level == 0:
+                # First time crossing threshold
+                should_alert = True
+                alert_reason = f"Drawdown exceeded {self.config.drawdown_alert_threshold}%"
+            elif drawdown >= next_alert_level:
+                # Escalation: drawdown increased by another step
+                should_alert = True
+                alert_reason = f"Drawdown escalated to {drawdown:.1f}% (from {self.last_drawdown_alert_level:.1f}%)"
+
+            # Apply minimum cooldown even on escalation
+            if should_alert and self.last_drawdown_alert_time:
                 elapsed = (datetime.now() - self.last_drawdown_alert_time).total_seconds() / 60
                 if elapsed < self.drawdown_alert_cooldown_minutes:
-                    cooldown_ok = False
-                    logger.debug(f"Drawdown alert suppressed (cooldown: {elapsed:.0f}/{self.drawdown_alert_cooldown_minutes} min)")
+                    should_alert = False
+                    logger.debug(f"Drawdown escalation suppressed (cooldown: {elapsed:.0f}/{self.drawdown_alert_cooldown_minutes} min)")
 
-            if cooldown_ok:
-                message = templates.format_risk_alert(
-                    risk,
-                    reason=f"Drawdown exceeded {self.config.drawdown_alert_threshold}%"
-                )
-                logger.warning(f"Drawdown alert: {drawdown:.2f}%")
+            if should_alert:
+                message = templates.format_risk_alert(risk, reason=alert_reason)
+                logger.warning(f"Drawdown alert (escalation): {drawdown:.2f}%")
                 self.send_sms(message, sms_type="alert")
                 self.last_drawdown_alert_time = datetime.now()
-        # Note: No reset needed with cooldown approach - cooldown expires naturally
+                self.last_drawdown_alert_level = drawdown
+
+        # Reset alert level when drawdown recovers significantly
+        elif drawdown < self.config.drawdown_alert_threshold - 1.0:
+            if self.last_drawdown_alert_level > 0:
+                logger.info(f"Drawdown recovered to {drawdown:.1f}%, resetting alert level")
+            self.last_drawdown_alert_level = 0.0
 
     def check_daily_summary(self, stats: Dict[str, Any]) -> None:
         """Check if it's time to send daily summary."""
@@ -715,6 +742,67 @@ class NotificationService:
             self.last_risk_overlay_mode = current_mode
             update_notifier_heartbeat(overlay_mode=current_mode)  # Persist to DB
 
+    def check_grid_quality(self, stats: Dict[str, Any]) -> None:
+        """
+        Check grid fill quality metrics and alert if fill rates are low.
+
+        Phase 4: Observability - monitors execution quality to detect silent failures.
+        """
+        try:
+            response = requests.get(f"{self.config.bot_api_url}/health", timeout=5)
+            if response.status_code != 200:
+                return
+
+            health = response.json()
+            grid_quality = health.get('grid_quality', {})
+
+            if not grid_quality:
+                return
+
+            # Check each symbol for low fill rate
+            low_fill_symbols = []
+            for symbol, metrics in grid_quality.items():
+                fill_rate = metrics.get('fill_rate_pct', 100)
+                expected = metrics.get('expected_fills_per_hour', 0)
+
+                # Only alert if we have enough data (expected > 0.5 fills/hr)
+                if expected > 0.5 and fill_rate < self.grid_quality_threshold_pct:
+                    low_fill_symbols.append({
+                        'symbol': symbol,
+                        'fill_rate': fill_rate,
+                        'fills_last_hour': metrics.get('fills_last_hour', 0),
+                        'expected': expected
+                    })
+
+            if low_fill_symbols:
+                # Check cooldown
+                if self.last_grid_quality_alert_time:
+                    elapsed = (datetime.now() - self.last_grid_quality_alert_time).total_seconds() / 60
+                    if elapsed < self.grid_quality_alert_cooldown_minutes:
+                        return
+
+                # Build alert message
+                symbols_info = '\n'.join([
+                    f"  {s['symbol']}: {s['fill_rate']:.0f}% ({s['fills_last_hour']}/{s['expected']:.1f} expected)"
+                    for s in low_fill_symbols
+                ])
+                message = (
+                    f"⚠️ LOW GRID FILL RATE\n\n"
+                    f"Fill rates below {self.grid_quality_threshold_pct}%:\n"
+                    f"{symbols_info}\n\n"
+                    f"Possible causes:\n"
+                    f"- Grid misaligned with price\n"
+                    f"- Low volatility period\n"
+                    f"- SmartGrid may need rebalance"
+                )
+
+                logger.warning(f"Low fill rate alert: {low_fill_symbols}")
+                self.send_sms(message, sms_type="alert")
+                self.last_grid_quality_alert_time = datetime.now()
+
+        except Exception as e:
+            logger.debug(f"Failed to check grid quality: {e}")
+
     def initialize_starting_equity(self, stats: Dict[str, Any]) -> None:
         """Initialize starting equity from stats or risk data."""
         if self.starting_equity is None:
@@ -790,6 +878,7 @@ class NotificationService:
                     self.check_risk_overlay(stats)  # Risk overlay mode transitions
                     self.check_daily_summary(stats)
                     self.check_stale_data(stats)
+                    self.check_grid_quality(stats)  # Grid quality monitoring (Phase 4)
 
                 # Retry any queued SMS and process pending alerts (every cycle)
                 if self.config.is_configured():

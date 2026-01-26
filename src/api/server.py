@@ -231,7 +231,17 @@ system_state = {
     },
 
     # Orchestrator state (inventory management)
-    "orchestrator": None
+    "orchestrator": None,
+
+    # Stream state (WebSocket connection health)
+    "stream_state": {
+        "status": "initializing",  # initializing | connecting | connected | rate_limited | reconnecting | disconnected
+        "current_backoff_seconds": 0,
+        "reconnect_count": 0,
+        "last_error": None,
+        "last_bar_time": None,
+        "connected_at": None
+    }
 }
 
 
@@ -281,6 +291,24 @@ async def health_check():
         except Exception:
             stream_status = "unknown"
 
+    # Get detailed stream state
+    stream_state = system_state.get("stream_state", {})
+    stream_conn_status = stream_state.get("status", "unknown")
+    current_backoff = stream_state.get("current_backoff_seconds", 0)
+    reconnect_count = stream_state.get("reconnect_count", 0)
+
+    # Determine if rate limited
+    is_rate_limited = stream_conn_status == "rate_limited" or current_backoff > 0
+
+    # Get grid quality metrics (Phase 4: Observability)
+    grid_quality = {}
+    try:
+        from src.database.db import get_grid_quality_metrics
+        symbols = getattr(config, 'SYMBOLS', [])
+        grid_quality = get_grid_quality_metrics(symbols)
+    except Exception as e:
+        logger.warning(f"Failed to get grid quality metrics: {e}")
+
     return {
         "status": "healthy",
         "connections": len(manager.active_connections),
@@ -288,8 +316,14 @@ async def health_check():
         "last_update": system_state["timestamp"],
         "stream_health": {
             "status": stream_status,
-            "seconds_since_bar": int(seconds_since_bar)
-        }
+            "seconds_since_bar": int(seconds_since_bar),
+            "connection_status": stream_conn_status,
+            "is_rate_limited": is_rate_limited,
+            "current_backoff_seconds": current_backoff,
+            "reconnect_count": reconnect_count,
+            "last_error": stream_state.get("last_error")
+        },
+        "grid_quality": grid_quality
     }
 
 

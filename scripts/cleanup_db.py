@@ -21,6 +21,7 @@ DB_PATH = os.path.join(PROJECT_DIR, "data", "bluebird.db")
 # Retention periods
 EQUITY_KEEP_DAYS = 90
 SMS_KEEP_DAYS = 90
+SMS_QUEUE_KEEP_DAYS = 7  # Failed SMS queue - shorter retention
 
 def get_stats(conn):
     cursor = conn.cursor()
@@ -72,6 +73,7 @@ def main():
     results = [
         cleanup_table(conn, "equity_snapshots", "timestamp", EQUITY_KEEP_DAYS, execute),
         cleanup_table(conn, "sms_history", "timestamp", SMS_KEEP_DAYS, execute),
+        cleanup_table(conn, "sms_queue", "created_at", SMS_QUEUE_KEEP_DAYS, execute),
     ]
     
     print("Cleanup summary:")

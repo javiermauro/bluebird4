@@ -38,8 +38,12 @@ def ensure_db_dir():
 def get_db_connection():
     """Get a database connection with automatic cleanup."""
     ensure_db_dir()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)  # 30 second timeout for lock contention
     conn.row_factory = sqlite3.Row  # Return rows as dicts
+    # Enable WAL mode for better concurrent read performance
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")  # Safe with WAL, better performance
+    conn.execute("PRAGMA busy_timeout=30000")  # 30 second retry on lock
     try:
         yield conn
     finally:
@@ -1327,6 +1331,126 @@ def cleanup_old_grid_snapshots(keep_days: int = 7) -> int:
         if deleted > 0:
             logger.info(f"Cleaned up {deleted} old grid snapshots")
         return deleted
+
+
+# ============ GRID QUALITY METRICS ============
+
+def get_grid_quality_metrics(symbols: List[str] = None) -> Dict[str, Dict]:
+    """
+    Get grid fill quality metrics per symbol.
+
+    Returns fills_last_hour, fill rate, and latency stats for monitoring
+    grid execution quality.
+
+    Args:
+        symbols: List of symbols to check. If None, uses all symbols with recent trades.
+
+    Returns:
+        Dict mapping symbol to quality metrics
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        now = datetime.now()
+        one_hour_ago = (now - timedelta(hours=1)).isoformat()
+        one_day_ago = (now - timedelta(days=1)).isoformat()
+
+        # Get all symbols if not provided
+        if not symbols:
+            cursor.execute("""
+                SELECT DISTINCT symbol FROM trades
+                WHERE timestamp >= ? AND source = 'grid'
+            """, (one_day_ago,))
+            symbols = [row['symbol'] for row in cursor.fetchall()]
+
+        metrics = {}
+
+        for symbol in symbols:
+            # Fills in last hour
+            cursor.execute("""
+                SELECT COUNT(*) as fills_last_hour
+                FROM trades
+                WHERE symbol = ? AND timestamp >= ? AND source = 'grid'
+            """, (symbol, one_hour_ago))
+            fills_last_hour = cursor.fetchone()['fills_last_hour']
+
+            # Average fills per hour over last 24 hours (for expected rate)
+            cursor.execute("""
+                SELECT COUNT(*) as fills_24h
+                FROM trades
+                WHERE symbol = ? AND timestamp >= ? AND source = 'grid'
+            """, (symbol, one_day_ago))
+            fills_24h = cursor.fetchone()['fills_24h']
+            expected_fills_per_hour = round(fills_24h / 24.0, 2) if fills_24h > 0 else 0
+
+            # Fill rate percentage
+            fill_rate_pct = 0
+            if expected_fills_per_hour > 0:
+                fill_rate_pct = round((fills_last_hour / expected_fills_per_hour) * 100, 1)
+
+            # Average fill latency from orders table (submitted_at -> filled_at)
+            cursor.execute("""
+                SELECT AVG(
+                    (julianday(filled_at) - julianday(submitted_at)) * 86400000
+                ) as avg_latency_ms
+                FROM orders
+                WHERE symbol = ? AND filled_at IS NOT NULL AND submitted_at IS NOT NULL
+                  AND filled_at >= ?
+            """, (symbol.replace('/', ''), one_hour_ago))
+            row = cursor.fetchone()
+            avg_fill_latency_ms = round(row['avg_latency_ms']) if row['avg_latency_ms'] else None
+
+            metrics[symbol] = {
+                'fills_last_hour': fills_last_hour,
+                'expected_fills_per_hour': expected_fills_per_hour,
+                'fill_rate_pct': fill_rate_pct,
+                'avg_fill_latency_ms': avg_fill_latency_ms,
+                'fills_24h': fills_24h,
+            }
+
+        return metrics
+
+
+# ============ BUY THROTTLE METRICS ============
+
+def get_filled_buys_24h(symbol: str) -> Dict[str, Any]:
+    """
+    Get filled buy count and notional for a symbol in the last 24 hours.
+
+    Used by 24-hour buy throttle to prevent runaway accumulation.
+
+    Args:
+        symbol: Symbol to check (e.g., "AVAX/USD")
+
+    Returns:
+        Dict with 'count' and 'notional' (USD)
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        now = datetime.now()
+        twenty_four_hours_ago = (now - timedelta(hours=24)).isoformat()
+
+        # Query filled buys from trades table
+        # total_value = quantity * price (notional)
+        cursor.execute("""
+            SELECT
+                COUNT(*) as count,
+                COALESCE(SUM(quantity * price), 0) as notional
+            FROM trades
+            WHERE symbol = ?
+              AND side = 'buy'
+              AND timestamp >= ?
+        """, (symbol, twenty_four_hours_ago))
+
+        row = cursor.fetchone()
+
+        return {
+            'count': row['count'] if row else 0,
+            'notional': float(row['notional']) if row and row['notional'] else 0.0,
+            'symbol': symbol,
+            'window_start': twenty_four_hours_ago,
+        }
 
 
 # ============ UTILITY FUNCTIONS ============

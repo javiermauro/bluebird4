@@ -431,6 +431,10 @@ class SmartGridAdvisor:
         # Evaluate drift trigger with hysteresis
         should_recenter = self._evaluate_drift_trigger(symbol, drift['drift_pct'])
 
+        # Determine if we should execute (Phase 2: enforce mode)
+        enforce_mode = getattr(self.config, 'SMART_GRID_ENFORCE', False)
+        would_execute = enforce_mode and should_recenter and gate_result['passed']
+
         result = {
             'action': 'RECOMMEND_RECENTER' if should_recenter else 'NONE',
             'reason': f"drift={drift['drift_pct']:.1%}" if should_recenter else 'within_threshold',
@@ -439,7 +443,7 @@ class SmartGridAdvisor:
             'level_imbalance': level_imbalance,
             'fill_rate': fill_rate,
             'atr_percentile': atr_percentile,
-            'would_execute': False,  # Phase 1: always False
+            'would_execute': would_execute,  # True when enforce=True and gates pass
             'gates': gate_result,
             'recommendation_active': self._get_symbol_state(symbol)['recommendation_active']
         }

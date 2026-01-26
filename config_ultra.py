@@ -101,8 +101,44 @@ class UltraConfig:
     
     # Stop trading circuit breaker
     # If daily loss exceeds this, stop trading for the day
-    DAILY_LOSS_LIMIT = 0.05  # 5% daily max loss
-    
+    DAILY_LOSS_LIMIT = 0.05  # 5% daily max loss (HALT)
+
+    # =========================================
+    # GRADUATED LOSS RESPONSE (Phase 2)
+    # =========================================
+    # Graduated response before circuit breaker triggers:
+    # - CAUTION: Reduce size to 50%
+    # - DEFENSIVE: Block all buys
+    # - HALT: Stop trading (existing circuit breaker)
+    # Hysteresis: Only recover when loss improves below recovery threshold
+    DAILY_LOSS_TRIGGER_CAUTION = 0.02     # At 2% loss, reduce buy size to 50%
+    DAILY_LOSS_TRIGGER_DEFENSIVE = 0.035  # At 3.5% loss, block all buys
+    DAILY_LOSS_TRIGGER_HALT = 0.05        # At 5% loss, halt (existing)
+    DAILY_LOSS_RECOVERY_PCT = 0.015       # Only recover from CAUTION when < 1.5% loss
+    DAILY_LOSS_CAUTION_SIZE_MULT = 0.50   # Size multiplier when in CAUTION mode
+
+    # =========================================
+    # 24-HOUR BUY THROTTLES (Fill-Based)
+    # =========================================
+    # Prevents runaway accumulation during declines.
+    # Blocks new buys if either limit exceeded per symbol in rolling 24h.
+    BUY_THROTTLE_ENABLED = True
+    MAX_FILLED_BUYS_24H = 6               # Max filled buy orders per symbol per 24h
+    MAX_FILLED_BUY_NOTIONAL_24H = 250.0   # Max USD notional of filled buys per symbol per 24h
+
+    # =========================================
+    # RECOVERY-ONLY TRAILING PROFIT TRIM
+    # =========================================
+    # Tighter exits when inventory is elevated (recovery mode).
+    # Takes priority over windfall when active.
+    RECOVERY_TRAIL_ENABLED = True
+    RECOVERY_TRAIL_INVENTORY_THRESHOLD = 1.0   # Activate when inventory >= 100%
+    RECOVERY_TRAIL_TRIGGER_PCT = 0.025         # Trigger at +2.5% unrealized P/L
+    RECOVERY_TRAIL_GAP_PCT = 0.005             # 0.5% trailing gap
+    RECOVERY_TRAIL_SELL_PORTION = 0.40         # Sell 40% of position
+    RECOVERY_TRAIL_COOLDOWN_MIN = 90           # Minutes between activations per symbol
+    RECOVERY_TRAIL_GRID_SELL_BUFFER_MIN = 5    # Don't fire if grid sold within 5 min
+
     # Maximum drawdown before stopping entirely
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
     
@@ -283,7 +319,7 @@ class UltraConfig:
 
     # Grid safety settings
     GRID_STOP_LOSS_PCT = 0.10    # Stop loss if price drops 10% below grid
-    GRID_REBALANCE_PCT = 0.03   # Rebalance if price moves 3% outside grid
+    GRID_REBALANCE_PCT = 0.02   # Rebalance if price moves 2% outside grid (aligns with $13.12 breakeven)
 
     # =========================================
     # LIMIT ORDER SETTINGS (Maker Fee Optimization)
@@ -322,7 +358,7 @@ class UltraConfig:
     # Does NOT add a third rebalance system - respects existing range-break/overshoot.
 
     SMART_GRID_ENABLED = True
-    SMART_GRID_ENFORCE = False  # Phase 1: advisory only, no execution
+    SMART_GRID_ENFORCE = True   # Phase 2: enabled - executes drift-based rebalancing when gates pass
 
     # Drift thresholds (with hysteresis to prevent oscillation)
     SMART_GRID_DRIFT_TRIGGER = 0.55   # Recommend recenter when drift >= 55% toward edge
@@ -406,12 +442,16 @@ class UltraConfig:
 
     # RISK_OFF trigger settings (2-of-3 signals required)
     RISK_OFF_TRIGGERS_REQUIRED = 2  # 2 signals must fire to enter RISK_OFF
-    RISK_OFF_MIN_HOLD_MINUTES = 20  # Minimum time in RISK_OFF before RECOVERY
+    RISK_OFF_MIN_HOLD_MINUTES = 30  # Minimum time in RISK_OFF before RECOVERY (was 20)
 
     # Trigger thresholds
     RISK_OFF_MOMENTUM_THRESHOLD = -0.015      # Momentum < -1.5% = shock
     RISK_OFF_ADX_THRESHOLD = 35               # ADX > 35 + direction=down = downtrend
     RISK_OFF_CORRELATION_THRESHOLD = 0.90     # Correlation > 0.90 = correlated selloff
+
+    # ADX direction detection - uses raw DI+/DI- (not regime classification)
+    # Minimum DI difference % of total to set direction (prevents noise)
+    ADX_DIRECTION_MIN_DI_DIFF_PCT = 5.0       # 5% diff required to set up/down
 
     # Drawdown velocity (DISABLED by default - can be noisy)
     RISK_OFF_DRAWDOWN_VELOCITY_ENABLED = False
@@ -439,12 +479,34 @@ class UltraConfig:
     DEVELOPING_DOWNTREND_SIZE_MULT = 0.50     # 50% size when ADX 25-35 + DOWN
 
     # =========================================
-    # CONSECUTIVE DOWN BARS PROTECTION
+    # CONSECUTIVE DOWN BARS PROTECTION (Enhanced Jan 2026)
     # =========================================
     # Block buys after N consecutive red candles (simple crash guard)
 
     CONSECUTIVE_DOWN_BARS_ENABLED = True
     CONSECUTIVE_DOWN_BARS_BLOCK = 3           # Block buys after 3 consecutive down bars
+
+    # Enhanced window analysis (doesn't reset on single green bar)
+    DOWN_BARS_WINDOW = 10                     # Window size for extended analysis
+    DOWN_BARS_RED_RATIO_THRESHOLD = 0.70      # Block if 70%+ of window is red bars
+    DOWN_BARS_CUMULATIVE_DROP_PCT = -4.0      # Block if cumulative drop > 4% in window
+
+    # =========================================
+    # FAST MOMENTUM DETECTION (Flash Crash Protection)
+    # =========================================
+    # Faster momentum check for sudden drops (3 bars vs 10 bars)
+
+    MOMENTUM_FAST_WINDOW = 3                  # 3 bars = 3 minutes
+    MOMENTUM_FAST_THRESHOLD = -3.0            # Block if drop > 3% in 3 bars (CONSERVATIVE: paper uses -2.0)
+
+    # =========================================
+    # PRICE DROP PROTECTION (High-Water Mark)
+    # =========================================
+    # Block buys if price dropped significantly from recent high
+
+    PRICE_DROP_PROTECTION_ENABLED = True
+    PRICE_DROP_LOOKBACK_MINUTES = 60          # Track high over last 60 minutes (was 30, compromise between 30 and 120)
+    PRICE_DROP_THRESHOLD_PCT = -6.0           # Block if dropped > 6% from high (relaxed from -8% due to longer lookback)
 
     # =========================================
     # ORCHESTRATOR SETTINGS (Meta-controller for inventory management)
@@ -468,11 +530,12 @@ class UltraConfig:
     EPISODE_START_PCT = 30               # Start episode when inventory >= 30%
     EPISODE_RESET_PCT = 10               # Reset episode when inventory <= 10%
 
-    # Mode thresholds (with hysteresis)
-    DEFENSIVE_INVENTORY_PCT = 150        # Enter DEFENSIVE when inventory >= 150%
-    DEFENSIVE_EXIT_PCT = 130             # Exit DEFENSIVE when inventory < 130%
-    GRID_REDUCED_ENTER_PCT = 100         # Enter GRID_REDUCED when inventory >= 100%
-    GRID_REDUCED_EXIT_PCT = 80           # Exit GRID_REDUCED when inventory < 80%
+    # Mode thresholds (with hysteresis) - ALIGNED with paper bot (Jan 25, 2026)
+    # Previous LIVE values were too loose (130/85), allowing inventory buildup
+    DEFENSIVE_INVENTORY_PCT = 110        # Enter DEFENSIVE when inventory >= 110% (aligned with paper)
+    DEFENSIVE_EXIT_PCT = 90              # Exit DEFENSIVE when inventory < 90% (aligned with paper)
+    GRID_REDUCED_ENTER_PCT = 70          # Enter GRID_REDUCED when inventory >= 70% (aligned with paper)
+    GRID_REDUCED_EXIT_PCT = 50           # Exit GRID_REDUCED when inventory < 50% (aligned with paper)
 
     # Liquidation triggers - TP Trim (take profit) - SAFEST
     LIQ_TP_HOURS = 24                    # Min episode age for TP
