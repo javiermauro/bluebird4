@@ -61,6 +61,7 @@ from src.database.db import (
     update_notifier_heartbeat, get_notifier_status, increment_sms_count,
     get_sms_history, cleanup_old_sms_records
 )
+from src.utils.atomic_io import atomic_write_json, safe_read_json
 
 # PID and state file paths (for dashboard integration)
 # LIVE INSTANCE: Uses -live- prefix to avoid collision with paper
@@ -68,6 +69,12 @@ PID_FILE = "/tmp/bluebird-live-notifier.pid"
 SMS_COUNT_FILE = "/tmp/bluebird-live-notifier-count.json"
 LOG_FILE = "/tmp/bluebird-live-notifier.log"
 LAST_STARTUP_FILE = os.path.join(STATE_DIR, "notifier-startup.json")  # Persists across reboot
+
+# Monitoring state file (Phase 2: Persistent monitoring state)
+MONITORING_STATE_FILE = os.path.join(STATE_DIR, "monitoring-state.json")
+CIRCUIT_BREAKER_AGE_DAYS = 1
+ZERO_FILLS_THRESHOLD_HOURS = 12  # Changed from 24h
+MONITORING_ALERT_GRACE_PERIOD_HOURS = 1  # Prevent restart spam
 
 # Minimum time between startup SMS notifications (in seconds)
 # Prevents SMS spam when launchd restarts the service frequently
@@ -136,7 +143,19 @@ class NotificationService:
         self.sms_count_today = db_status.get('sms_today', 0) if db_status else 0
         self.sms_count_date: Optional[str] = db_status.get('sms_today_date') if db_status else None
 
+        # Monitoring state tracking (Phase 2: Persistent state)
+        self._circuit_breaker_alert_sent = False
+        self._circuit_breaker_limit_date: Optional[str] = None
+        self._last_circuit_breaker_alert: Optional[datetime] = None
+        self._zero_fills_since: Optional[datetime] = None
+        self._zero_fills_alert_sent = False
+        self._last_zero_fills_alert: Optional[datetime] = None
+        self.MONITORING_STATE_FILE = MONITORING_STATE_FILE
+
         logger.info(f"Loaded {len(self.last_trade_ids)} notified trade IDs from database")
+
+        # Load monitoring state from disk
+        self._load_monitoring_state()
 
         # Twilio client (lazy load)
         self._twilio_client = None
@@ -198,6 +217,77 @@ class NotificationService:
         """Handle shutdown signals gracefully."""
         logger.info("Shutdown signal received")
         self.running = False
+
+    def _load_monitoring_state(self) -> None:
+        """
+        Load monitoring state from disk (survives restarts).
+
+        State includes:
+        - Circuit breaker alert status and limit date
+        - Zero fills tracking and alert status
+        - Last alert timestamps for grace period
+        """
+        state = safe_read_json(self.MONITORING_STATE_FILE, default={})
+
+        # Circuit breaker state
+        cb = state.get('circuit_breaker', {})
+        self._circuit_breaker_alert_sent = cb.get('alert_sent', False)
+        self._circuit_breaker_limit_date = cb.get('limit_date_alerted')
+        self._last_circuit_breaker_alert = self._parse_timestamp(cb.get('last_alert_time'))
+
+        # Zero fills state
+        zf = state.get('zero_fills', {})
+        self._zero_fills_alert_sent = zf.get('alert_sent', False)
+        self._zero_fills_since = self._parse_timestamp(zf.get('zero_fills_since'))
+        self._last_zero_fills_alert = self._parse_timestamp(zf.get('last_alert_time'))
+
+        if any([self._circuit_breaker_alert_sent, self._zero_fills_alert_sent]):
+            logger.info(
+                f"Monitoring state loaded: CB alert={self._circuit_breaker_alert_sent}, "
+                f"Zero fills alert={self._zero_fills_alert_sent}"
+            )
+
+    def _save_monitoring_state(self) -> None:
+        """
+        Save monitoring state to disk (crash-safe atomic write).
+
+        Uses atomic_write_json to prevent corruption from power loss.
+        Called after alert send/reset to ensure state survives restarts.
+        """
+        state = {
+            'circuit_breaker': {
+                'alert_sent': self._circuit_breaker_alert_sent,
+                'limit_date_alerted': self._circuit_breaker_limit_date,
+                'last_alert_time': self._last_circuit_breaker_alert.isoformat() if self._last_circuit_breaker_alert else None
+            },
+            'zero_fills': {
+                'alert_sent': self._zero_fills_alert_sent,
+                'zero_fills_since': self._zero_fills_since.isoformat() if self._zero_fills_since else None,
+                'last_alert_time': self._last_zero_fills_alert.isoformat() if self._last_zero_fills_alert else None
+            },
+            'saved_at': datetime.now().isoformat()
+        }
+
+        atomic_write_json(self.MONITORING_STATE_FILE, state)
+
+    def _parse_timestamp(self, ts_str: Optional[str]) -> Optional[datetime]:
+        """
+        Safely parse ISO timestamp string to datetime.
+
+        Args:
+            ts_str: ISO format timestamp string (or None)
+
+        Returns:
+            datetime object or None if parse fails
+        """
+        if not ts_str:
+            return None
+
+        try:
+            return datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse timestamp '{ts_str}': {e}")
+            return None
 
     @property
     def twilio_client(self):
@@ -803,6 +893,161 @@ class NotificationService:
         except Exception as e:
             logger.debug(f"Failed to check grid quality: {e}")
 
+    def check_circuit_breaker_age(self, stats: Dict[str, Any]) -> None:
+        """
+        Check if circuit breaker (daily limit) has been stuck for too long.
+
+        Phase 2 improvements:
+        - Persistent state (survives restarts)
+        - Tracks specific limit_date that triggered alert
+        - Detects manual resets (daily_limit_hit changes to False)
+        - 1-hour grace period to prevent restart spam
+        """
+        try:
+            response = requests.get(f"{self.config.bot_api_url}/api/risk/status", timeout=5)
+            if response.status_code != 200:
+                return
+
+            risk_status = response.json()
+            from_file = risk_status.get('from_file', {})
+
+            daily_limit_hit = from_file.get('daily_limit_hit', False)
+            daily_limit_date = from_file.get('daily_limit_date')
+
+            # Detect manual reset: limit was hit before, now it's clear
+            if not daily_limit_hit:
+                if self._circuit_breaker_alert_sent:
+                    logger.info("Circuit breaker manually reset detected - clearing alert state")
+                    self._circuit_breaker_alert_sent = False
+                    self._circuit_breaker_limit_date = None
+                    self._last_circuit_breaker_alert = None
+                    self._save_monitoring_state()
+                return
+
+            # No limit date available
+            if not daily_limit_date:
+                return
+
+            # Parse the date
+            try:
+                limit_date = datetime.strptime(daily_limit_date, "%Y-%m-%d").date()
+            except ValueError:
+                return
+
+            today = datetime.now().date()
+            days_stuck = (today - limit_date).days
+
+            # Alert if stuck for more than CIRCUIT_BREAKER_AGE_DAYS
+            if days_stuck >= CIRCUIT_BREAKER_AGE_DAYS:
+                # Check if we already alerted for this specific limit_date
+                if self._circuit_breaker_alert_sent and self._circuit_breaker_limit_date == daily_limit_date:
+                    return
+
+                # Grace period: don't re-alert within 1 hour
+                if self._last_circuit_breaker_alert:
+                    elapsed = (datetime.now() - self._last_circuit_breaker_alert).total_seconds() / 3600
+                    if elapsed < MONITORING_ALERT_GRACE_PERIOD_HOURS:
+                        return
+
+                message = (
+                    f"🚨 CIRCUIT BREAKER STUCK\n\n"
+                    f"Daily limit hit on {daily_limit_date}\n"
+                    f"Stuck for {days_stuck} day(s)!\n\n"
+                    f"Bot is NOT trading.\n\n"
+                    f"Reset via:\n"
+                    f"curl -X POST http://localhost:8001/api/risk/reset"
+                )
+
+                logger.warning(f"Circuit breaker stuck since {daily_limit_date} ({days_stuck} days)")
+                self.send_sms(message, force=True, sms_type="alert")
+
+                # Update state and persist
+                self._circuit_breaker_alert_sent = True
+                self._circuit_breaker_limit_date = daily_limit_date
+                self._last_circuit_breaker_alert = datetime.now()
+                self._save_monitoring_state()
+
+        except Exception as e:
+            logger.debug(f"Failed to check circuit breaker age: {e}")
+
+    def check_zero_fills(self, stats: Dict[str, Any]) -> None:
+        """
+        Check if the bot has had zero fills for an extended period.
+
+        Phase 2 improvements:
+        - Threshold changed from 24h to 12h (faster detection)
+        - Persistent state (survives restarts)
+        - 1-hour grace period to prevent restart spam
+        - State saved immediately when zero fills period starts
+        """
+        try:
+            response = requests.get(f"{self.config.bot_api_url}/health", timeout=5)
+            if response.status_code != 200:
+                return
+
+            health = response.json()
+            grid_quality = health.get('grid_quality', {})
+
+            if not grid_quality:
+                return
+
+            # Check if ALL symbols have zero fills in 24h
+            total_fills_24h = sum(
+                metrics.get('fills_24h', 0)
+                for metrics in grid_quality.values()
+            )
+
+            if total_fills_24h == 0:
+                # Track how long we've seen zero fills
+                if self._zero_fills_since is None:
+                    self._zero_fills_since = datetime.now()
+                    logger.info("Zero fills period started - timer begins")
+                    self._save_monitoring_state()  # Persist immediately
+                    return
+
+                hours_without_fills = (datetime.now() - self._zero_fills_since).total_seconds() / 3600
+
+                # Alert if no fills for more than ZERO_FILLS_THRESHOLD_HOURS (12h)
+                if hours_without_fills >= ZERO_FILLS_THRESHOLD_HOURS:
+                    # Check if already alerted
+                    if self._zero_fills_alert_sent:
+                        # Grace period: don't re-alert within 1 hour
+                        if self._last_zero_fills_alert:
+                            elapsed = (datetime.now() - self._last_zero_fills_alert).total_seconds() / 3600
+                            if elapsed < MONITORING_ALERT_GRACE_PERIOD_HOURS:
+                                return
+
+                    symbols_list = ', '.join(grid_quality.keys())
+                    message = (
+                        f"⚠️ ZERO FILLS ALERT\n\n"
+                        f"No trades for {hours_without_fills:.1f} hours!\n\n"
+                        f"Symbols: {symbols_list}\n\n"
+                        f"Possible causes:\n"
+                        f"- Circuit breaker active\n"
+                        f"- Grid misaligned with price\n"
+                        f"- Stream disconnected\n"
+                        f"- Very low volatility"
+                    )
+
+                    logger.warning(f"Zero fills for {hours_without_fills:.1f} hours")
+                    self.send_sms(message, sms_type="alert")
+
+                    # Update state and persist
+                    self._zero_fills_alert_sent = True
+                    self._last_zero_fills_alert = datetime.now()
+                    self._save_monitoring_state()
+            else:
+                # Reset tracking if we have fills (only save if state changed)
+                if self._zero_fills_since is not None or self._zero_fills_alert_sent:
+                    logger.info("Fills detected - resetting zero fills tracking")
+                    self._zero_fills_since = None
+                    self._zero_fills_alert_sent = False
+                    self._last_zero_fills_alert = None
+                    self._save_monitoring_state()
+
+        except Exception as e:
+            logger.debug(f"Failed to check zero fills: {e}")
+
     def initialize_starting_equity(self, stats: Dict[str, Any]) -> None:
         """Initialize starting equity from stats or risk data."""
         if self.starting_equity is None:
@@ -879,6 +1124,8 @@ class NotificationService:
                     self.check_daily_summary(stats)
                     self.check_stale_data(stats)
                     self.check_grid_quality(stats)  # Grid quality monitoring (Phase 4)
+                    self.check_circuit_breaker_age(stats)  # Stuck circuit breaker (Phase 5)
+                    self.check_zero_fills(stats)  # Zero fills alert (Phase 5)
 
                 # Retry any queued SMS and process pending alerts (every cycle)
                 if self.config.is_configured():
