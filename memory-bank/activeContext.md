@@ -5,61 +5,64 @@
 - **[2026-01-22] DECISION: HOLD AVAX** — Analysis complete. Paper bot proves AVAX outperforms SOL 3.3x. Issue is timing, not coin. Do NOT switch.
 
 ## Now
-- [2026-01-26 AM] **PHASE 1-5 IMPROVEMENTS DEPLOYED** - Major protection improvements aligned with paper bot thresholds. Bot restarted with new config.
-- [2026-01-26 AM] **PERFORMANCE** - Equity $1,812.15 (-9.4% from $2K). AVAX unrealized -$81 (-8.2%). 5-day losing streak ended with +$4.74 today.
-- [2026-01-26 AM] **AVAX EPISODE** - 238 hours (10 days) in inventory episode. Orchestrator in GRID_REDUCED mode.
+- [2026-01-27 PM] **DECISION: MONITOR & WAIT** - Phase 1 complete (100%), Issue #5 complete, Phase 6 verified. All critical monitoring layers active. Focus on AVAX review (Jan 29) and system performance.
+- [2026-01-27 PM] **Issue #5 Complete** - pytest verified working! All 101 tests passing (grid matching, risk overlay, fill detection).
+- [2026-01-27 PM] **Phase 1 Complete (100%)** - All critical issues fixed! Circuit breaker age ✓, Error rate monitoring ✓, Zero fills alert ✓, State files verified ✓.
+- [2026-01-27 PM] **Phase 6 Complete** - Error rate monitoring implemented and tested. Catches silent failures (10+ errors/hour triggers SMS alert).
+- [2026-01-26 PM] **ALL FEATURES VERIFIED & COMMITTED** - Phase 1-5 + buy throttles + recovery trailing all deployed and verified working.
+- [2026-01-26 PM] **BUY THROTTLE RESET** - 24h window rolled over, both AVAX and LTC now eligible for buys (0 fills in last 24h).
 
-## System Health (LIVE Instance) — Updated Jan 26, 2026 @ 8:54 AM EST
+## System Health (LIVE Instance) — Updated Jan 26, 2026 @ 3:30 PM EST
 - **Bot**: Healthy, NORMAL mode, port 8001
-- **Stream**: Healthy (88s since last bar)
-- **Equity**: $1,812.15
-- **Daily P/L**: +$3.71 (+0.21%)
-- **Unrealized P/L**: **-$80** (AVAX -$81, LTC +$1)
-- **AVAX Position**: 77.90 qty @ $12.72 avg (current $11.68)
-- **Breakeven Target**: $12.72 (+8.9% needed)
-- **Risk Overlay**: NORMAL (20+ hours)
-- **Orchestrator**: AVAX grid_reduced (238h episode), LTC grid_full, DOGE grid_full
+- **Position Value**: $959.59
+- **Unrealized P/L**: **-$65.52** (AVAX -$66.79, LTC +$1.27)
+- **AVAX Position**: 77.90 qty @ $12.72 avg (current $11.86)
+- **LTC Position**: 0.51 qty @ $67.21 avg (current $69.70)
+- **Breakeven Target**: $12.72 (+7.2% needed)
+- **Risk Overlay**: NORMAL
+- **Orchestrator**: AVAX grid_reduced (10 days episode), LTC grid_full
 
 ## Key Metrics (Jan 26, 2026 - LIVE Instance)
 | Metric | Value |
 |--------|-------|
-| **Equity** | $1,812.15 |
-| **Starting Capital** | $2,000.00 |
-| **Total Return** | **-$187.85 (-9.4%)** |
-| **Grid Profit** | +$812.15 (+81.2% since Jan 6) |
-| **AVAX Position** | 77.90 qty @ $12.72 avg |
-| **AVAX Unrealized** | -$80.99 (-8.2%) |
-| **Breakeven Price** | $12.72 (+8.9% from $11.68) |
+| **Position Value** | $959.59 |
+| **AVAX Market Value** | $923.88 |
+| **LTC Market Value** | $35.70 |
+| **AVAX Unrealized** | -$66.79 (-6.7%) |
+| **LTC Unrealized** | +$1.27 (+3.7%) |
+| **Breakeven Price** | $12.72 (+7.2% from $11.86) |
 
-## New Protections Deployed (Jan 26, 2026)
+## All Protections Active (Jan 27, 2026)
 
-### Phase 1: Config Alignment (LIVE with PAPER)
-| Setting | Old | New |
-|---------|-----|-----|
-| GRID_REDUCED_ENTER_PCT | 85% | **70%** |
-| DEFENSIVE_INVENTORY_PCT | 130% | **110%** |
-| PRICE_DROP_LOOKBACK_MINUTES | 30 | **60** |
-| PRICE_DROP_THRESHOLD_PCT | -8% | **-6%** |
+### Phase 1-5 (Deployed Jan 26 AM)
+- ✓ Config aligned with PAPER thresholds (GRID_REDUCED @ 70%, DEFENSIVE @ 110%)
+- ✓ Graduated loss response (CAUTION @ 2%, DEFENSIVE @ 3.5%)
+- ✓ SmartGrid enforcement enabled
+- ✓ Grid quality in /health endpoint
+- ✓ Escalation-based drawdown alerts
+- ✓ Circuit breaker age monitoring (alerts if stuck >24h)
+- ✓ Zero fills detection (alerts if no trades >12h)
 
-### Phase 2: Graduated Loss Response
-- **CAUTION** @ 2% daily loss → 50% size reduction
-- **DEFENSIVE** @ 3.5% daily loss → block all buys
-- **HALT** @ 5% daily loss → circuit breaker (existing)
-- Hysteresis: recover when < 1.5% loss
+### Phase 6: Error Rate Monitoring (Deployed Jan 27 PM)
+- ✓ Parses bot log every 60s for ERROR/CRITICAL entries
+- ✓ Alerts if >= 10 errors in 1-hour rolling window
+- ✓ 2-hour grace period prevents SMS spam
+- ✓ State persists across restarts
+- ✓ Shows error sources + samples in alert
+- ✓ Auto-clears when error rate normalizes
 
-### Phase 3: SmartGrid Enforcement
-- `SMART_GRID_ENFORCE = True` - now executes drift-based rebalancing
-- Safety gates still apply (overlay NORMAL, not DEFENSIVE)
-- 60-min cooldown between rebalances
+### Feature A: 24-Hour Buy Throttles (Deployed Jan 26 PM)
+| Symbol | 24h Fills | 24h Notional | Status |
+|--------|-----------|--------------|--------|
+| AVAX/USD | 0/6 | $0/$250 | ✓ OK |
+| LTC/USD | 0/6 | $0/$250 | ✓ OK |
 
-### Phase 4: Grid Quality Monitoring
-- `/health` now includes `grid_quality` metrics per symbol
-- Tracks: fills_last_hour, expected_fills_per_hour, fill_rate_pct, avg_fill_latency_ms
-- Notifier alerts when fill rate < 50%
-
-### Phase 5: Alert Improvements
-- Drawdown alerts now escalation-based (fires on each 1% increase)
-- sms_queue cleanup added to cleanup_db.py
+### Feature B: Recovery Trailing Profit Trim (Deployed PM)
+- Trigger: +2.5% unrealized P/L when inventory ≥ 100%
+- Trail gap: 0.5%
+- Sell portion: 40%
+- Cooldown: 90 minutes
+- Status: Ready (waiting for trigger conditions)
 
 ## Configuration (Jan 26, 2026 - LIVE Instance)
 | Setting | Value |

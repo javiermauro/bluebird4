@@ -3913,6 +3913,13 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                 position_qty = float(current_positions[symbol].qty)
                 position_data = current_positions[symbol]
 
+            # Extract position metrics for downstream use (orchestrator, recovery trailing, etc.)
+            avg_entry_price = None
+            unrealized_pnl_pct = None
+            if position_data:
+                avg_entry_price = float(position_data.avg_entry_price) if hasattr(position_data, 'avg_entry_price') else None
+                unrealized_pnl_pct = float(position_data.unrealized_plpc) if hasattr(position_data, 'unrealized_plpc') else None
+
             # === WINDFALL PROFIT-TAKING CHECK ===
             # Check if any position qualifies for windfall profit capture
             windfall_executed = None
@@ -4085,13 +4092,6 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                     orch_allow_buy = True  # Default: allow
 
                     if bot.orchestrator.enabled and not stop_loss_executed:
-                        # Extract P/L data from position (same pattern as windfall block)
-                        avg_entry_price = None
-                        unrealized_pnl_pct = None
-                        if position_data:
-                            avg_entry_price = float(position_data.avg_entry_price) if hasattr(position_data, 'avg_entry_price') else None
-                            unrealized_pnl_pct = float(position_data.unrealized_plpc) if hasattr(position_data, 'unrealized_plpc') else None
-
                         # Use bot.config.GRID_CONFIGS (NOT Config import)
                         grid_configs = getattr(bot.config, "GRID_CONFIGS", DEFAULT_GRID_CONFIGS)
                         investment_ratio = grid_configs.get(symbol, {}).get("investment_ratio", 0.25)
@@ -4163,7 +4163,7 @@ async def run_grid_bot(broadcast_update, broadcast_log):
                         symbol=symbol,
                         current_price=current_price,
                         position_qty=position_qty,
-                        avg_entry_price=position_avg_entry,
+                        avg_entry_price=avg_entry_price,
                         inventory_pct=inv_pct / 100.0  # Convert from % to decimal
                     )
 

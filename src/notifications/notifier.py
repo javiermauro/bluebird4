@@ -23,7 +23,7 @@ import requests
 import json
 import platform
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List
 
 # Disable macOS App Nap to prevent the process from being suspended
 # This is critical for long-running background services
@@ -75,6 +75,8 @@ MONITORING_STATE_FILE = os.path.join(STATE_DIR, "monitoring-state.json")
 CIRCUIT_BREAKER_AGE_DAYS = 1
 ZERO_FILLS_THRESHOLD_HOURS = 12  # Changed from 24h
 MONITORING_ALERT_GRACE_PERIOD_HOURS = 1  # Prevent restart spam
+ERROR_RATE_THRESHOLD_PER_HOUR = 10  # Alert if >= 10 errors/hour
+ERROR_RATE_GRACE_PERIOD_HOURS = 2    # 2 hours between repeat alerts
 
 # Minimum time between startup SMS notifications (in seconds)
 # Prevents SMS spam when launchd restarts the service frequently
@@ -150,6 +152,12 @@ class NotificationService:
         self._zero_fills_since: Optional[datetime] = None
         self._zero_fills_alert_sent = False
         self._last_zero_fills_alert: Optional[datetime] = None
+
+        # Error rate monitoring (Phase 6)
+        self._error_rate_alert_sent = False
+        self._last_error_rate_alert: Optional[datetime] = None
+        self._error_window: List[Dict[str, str]] = []
+
         self.MONITORING_STATE_FILE = MONITORING_STATE_FILE
 
         logger.info(f"Loaded {len(self.last_trade_ids)} notified trade IDs from database")
@@ -225,6 +233,7 @@ class NotificationService:
         State includes:
         - Circuit breaker alert status and limit date
         - Zero fills tracking and alert status
+        - Error rate monitoring and alert status
         - Last alert timestamps for grace period
         """
         state = safe_read_json(self.MONITORING_STATE_FILE, default={})
@@ -240,6 +249,15 @@ class NotificationService:
         self._zero_fills_alert_sent = zf.get('alert_sent', False)
         self._zero_fills_since = self._parse_timestamp(zf.get('zero_fills_since'))
         self._last_zero_fills_alert = self._parse_timestamp(zf.get('last_alert_time'))
+
+        # Error rate state
+        er = state.get('error_rate', {})
+        self._error_rate_alert_sent = er.get('alert_sent', False)
+        self._last_error_rate_alert = self._parse_timestamp(er.get('last_alert_time'))
+        self._error_window = er.get('error_window', [])
+
+        if self._error_rate_alert_sent:
+            logger.info(f"Error rate alert active: {len(self._error_window)} errors in window")
 
         if any([self._circuit_breaker_alert_sent, self._zero_fills_alert_sent]):
             logger.info(
@@ -264,6 +282,11 @@ class NotificationService:
                 'alert_sent': self._zero_fills_alert_sent,
                 'zero_fills_since': self._zero_fills_since.isoformat() if self._zero_fills_since else None,
                 'last_alert_time': self._last_zero_fills_alert.isoformat() if self._last_zero_fills_alert else None
+            },
+            'error_rate': {
+                'alert_sent': self._error_rate_alert_sent,
+                'last_alert_time': self._last_error_rate_alert.isoformat() if self._last_error_rate_alert else None,
+                'error_window': self._error_window[:100]  # Cap at 100
             },
             'saved_at': datetime.now().isoformat()
         }
@@ -1048,6 +1071,87 @@ class NotificationService:
         except Exception as e:
             logger.debug(f"Failed to check zero fills: {e}")
 
+    def check_error_rate(self) -> None:
+        """
+        Check if error rate exceeds threshold in 1-hour window.
+
+        Phase 6: Error rate monitoring
+        - Parse bot log for ERROR-level entries
+        - Alert if >= 10 errors in rolling 1-hour window
+        - 2-hour grace period prevents alert spam
+        - Persistent state survives restarts
+
+        Catches silent failures like NameError bug (2,254 occurrences).
+        """
+        try:
+            from pathlib import Path
+            from src.utils.log_parser import parse_log_errors
+
+            bot_log = Path("/tmp/bluebird-live-bot.log")
+
+            if not bot_log.exists():
+                return
+
+            # Parse errors from last hour
+            one_hour_ago = datetime.now() - timedelta(hours=1)
+            errors = parse_log_errors(bot_log, since=one_hour_ago, max_errors=100)
+
+            error_count = len(errors)
+            threshold = ERROR_RATE_THRESHOLD_PER_HOUR
+
+            if error_count >= threshold:
+                # Check grace period (2 hours)
+                if self._error_rate_alert_sent and self._last_error_rate_alert:
+                    elapsed = (datetime.now() - self._last_error_rate_alert).total_seconds() / 3600
+                    if elapsed < ERROR_RATE_GRACE_PERIOD_HOURS:
+                        return
+
+                # Group by logger for alert context
+                logger_counts = {}
+                for err in errors:
+                    logger_name = err['logger']
+                    logger_counts[logger_name] = logger_counts.get(logger_name, 0) + 1
+
+                top_loggers = sorted(logger_counts.items(), key=lambda x: -x[1])[:3]
+                logger_summary = ', '.join([f"{name}:{count}" for name, count in top_loggers])
+
+                # Sample recent errors
+                recent_samples = '\n'.join([
+                    f"  {err['logger']}: {err['message'][:80]}"
+                    for err in errors[-3:]
+                ])
+
+                message = (
+                    f"🚨 HIGH ERROR RATE\n\n"
+                    f"{error_count} errors in last hour!\n"
+                    f"Threshold: {threshold}/hr\n\n"
+                    f"Top sources:\n{logger_summary}\n\n"
+                    f"Recent samples:\n{recent_samples}\n\n"
+                    f"Check logs:\n"
+                    f"tail -100 /tmp/bluebird-live-bot.log"
+                )
+
+                logger.warning(f"High error rate: {error_count} errors/hr")
+                self.send_sms(message, force=True, sms_type="alert")
+
+                # Persist state
+                self._error_rate_alert_sent = True
+                self._last_error_rate_alert = datetime.now()
+                self._error_window = errors
+                self._save_monitoring_state()
+
+            else:
+                # Clear alert when rate normalizes
+                if self._error_rate_alert_sent:
+                    logger.info(f"Error rate normalized: {error_count}/hr")
+                    self._error_rate_alert_sent = False
+                    self._last_error_rate_alert = None
+                    self._error_window = []
+                    self._save_monitoring_state()
+
+        except Exception as e:
+            logger.debug(f"Failed to check error rate: {e}")
+
     def initialize_starting_equity(self, stats: Dict[str, Any]) -> None:
         """Initialize starting equity from stats or risk data."""
         if self.starting_equity is None:
@@ -1126,6 +1230,7 @@ class NotificationService:
                     self.check_grid_quality(stats)  # Grid quality monitoring (Phase 4)
                     self.check_circuit_breaker_age(stats)  # Stuck circuit breaker (Phase 5)
                     self.check_zero_fills(stats)  # Zero fills alert (Phase 5)
+                    self.check_error_rate()  # Error rate monitoring (Phase 6)
 
                 # Retry any queued SMS and process pending alerts (every cycle)
                 if self.config.is_configured():
